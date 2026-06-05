@@ -314,8 +314,48 @@ pub(super) fn render_panes(
                 &app.palette,
                 app.host_terminal_theme,
             );
+            render_copy_mode_easymotion_labels(app, frame, info);
             render_copy_mode_cursor(app, frame, info);
         }
+    }
+}
+
+fn render_copy_mode_easymotion_labels(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
+    if app.mode != Mode::Copy {
+        return;
+    }
+    let Some(copy_mode) = app.copy_mode else {
+        return;
+    };
+    if copy_mode.pane_id != info.id {
+        return;
+    }
+    let Some(easymotion) = copy_mode.easymotion else {
+        return;
+    };
+
+    let style = Style::default()
+        .fg(panel_contrast_fg(&app.palette))
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let buf = frame.buffer_mut();
+
+    for target in easymotion
+        .labels
+        .iter()
+        .take(usize::from(easymotion.label_count))
+        .flatten()
+    {
+        if target.row >= info.inner_rect.height || target.col >= info.inner_rect.width {
+            continue;
+        }
+
+        let x = info.inner_rect.x + target.col;
+        let y = info.inner_rect.y + target.row;
+        let label = target.label.to_string();
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(&label);
+        cell.set_style(style);
     }
 }
 
@@ -508,6 +548,7 @@ fn render_empty(app: &AppState, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::{CopyModeState, EasyMotionMatch, EasyMotionState};
     use crate::layout::PaneId;
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
@@ -730,6 +771,50 @@ mod tests {
         assert_eq!(second.add_modifier, expected_style.add_modifier);
         assert_eq!(third.add_modifier, expected_style.add_modifier);
         assert!(!second.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn copy_mode_easymotion_labels_render_on_match_cells() {
+        let pane_id = PaneId::from_raw(1);
+        let mut easymotion = EasyMotionState::new();
+        easymotion.query = [Some('t'), Some('h')];
+        easymotion.labels[0] = Some(EasyMotionMatch {
+            label: 'f',
+            row: 0,
+            col: 2,
+        });
+        easymotion.label_count = 1;
+
+        let mut app = AppState::test_new();
+        app.mode = Mode::Copy;
+        app.copy_mode = Some(CopyModeState {
+            pane_id,
+            cursor_row: 0,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+            easymotion: Some(easymotion),
+        });
+
+        let info = PaneInfo {
+            id: pane_id,
+            rect: Rect::new(0, 0, 5, 1),
+            inner_rect: Rect::new(0, 0, 5, 1),
+            scrollbar_rect: None,
+            is_focused: true,
+        };
+        let backend = ratatui::backend::TestBackend::new(5, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_copy_mode_easymotion_labels(&app, frame, &info))
+            .unwrap();
+
+        assert_eq!(terminal.backend().buffer()[(2, 0)].symbol(), "f");
+        assert_eq!(
+            terminal.backend().buffer()[(2, 0)].style().bg,
+            Some(app.palette.accent)
+        );
     }
 
     #[test]

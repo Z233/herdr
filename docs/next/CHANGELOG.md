@@ -13,6 +13,7 @@
 - Added directional pane opening at `prefix+w+h/j/k/l` for opening a new pane left/down/up/right of the focused pane.
 - Added an in-app workspace picker at `prefix+w+w` with fuzzy name search and a focused-pane preview for the selected workspace.
 - Added `ctrl+tab` as an MRU quick workspace switcher with release-to-select, expandable tab rows, focused-pane previews, and optional in-overlay search.
+- Added EasyMotion-style copy-mode jumps: press `s`, type two target characters, then press a visible label to jump the cursor to that match.
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 
 ## [0.6.8] - 2026-06-04

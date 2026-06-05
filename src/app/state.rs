@@ -871,6 +871,60 @@ pub(crate) struct WorkspacePickerState {
     pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
+pub(crate) const EASYMOTION_LABELS: &str = "fjdkslgha;rueiwotyqpvbcnxmzFJDKSLGHARUEIWOTYQPVBCNXMZ";
+pub(crate) const EASYMOTION_MAX_MATCHES: usize = 52;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EasyMotionMatch {
+    pub label: char,
+    pub row: u16,
+    pub col: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EasyMotionState {
+    pub query: [Option<char>; 2],
+    pub labels: [Option<EasyMotionMatch>; EASYMOTION_MAX_MATCHES],
+    pub label_count: u8,
+    pub case_sensitive: bool,
+}
+
+impl EasyMotionState {
+    pub(crate) fn new() -> Self {
+        Self {
+            query: [None, None],
+            labels: [None; EASYMOTION_MAX_MATCHES],
+            label_count: 0,
+            case_sensitive: false,
+        }
+    }
+
+    pub(crate) fn query_len(&self) -> usize {
+        self.query.iter().filter(|ch| ch.is_some()).count()
+    }
+
+    pub(crate) fn query_text(&self) -> String {
+        self.query.iter().filter_map(|ch| *ch).collect()
+    }
+
+    pub(crate) fn target(&self) -> Option<(char, char)> {
+        Some((self.query[0]?, self.query[1]?))
+    }
+
+    pub(crate) fn push_query_char(&mut self, ch: char) {
+        let idx = self.query_len();
+        if idx < self.query.len() {
+            self.query[idx] = Some(ch);
+        }
+    }
+}
+
+impl Default for EasyMotionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CopyModeState {
     pub pane_id: PaneId,
@@ -878,6 +932,7 @@ pub(crate) struct CopyModeState {
     pub cursor_col: u16,
     pub entry_offset_from_bottom: usize,
     pub selection: Option<CopyModeSelection>,
+    pub easymotion: Option<EasyMotionState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

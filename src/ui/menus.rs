@@ -70,26 +70,49 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
         .bg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
 
-    let select = if app
-        .copy_mode
-        .is_some_and(|copy_mode| copy_mode.selection.is_some())
-    {
-        "selecting"
+    let easymotion = app.copy_mode.and_then(|copy_mode| copy_mode.easymotion);
+    let line = if let Some(easymotion) = easymotion {
+        let query = easymotion.query_text();
+        let stage = match easymotion.query_len() {
+            0 => "target 1",
+            1 => "target 2",
+            _ if easymotion.label_count == 0 => "no matches",
+            _ => "label",
+        };
+        Line::from(vec![
+            Span::styled(" EASY ", mode_style),
+            Span::raw(" "),
+            Span::styled(stage, key),
+            Span::styled(" jump  ", dim),
+            Span::styled(query, key),
+            Span::styled(" query  ", dim),
+            Span::styled("q/esc", key),
+            Span::styled(" cancel", dim),
+        ])
     } else {
-        "select"
+        let select = if app
+            .copy_mode
+            .is_some_and(|copy_mode| copy_mode.selection.is_some())
+        {
+            "selecting"
+        } else {
+            "select"
+        };
+        Line::from(vec![
+            Span::styled(" COPY ", mode_style),
+            Span::raw(" "),
+            Span::styled("h/j/k/l w/b/e { }", key),
+            Span::styled(" move  ", dim),
+            Span::styled("s", key),
+            Span::styled(" jump  ", dim),
+            Span::styled("v/space", key),
+            Span::styled(format!(" {select}  "), dim),
+            Span::styled("y/enter", key),
+            Span::styled(" copy  ", dim),
+            Span::styled("q/esc", key),
+            Span::styled(" exit", dim),
+        ])
     };
-    let line = Line::from(vec![
-        Span::styled(" COPY ", mode_style),
-        Span::raw(" "),
-        Span::styled("h/j/k/l w/b/e { }", key),
-        Span::styled(" move  ", dim),
-        Span::styled("v/space", key),
-        Span::styled(format!(" {select}  "), dim),
-        Span::styled("y/enter", key),
-        Span::styled(" copy  ", dim),
-        Span::styled("q/esc", key),
-        Span::styled(" exit", dim),
-    ]);
 
     let overlay_y = area.y + area.height.saturating_sub(1);
     let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);

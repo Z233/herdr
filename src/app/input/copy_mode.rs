@@ -3,7 +3,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{
-        state::{CopyModeSelection, CopyModeState},
+        state::{
+            CopyModeSelection, CopyModeState, EasyMotionMatch, EasyMotionState, EASYMOTION_LABELS,
+            EASYMOTION_MAX_MATCHES,
+        },
         App, AppState, Mode,
     },
     input::TerminalKey,
@@ -72,6 +75,7 @@ impl AppState {
             cursor_col: cursor.1.min(info.inner_rect.width.saturating_sub(1)),
             entry_offset_from_bottom,
             selection: None,
+            easymotion: None,
         });
         self.mode = Mode::Copy;
     }
@@ -81,6 +85,14 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
         key: TerminalKey,
     ) {
+        if self
+            .copy_mode
+            .is_some_and(|copy_mode| copy_mode.easymotion.is_some())
+        {
+            self.handle_copy_mode_easymotion_key(terminal_runtimes, key);
+            return;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.exit_copy_mode(terminal_runtimes, false);
@@ -143,6 +155,7 @@ impl AppState {
             'y' => self.exit_copy_mode(terminal_runtimes, true),
             'v' | ' ' => self.begin_copy_mode_selection(terminal_runtimes),
             'V' => self.select_copy_mode_line(terminal_runtimes),
+            's' => self.begin_copy_mode_easymotion(),
             'h' => self.move_copy_cursor(terminal_runtimes, 0, -1),
             'j' => self.move_copy_cursor(terminal_runtimes, 1, 0),
             'k' => self.move_copy_cursor(terminal_runtimes, -1, 0),
@@ -159,6 +172,111 @@ impl AppState {
             '}' => self.copy_mode_paragraph(terminal_runtimes, 1),
             _ => {}
         }
+    }
+
+    fn begin_copy_mode_easymotion(&mut self) {
+        let Some(mut copy_mode) = self.copy_mode else {
+            return;
+        };
+        copy_mode.easymotion = Some(EasyMotionState::new());
+        self.copy_mode = Some(copy_mode);
+    }
+
+    fn cancel_copy_mode_easymotion(&mut self) {
+        let Some(mut copy_mode) = self.copy_mode else {
+            return;
+        };
+        copy_mode.easymotion = None;
+        self.copy_mode = Some(copy_mode);
+    }
+
+    fn handle_copy_mode_easymotion_key(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        key: TerminalKey,
+    ) {
+        if key.code == KeyCode::Esc {
+            self.cancel_copy_mode_easymotion();
+            return;
+        }
+
+        let Some(ch) = copy_mode_command_char(key) else {
+            return;
+        };
+        if ch == 'q' {
+            self.cancel_copy_mode_easymotion();
+            return;
+        }
+
+        let Some(mut copy_mode) = self.copy_mode else {
+            return;
+        };
+        let Some(mut easymotion) = copy_mode.easymotion else {
+            return;
+        };
+
+        if easymotion.target().is_some() {
+            if let Some(target) = easymotion
+                .labels
+                .iter()
+                .take(usize::from(easymotion.label_count))
+                .flatten()
+                .find(|target| target.label == ch)
+                .copied()
+            {
+                copy_mode.cursor_row = target.row;
+                copy_mode.cursor_col = target.col;
+                copy_mode.easymotion = None;
+                self.copy_mode = Some(copy_mode);
+                self.sync_copy_mode_selection(terminal_runtimes);
+            }
+            return;
+        }
+
+        easymotion.push_query_char(ch);
+        let query_complete = easymotion.target().is_some();
+        copy_mode.easymotion = Some(easymotion);
+        self.copy_mode = Some(copy_mode);
+
+        if query_complete {
+            self.rebuild_copy_mode_easymotion_matches(terminal_runtimes);
+        }
+    }
+
+    fn rebuild_copy_mode_easymotion_matches(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) {
+        let Some(mut copy_mode) = self.copy_mode else {
+            return;
+        };
+        let Some(mut easymotion) = copy_mode.easymotion else {
+            return;
+        };
+        let Some((first, second)) = easymotion.target() else {
+            return;
+        };
+        let Some(info) = self.pane_info_by_id(copy_mode.pane_id).cloned() else {
+            self.exit_copy_mode(terminal_runtimes, false);
+            return;
+        };
+
+        easymotion.labels = [None; EASYMOTION_MAX_MATCHES];
+        easymotion.label_count = 0;
+        easymotion.case_sensitive = easymotion_query_is_case_sensitive(first, second);
+
+        for row in 0..info.inner_rect.height {
+            let Some(text) = self.copy_mode_visible_row_text(terminal_runtimes, row) else {
+                continue;
+            };
+            append_easymotion_row_matches(&text, row, first, second, &mut easymotion);
+            if usize::from(easymotion.label_count) >= EASYMOTION_MAX_MATCHES {
+                break;
+            }
+        }
+
+        copy_mode.easymotion = Some(easymotion);
+        self.copy_mode = Some(copy_mode);
     }
 
     fn exit_copy_mode(&mut self, terminal_runtimes: &TerminalRuntimeRegistry, copy: bool) {
@@ -611,6 +729,56 @@ fn char_cell_width(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
 }
 
+fn append_easymotion_row_matches(
+    text: &str,
+    row: u16,
+    first: char,
+    second: char,
+    easymotion: &mut EasyMotionState,
+) {
+    let mut chars = text.chars().peekable();
+    let mut col = 0u16;
+
+    while let Some(ch) = chars.next() {
+        if usize::from(easymotion.label_count) >= EASYMOTION_MAX_MATCHES {
+            break;
+        }
+
+        if let Some(next_ch) = chars.peek().copied() {
+            let matches = easymotion_chars_equal(ch, first, easymotion.case_sensitive)
+                && easymotion_chars_equal(next_ch, second, easymotion.case_sensitive);
+            if matches {
+                let label_idx = usize::from(easymotion.label_count);
+                if let Some(label) = easymotion_label_at(label_idx) {
+                    easymotion.labels[label_idx] = Some(EasyMotionMatch { label, row, col });
+                    easymotion.label_count = easymotion.label_count.saturating_add(1);
+                }
+            }
+        }
+
+        col = col.saturating_add(char_cell_width(ch));
+    }
+}
+
+fn easymotion_label_at(index: usize) -> Option<char> {
+    if index >= EASYMOTION_MAX_MATCHES {
+        return None;
+    }
+    EASYMOTION_LABELS.chars().nth(index)
+}
+
+fn easymotion_query_is_case_sensitive(first: char, second: char) -> bool {
+    first.is_uppercase() || second.is_uppercase()
+}
+
+fn easymotion_chars_equal(actual: char, target: char, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        actual == target
+    } else {
+        actual.to_lowercase().eq(target.to_lowercase())
+    }
+}
+
 fn copy_mode_page_lines(height: u16, half_page: bool) -> usize {
     if height <= 2 {
         1
@@ -772,6 +940,175 @@ mod tests {
         let copy_mode = app.state.copy_mode.expect("copy mode");
         assert_eq!(app.state.mode, Mode::Copy);
         assert_eq!(copy_mode.cursor_col, 4);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_easymotion_labels_visible_matches_row_major() {
+        let (mut app, _) = app_with_copy_screen(b"the thing\r\nother th\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+
+        let easymotion = app
+            .state
+            .copy_mode
+            .and_then(|copy_mode| copy_mode.easymotion)
+            .expect("easymotion");
+        let labels = easymotion
+            .labels
+            .iter()
+            .take(usize::from(easymotion.label_count))
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(easymotion.query, [Some('t'), Some('h')]);
+        assert!(!easymotion.case_sensitive);
+        assert_eq!(
+            labels,
+            vec![
+                EasyMotionMatch {
+                    label: 'f',
+                    row: 0,
+                    col: 0
+                },
+                EasyMotionMatch {
+                    label: 'j',
+                    row: 0,
+                    col: 4
+                },
+                EasyMotionMatch {
+                    label: 'd',
+                    row: 1,
+                    col: 1
+                },
+                EasyMotionMatch {
+                    label: 'k',
+                    row: 1,
+                    col: 6
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_mode_easymotion_label_jumps_to_match_and_exits_submode() {
+        let (mut app, _) = app_with_copy_screen(b"xx th\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty()));
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode.cursor_row, 0);
+        assert_eq!(copy_mode.cursor_col, 3);
+        assert!(copy_mode.easymotion.is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_mode_easymotion_uses_smart_case() {
+        let (mut insensitive, _) = app_with_copy_screen(b"th TH Th\r\n");
+        insensitive
+            .state
+            .enter_copy_mode(&insensitive.terminal_runtimes);
+        insensitive
+            .handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        insensitive
+            .handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        insensitive
+            .handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+
+        let insensitive_motion = insensitive
+            .state
+            .copy_mode
+            .and_then(|copy_mode| copy_mode.easymotion)
+            .expect("easymotion");
+        assert!(!insensitive_motion.case_sensitive);
+        assert_eq!(insensitive_motion.label_count, 3);
+
+        let (mut sensitive, _) = app_with_copy_screen(b"th TH Th\r\n");
+        sensitive
+            .state
+            .enter_copy_mode(&sensitive.terminal_runtimes);
+        sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::SHIFT));
+        sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+
+        let sensitive_motion = sensitive
+            .state
+            .copy_mode
+            .and_then(|copy_mode| copy_mode.easymotion)
+            .expect("easymotion");
+        let first_label = sensitive_motion.labels[0].expect("first label");
+        assert!(sensitive_motion.case_sensitive);
+        assert_eq!(sensitive_motion.label_count, 1);
+        assert_eq!(first_label.col, 6);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_easymotion_q_cancels_without_moving_cursor() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 4;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode.cursor_row, 0);
+        assert_eq!(copy_mode.cursor_col, 4);
+        assert!(copy_mode.easymotion.is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_mode_easymotion_preserves_character_selection_anchor() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty()));
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        assert_eq!(copy_mode.selection, Some(CopyModeSelection::Character));
+        assert_eq!(copy_mode.cursor_row, 1);
+        assert_eq!(copy_mode.cursor_col, 2);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alpha\nbet");
+    }
+
+    #[test]
+    fn copy_mode_easymotion_truncates_labels_at_capacity() {
+        let mut easymotion = EasyMotionState::new();
+        easymotion.query = [Some('a'), Some('a')];
+        easymotion.case_sensitive = false;
+        append_easymotion_row_matches(&"a".repeat(80), 0, 'a', 'a', &mut easymotion);
+
+        assert_eq!(easymotion.label_count, EASYMOTION_MAX_MATCHES as u8);
+        assert_eq!(
+            easymotion.labels[EASYMOTION_MAX_MATCHES - 1]
+                .expect("last label")
+                .label,
+            'M'
+        );
     }
 
     #[tokio::test]
