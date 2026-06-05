@@ -757,6 +757,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    WorkspacePicker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -806,6 +807,38 @@ pub(crate) struct NavigatorState {
     pub search_focused: bool,
     pub state_filter: Option<NavigatorStateFilter>,
     pub expanded_workspaces: std::collections::HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspacePickerRow {
+    pub ws_idx: usize,
+    pub label: String,
+    pub meta: String,
+    pub is_current: bool,
+    pub pane_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspacePickerPreview {
+    Empty { message: String },
+    Content { pane_id: PaneId, text: String },
+}
+
+impl Default for WorkspacePickerPreview {
+    fn default() -> Self {
+        Self::Empty {
+            message: "select a workspace".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkspacePickerState {
+    pub query: String,
+    pub selected: usize,
+    pub scroll: usize,
+    pub preview: WorkspacePickerPreview,
+    pub preview_ws_idx: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1237,6 +1270,7 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
+    pub workspace_picker: WorkspacePickerState,
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
@@ -1551,6 +1585,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             navigator: NavigatorState::default(),
+            workspace_picker: WorkspacePickerState::default(),
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,

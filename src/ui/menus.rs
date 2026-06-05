@@ -50,7 +50,7 @@ pub(super) fn render_prefix_overlay(app: &AppState, frame: &mut Frame, area: Rec
         Span::styled(prefix, key),
         Span::styled(" send prefix  ", dim),
         Span::styled(workspace_picker, key),
-        Span::styled(" workspace nav  ", dim),
+        Span::styled(" workspace picker  ", dim),
         Span::styled(help, key),
         Span::styled(" keybinds", dim),
     ]);

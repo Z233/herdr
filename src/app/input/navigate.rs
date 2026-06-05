@@ -722,8 +722,7 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::WorkspacePicker => {
-            state.mobile_switcher_scroll = 0;
-            state.mode = Mode::Navigate;
+            state.open_workspace_picker_from(terminal_runtimes);
         }
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
@@ -992,6 +991,18 @@ mod tests {
         );
 
         assert_eq!(state.mode, Mode::Navigator);
+    }
+
+    #[test]
+    fn default_workspace_picker_key_opens_workspace_picker() {
+        let mut state = state_with_workspaces(&["test"]);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.mode, Mode::WorkspacePicker);
     }
 
     #[test]

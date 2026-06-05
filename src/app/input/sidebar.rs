@@ -341,6 +341,7 @@ impl AppState {
                 | Mode::Settings
                 | Mode::GlobalMenu
                 | Mode::KeybindHelp
+                | Mode::WorkspacePicker
         ) {
             Some(self.selected)
         } else {

@@ -283,6 +283,75 @@ pub(crate) fn handle_navigator_key(
     }
 }
 
+pub(crate) fn handle_workspace_picker_key(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    key: KeyEvent,
+) {
+    match key.code {
+        KeyCode::Esc => leave_modal(state),
+        KeyCode::Enter => {
+            state.accept_workspace_picker_selection_from(terminal_runtimes);
+        }
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => leave_modal(state),
+        KeyCode::Char('q')
+            if key.modifiers.is_empty() && state.workspace_picker.query.is_empty() =>
+        {
+            leave_modal(state);
+        }
+        KeyCode::Backspace => {
+            state.workspace_picker.query.pop();
+            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+        }
+        KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
+            state.workspace_picker.query.clear();
+            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+        }
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+        }
+        KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+        }
+        KeyCode::PageDown => {
+            state.move_workspace_picker_selection_from(
+                terminal_runtimes,
+                state.workspace_picker_body_rect().height.max(1) as isize,
+            );
+        }
+        KeyCode::PageUp => {
+            state.move_workspace_picker_selection_from(
+                terminal_runtimes,
+                -(state.workspace_picker_body_rect().height.max(1) as isize),
+            );
+        }
+        KeyCode::Home => {
+            state.workspace_picker.selected = 0;
+            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+        }
+        KeyCode::End => {
+            state.workspace_picker.selected = state
+                .workspace_picker_rows_from(terminal_runtimes)
+                .len()
+                .saturating_sub(1);
+            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+        }
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            state.workspace_picker.query.push(c);
+            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => state.scroll_keybind_help(-1),
@@ -873,6 +942,44 @@ mod tests {
                 .with_shifted_codepoint('?' as u32),
         );
 
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn workspace_picker_typing_filters_and_enter_switches_workspace() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_picker_from(&terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
+        );
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn workspace_picker_escape_closes_without_switching() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_picker_from(&terminal_runtimes);
+        state.move_workspace_picker_selection_from(&terminal_runtimes, 1);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.active, Some(0));
         assert_eq!(state.mode, Mode::Terminal);
     }
 

@@ -19,6 +19,7 @@ mod sidebar;
 mod status;
 mod tabs;
 mod widgets;
+mod workspace_picker;
 
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
@@ -55,6 +56,7 @@ use self::status::{
     toast_notification_rect,
 };
 use self::tabs::render_tab_bar;
+use self::workspace_picker::render_workspace_picker_overlay;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -402,6 +404,7 @@ pub fn render_with_runtime_registry(
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+        Mode::WorkspacePicker => render_workspace_picker_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
 }

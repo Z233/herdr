@@ -93,6 +93,7 @@ impl AppState {
                     | Mode::Resize
                     | Mode::GlobalMenu
                     | Mode::KeybindHelp
+                    | Mode::WorkspacePicker
             );
         let launcher = self.global_launcher_rect();
         let launcher_hit = launcher_enabled

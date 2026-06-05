@@ -9,6 +9,7 @@
 - Full-screen TUIs such as Neovim now receive resize-generated terminal responses after Herdr internal pane resizes, so grown panes redraw without waiting for extra input. (#471)
 
 ### Added
+- Added an in-app workspace picker at `prefix+w` with fuzzy name search and a focused-pane preview for the selected workspace.
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 
 ## [0.6.8] - 2026-06-04

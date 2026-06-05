@@ -13,7 +13,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::state::{
     text_matches_query, AppState, Mode, NavigatorRow, NavigatorStateFilter, NavigatorTarget,
-    PaneFocusTarget, ToastKind, ToastNotification, ToastTarget, ViewLayout,
+    PaneFocusTarget, ToastKind, ToastNotification, ToastTarget, ViewLayout, WorkspacePickerPreview,
+    WorkspacePickerRow,
 };
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
@@ -581,6 +582,222 @@ impl AppState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workspace picker operations
+// ---------------------------------------------------------------------------
+
+impl AppState {
+    #[cfg(test)]
+    pub(crate) fn open_workspace_picker(&mut self) {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        self.open_workspace_picker_from(&terminal_runtimes);
+    }
+
+    pub(crate) fn open_workspace_picker_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        self.workspace_picker.query.clear();
+        self.workspace_picker.scroll = 0;
+        self.mode = Mode::WorkspacePicker;
+
+        let target = self.active.unwrap_or(self.selected);
+        self.workspace_picker.selected = self
+            .workspace_picker_rows_from(terminal_runtimes)
+            .iter()
+            .position(|row| row.ws_idx == target)
+            .unwrap_or(0);
+        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_picker_preview_from(terminal_runtimes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_picker_rows(&self) -> Vec<WorkspacePickerRow> {
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        self.workspace_picker_rows_from(&terminal_runtimes)
+    }
+
+    pub(crate) fn workspace_picker_rows_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Vec<WorkspacePickerRow> {
+        let query = self.workspace_picker.query.trim();
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(ws_idx, ws)| {
+                let label = ws.display_name_from(&self.terminals, terminal_runtimes);
+                if !query.is_empty() && !workspace_picker_matches(query, &label) {
+                    return None;
+                }
+
+                let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
+                let mut meta = if pane_count == 1 {
+                    "1 pane".to_string()
+                } else {
+                    format!("{pane_count} panes")
+                };
+                let activity = workspace_activity_summary(ws, &self.terminals);
+                if !activity.is_empty() {
+                    meta.push_str(" · ");
+                    meta.push_str(&activity);
+                }
+
+                Some(WorkspacePickerRow {
+                    ws_idx,
+                    label,
+                    meta,
+                    is_current: self.active == Some(ws_idx),
+                    pane_count,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn workspace_picker_max_scroll_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        viewport: usize,
+    ) -> usize {
+        if viewport == 0 {
+            return 0;
+        }
+        self.workspace_picker_rows_from(terminal_runtimes)
+            .len()
+            .saturating_sub(viewport)
+    }
+
+    pub(crate) fn ensure_workspace_picker_selection_visible_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let viewport = self.workspace_picker_body_rect().height as usize;
+        if viewport == 0 {
+            self.workspace_picker.scroll = 0;
+            return;
+        }
+        let max_scroll = self.workspace_picker_max_scroll_from(terminal_runtimes, viewport);
+        if self.workspace_picker.selected < self.workspace_picker.scroll {
+            self.workspace_picker.scroll = self.workspace_picker.selected;
+        } else if self.workspace_picker.selected >= self.workspace_picker.scroll + viewport {
+            self.workspace_picker.scroll = self
+                .workspace_picker
+                .selected
+                .saturating_add(1)
+                .saturating_sub(viewport);
+        }
+        self.workspace_picker.scroll = self.workspace_picker.scroll.min(max_scroll);
+    }
+
+    pub(crate) fn clamp_workspace_picker_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let count = self.workspace_picker_rows_from(terminal_runtimes).len();
+        self.workspace_picker.selected =
+            self.workspace_picker.selected.min(count.saturating_sub(1));
+        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_picker_preview_from(terminal_runtimes);
+    }
+
+    pub(crate) fn move_workspace_picker_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        delta: isize,
+    ) {
+        let count = self.workspace_picker_rows_from(terminal_runtimes).len();
+        if count == 0 {
+            self.workspace_picker.selected = 0;
+            self.workspace_picker.scroll = 0;
+            self.refresh_workspace_picker_preview_from(terminal_runtimes);
+            return;
+        }
+
+        let current = self.workspace_picker.selected.min(count - 1) as isize;
+        self.workspace_picker.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_picker_preview_from(terminal_runtimes);
+    }
+
+    pub(crate) fn accept_workspace_picker_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> bool {
+        let Some(ws_idx) = self.selected_workspace_picker_ws_idx_from(terminal_runtimes) else {
+            return false;
+        };
+        if ws_idx >= self.workspaces.len() {
+            return false;
+        }
+
+        self.switch_workspace(ws_idx);
+        self.mode = Mode::Terminal;
+        true
+    }
+
+    pub(crate) fn refresh_workspace_picker_preview_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        let Some(ws_idx) = self.selected_workspace_picker_ws_idx_from(terminal_runtimes) else {
+            self.workspace_picker.preview_ws_idx = None;
+            self.workspace_picker.preview = WorkspacePickerPreview::Empty {
+                message: if self.workspaces.is_empty() {
+                    "no workspaces".to_string()
+                } else {
+                    "no matching workspaces".to_string()
+                },
+            };
+            return;
+        };
+
+        self.workspace_picker.preview_ws_idx = Some(ws_idx);
+        self.workspace_picker.preview =
+            self.workspace_picker_preview_for_workspace_from(terminal_runtimes, ws_idx);
+    }
+
+    fn selected_workspace_picker_ws_idx_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> Option<usize> {
+        self.workspace_picker_rows_from(terminal_runtimes)
+            .get(self.workspace_picker.selected)
+            .map(|row| row.ws_idx)
+    }
+
+    fn workspace_picker_preview_for_workspace_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        ws_idx: usize,
+    ) -> WorkspacePickerPreview {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return WorkspacePickerPreview::Empty {
+                message: "workspace unavailable".to_string(),
+            };
+        };
+        let Some(pane_id) = ws.focused_pane_id() else {
+            return WorkspacePickerPreview::Empty {
+                message: "no pane content".to_string(),
+            };
+        };
+
+        // Mirrors pane.read with ReadSource::Visible and ReadFormat::Ansi.
+        let Some(runtime) = self.focused_runtime_in_workspace(terminal_runtimes, ws_idx) else {
+            return WorkspacePickerPreview::Empty {
+                message: "no pane content".to_string(),
+            };
+        };
+        let text = runtime.visible_ansi();
+        if text.trim().is_empty() {
+            return WorkspacePickerPreview::Empty {
+                message: "no pane content".to_string(),
+            };
+        }
+
+        WorkspacePickerPreview::Content { pane_id, text }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavigatorQueryKind {
     Empty,
@@ -617,6 +834,17 @@ fn navigator_state_filter_matches(
 
 fn navigator_matches(query: &str, text: &str) -> bool {
     text_matches_query(query, text)
+}
+
+fn workspace_picker_matches(query: &str, text: &str) -> bool {
+    text_matches_query(query, text)
+        || query.split_whitespace().all(|needle| {
+            let mut chars = text.chars().flat_map(char::to_lowercase);
+            needle
+                .chars()
+                .flat_map(char::to_lowercase)
+                .all(|needle_ch| chars.any(|text_ch| text_ch == needle_ch))
+        })
 }
 
 fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
@@ -2899,6 +3127,66 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| !row.is_workspace && row.label.contains("weekly")));
+    }
+
+    #[test]
+    fn opening_workspace_picker_selects_active_workspace() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        state.active = Some(1);
+
+        state.open_workspace_picker();
+
+        assert_eq!(state.mode, Mode::WorkspacePicker);
+        assert_eq!(
+            state.workspace_picker_rows()[state.workspace_picker.selected].ws_idx,
+            1
+        );
+    }
+
+    #[test]
+    fn workspace_picker_filters_workspace_names_only() {
+        let mut state = app_with_workspaces(&["one", "issue"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(root).cloned().unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("weekly review".into());
+
+        state.open_workspace_picker();
+        state.workspace_picker.query = "weekly".into();
+        assert!(state.workspace_picker_rows().is_empty());
+
+        state.workspace_picker.query = "ie".into();
+        let rows = state.workspace_picker_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ws_idx, 1);
+    }
+
+    #[test]
+    fn workspace_picker_empty_state_has_placeholder_preview() {
+        let mut state = AppState::test_new();
+
+        state.open_workspace_picker();
+
+        assert_eq!(state.mode, Mode::WorkspacePicker);
+        assert!(matches!(
+            state.workspace_picker.preview,
+            WorkspacePickerPreview::Empty { ref message } if message == "no workspaces"
+        ));
+    }
+
+    #[test]
+    fn workspace_picker_preview_handles_missing_runtime() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        state.open_workspace_picker();
+
+        assert!(matches!(
+            state.workspace_picker.preview,
+            WorkspacePickerPreview::Empty { ref message } if message == "no pane content"
+        ));
     }
 
     #[test]

@@ -18,6 +18,13 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
+fn workspace_picker_list_width(width: u16) -> u16 {
+    if width < 48 {
+        return width;
+    }
+    (width / 3).clamp(24, 42).min(width.saturating_sub(1))
+}
+
 impl App {
     pub(super) fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.state.mode == Mode::ReleaseNotes {
@@ -192,6 +199,67 @@ impl App {
             return true;
         }
 
+        if self.state.mode == Mode::WorkspacePicker {
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(idx) = self.state.workspace_picker_row_index_at_from(
+                        &self.terminal_runtimes,
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        if self.state.workspace_picker.selected != idx {
+                            self.state.workspace_picker.selected = idx;
+                            self.state.ensure_workspace_picker_selection_visible_from(
+                                &self.terminal_runtimes,
+                            );
+                            self.state
+                                .refresh_workspace_picker_preview_from(&self.terminal_runtimes);
+                        }
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(idx) = self.state.workspace_picker_row_index_at_from(
+                        &self.terminal_runtimes,
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        self.state.workspace_picker.selected = idx;
+                        self.state
+                            .accept_workspace_picker_selection_from(&self.terminal_runtimes);
+                    } else if !self
+                        .state
+                        .workspace_picker_popup_contains(mouse.column, mouse.row)
+                    {
+                        leave_modal(&mut self.state);
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.state.workspace_picker.scroll =
+                        self.state.workspace_picker.scroll.saturating_sub(3);
+                    self.state.workspace_picker.selected = self.state.workspace_picker.scroll;
+                    self.state
+                        .clamp_workspace_picker_selection_from(&self.terminal_runtimes);
+                }
+                MouseEventKind::ScrollDown => {
+                    let viewport = self.state.workspace_picker_body_rect().height as usize;
+                    let max = self
+                        .state
+                        .workspace_picker_max_scroll_from(&self.terminal_runtimes, viewport);
+                    self.state.workspace_picker.scroll = self
+                        .state
+                        .workspace_picker
+                        .scroll
+                        .saturating_add(3)
+                        .min(max);
+                    self.state.workspace_picker.selected = self.state.workspace_picker.scroll;
+                    self.state
+                        .clamp_workspace_picker_selection_from(&self.terminal_runtimes);
+                }
+                _ => {}
+            }
+            return true;
+        }
+
         if self.state.mode == Mode::KeybindHelp {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left)
@@ -347,6 +415,98 @@ impl AppState {
     pub(crate) fn navigator_row_caret_at(&self, col: u16) -> bool {
         let body = self.navigator_body_rect();
         col <= body.x.saturating_add(3)
+    }
+
+    pub(crate) fn workspace_picker_popup_rect(&self) -> Rect {
+        let area = self.onboarding_full_area();
+        let margin_x = (area.width / 12).max(2);
+        let margin_y = (area.height / 9).max(1);
+        let width = area.width.saturating_sub(margin_x.saturating_mul(2));
+        let height = area.height.saturating_sub(margin_y.saturating_mul(2));
+        Rect::new(
+            area.x + margin_x,
+            area.y + margin_y,
+            width.max(4),
+            height.max(4),
+        )
+    }
+
+    pub(crate) fn workspace_picker_inner_rect(&self) -> Rect {
+        Block::default()
+            .borders(Borders::ALL)
+            .inner(self.workspace_picker_popup_rect())
+    }
+
+    pub(crate) fn workspace_picker_search_rect(&self) -> Rect {
+        let inner = self.workspace_picker_inner_rect();
+        Rect::new(inner.x, inner.y, inner.width, inner.height.min(1))
+    }
+
+    pub(crate) fn workspace_picker_content_rect(&self) -> Rect {
+        let inner = self.workspace_picker_inner_rect();
+        if inner.height <= 3 {
+            return Rect::default();
+        }
+        Rect::new(
+            inner.x,
+            inner.y + 2,
+            inner.width,
+            inner.height.saturating_sub(3),
+        )
+    }
+
+    pub(crate) fn workspace_picker_body_rect(&self) -> Rect {
+        let content = self.workspace_picker_content_rect();
+        let list_width = workspace_picker_list_width(content.width);
+        Rect::new(content.x, content.y, list_width, content.height)
+    }
+
+    pub(crate) fn workspace_picker_divider_rect(&self) -> Rect {
+        let content = self.workspace_picker_content_rect();
+        let list_width = workspace_picker_list_width(content.width);
+        if content.width <= list_width || content.height == 0 {
+            return Rect::default();
+        }
+        Rect::new(content.x + list_width, content.y, 1, content.height)
+    }
+
+    pub(crate) fn workspace_picker_preview_rect(&self) -> Rect {
+        let content = self.workspace_picker_content_rect();
+        let list_width = workspace_picker_list_width(content.width);
+        let x = content.x.saturating_add(list_width).saturating_add(1);
+        let width = content.width.saturating_sub(list_width).saturating_sub(1);
+        Rect::new(x, content.y, width, content.height)
+    }
+
+    pub(crate) fn workspace_picker_footer_rect(&self) -> Rect {
+        let inner = self.workspace_picker_inner_rect();
+        Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            inner.height.min(1),
+        )
+    }
+
+    pub(crate) fn workspace_picker_popup_contains(&self, col: u16, row: u16) -> bool {
+        rect_contains(self.workspace_picker_popup_rect(), col, row)
+    }
+
+    pub(crate) fn workspace_picker_row_index_at_from(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+        col: u16,
+        row: u16,
+    ) -> Option<usize> {
+        let body = self.workspace_picker_body_rect();
+        if !rect_contains(body, col, row) {
+            return None;
+        }
+        let idx = self
+            .workspace_picker
+            .scroll
+            .saturating_add(row.saturating_sub(body.y) as usize);
+        (idx < self.workspace_picker_rows_from(terminal_runtimes).len()).then_some(idx)
     }
 
     pub(super) fn onboarding_modal_inner(&self, popup_w: u16, popup_h: u16) -> Option<Rect> {
