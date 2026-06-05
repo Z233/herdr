@@ -6,6 +6,7 @@ use crossterm::event::{
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
+use crate::layout::{NavDirection, SplitPlacement};
 use ratatui::layout::Direction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +460,29 @@ impl AppState {
         terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
         direction: Direction,
     ) {
+        self.split_pane_with_placement(terminal_runtimes, direction, SplitPlacement::After);
+    }
+
+    pub(crate) fn split_pane_directional(
+        &mut self,
+        terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+        nav: NavDirection,
+    ) {
+        let (direction, placement) = match nav {
+            NavDirection::Left => (Direction::Horizontal, SplitPlacement::Before),
+            NavDirection::Right => (Direction::Horizontal, SplitPlacement::After),
+            NavDirection::Up => (Direction::Vertical, SplitPlacement::Before),
+            NavDirection::Down => (Direction::Vertical, SplitPlacement::After),
+        };
+        self.split_pane_with_placement(terminal_runtimes, direction, placement);
+    }
+
+    fn split_pane_with_placement(
+        &mut self,
+        terminal_runtimes: &mut crate::terminal::TerminalRuntimeRegistry,
+        direction: Direction,
+        placement: SplitPlacement,
+    ) {
         // Actual PTY spawning happens in Workspace::split_focused
         // which needs events channel — this is called from navigate_key
         // where we don't have async context, so the workspace handles it
@@ -483,15 +507,28 @@ impl AppState {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
                 return;
             };
-            if let Ok(new_pane) = ws.split_focused(
-                direction,
-                new_rows,
-                new_cols,
-                cwd,
-                self.pane_scrollback_limit_bytes,
-                self.host_terminal_theme,
-                crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
-            ) {
+            let split_result = match placement {
+                SplitPlacement::After => ws.split_focused(
+                    direction,
+                    new_rows,
+                    new_cols,
+                    cwd,
+                    self.pane_scrollback_limit_bytes,
+                    self.host_terminal_theme,
+                    crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
+                ),
+                SplitPlacement::Before => ws.split_focused_with_placement(
+                    direction,
+                    placement,
+                    new_rows,
+                    new_cols,
+                    cwd,
+                    self.pane_scrollback_limit_bytes,
+                    self.host_terminal_theme,
+                    crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
+                ),
+            };
+            if let Ok(new_pane) = split_result {
                 let new_id = new_pane.pane_id;
                 terminal_runtimes.insert(new_pane.terminal.id.clone(), new_pane.runtime);
                 self.remove_alias_shadowed_by_new_pane(new_id);

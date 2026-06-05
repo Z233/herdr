@@ -11,7 +11,7 @@ use ratatui::layout::Direction;
 
 use crate::{
     app::{
-        state::{AppState, Mode},
+        state::{AppState, Mode, PendingChordState},
         App,
     },
     input::TerminalKey,
@@ -38,15 +38,47 @@ impl App {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
-        if self.state.is_prefix_key(raw_key) {
+        if self.state.pending_chord.is_none() && self.state.is_prefix_key(raw_key) {
             if !self.pass_through_key_to_focused_pane(raw_key) {
                 leave_command_mode(&mut self.state);
             }
+            self.chord_deadline = None;
             return;
         }
 
         if key.code == KeyCode::Esc {
+            self.clear_pending_chord();
             leave_command_mode(&mut self.state);
+            return;
+        }
+
+        if let Some(target) = self.handle_prefix_chord_key(raw_key) {
+            match target {
+                PrefixBindingTarget::Action(action) => {
+                    if action == NavigateAction::EditScrollback {
+                        let previous_mode = self.state.mode;
+                        self.launch_focused_scrollback_editor();
+                        finish_action_context(
+                            &mut self.state,
+                            ActionContext::Prefix,
+                            previous_mode,
+                        );
+                    } else {
+                        execute_navigate_action_in_context(
+                            &mut self.state,
+                            &mut self.terminal_runtimes,
+                            action,
+                            ActionContext::Prefix,
+                        );
+                    }
+                    self.selection_autoscroll_deadline = None;
+                }
+                PrefixBindingTarget::CustomCommand(binding) => {
+                    self.launch_custom_command(binding, ActionContext::Prefix);
+                }
+                PrefixBindingTarget::Pending => {}
+                PrefixBindingTarget::NoMatch => leave_command_mode(&mut self.state),
+            }
             return;
         }
 
@@ -73,6 +105,42 @@ impl App {
         }
 
         leave_command_mode(&mut self.state);
+    }
+
+    fn handle_prefix_chord_key(&mut self, raw_key: TerminalKey) -> Option<PrefixBindingTarget> {
+        if self.state.keybinds.chord_timeout.is_zero() {
+            self.clear_pending_chord();
+            return None;
+        }
+
+        let had_pending = self.state.pending_chord.is_some();
+        let mut keys = self
+            .state
+            .pending_chord
+            .as_ref()
+            .map(|pending| pending.keys.clone())
+            .unwrap_or_default();
+        keys.push(raw_key);
+
+        let has_longer_match = prefix_sequence_has_longer_match(&self.state, &keys);
+        if has_longer_match {
+            self.state.pending_chord = Some(PendingChordState { keys });
+            self.chord_deadline =
+                Some(std::time::Instant::now() + self.state.keybinds.chord_timeout);
+            return Some(PrefixBindingTarget::Pending);
+        }
+
+        self.clear_pending_chord();
+        if let Some(target) = prefix_binding_target_for_sequence(&self.state, &keys) {
+            return Some(target);
+        }
+
+        had_pending.then_some(PrefixBindingTarget::NoMatch)
+    }
+
+    fn clear_pending_chord(&mut self) {
+        self.state.pending_chord = None;
+        self.chord_deadline = None;
     }
 
     pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
@@ -360,6 +428,132 @@ pub(crate) enum BindingDispatch {
     Prefix,
 }
 
+enum PrefixBindingTarget {
+    Action(NavigateAction),
+    CustomCommand(crate::config::CustomCommandKeybind),
+    Pending,
+    NoMatch,
+}
+
+fn prefix_binding_target_for_sequence(
+    state: &AppState,
+    keys: &[TerminalKey],
+) -> Option<PrefixBindingTarget> {
+    if keys.len() == 1 {
+        if let Some(action) = action_for_key(state, keys[0], BindingDispatch::Prefix) {
+            return Some(PrefixBindingTarget::Action(action));
+        }
+        if let Some(binding) = command_for_key(state, keys[0], BindingDispatch::Prefix) {
+            return Some(PrefixBindingTarget::CustomCommand(binding));
+        }
+        return None;
+    }
+
+    if let Some(action) = prefix_sequence_action_for_keys(state, keys) {
+        return Some(PrefixBindingTarget::Action(action));
+    }
+    prefix_sequence_command_for_keys(state, keys).map(PrefixBindingTarget::CustomCommand)
+}
+
+fn prefix_sequence_has_longer_match(state: &AppState, keys: &[TerminalKey]) -> bool {
+    if keys.len() >= crate::config::MAX_PREFIX_SEQUENCE_LEN {
+        return false;
+    }
+
+    let kb = &state.keybinds;
+    navigation_action_binding_match(kb, |bindings, _| {
+        bindings.has_longer_prefix_sequence(keys).then_some(())
+    })
+    .is_some()
+        || kb
+            .custom_commands
+            .iter()
+            .any(|binding| binding.bindings.has_longer_prefix_sequence(keys))
+}
+
+fn prefix_sequence_action_for_keys(
+    state: &AppState,
+    keys: &[TerminalKey],
+) -> Option<NavigateAction> {
+    navigation_action_binding_match(&state.keybinds, |bindings, action| {
+        bindings.matches_prefix_sequence(keys).then_some(action)
+    })
+}
+
+fn prefix_sequence_command_for_keys(
+    state: &AppState,
+    keys: &[TerminalKey],
+) -> Option<crate::config::CustomCommandKeybind> {
+    state
+        .keybinds
+        .custom_commands
+        .iter()
+        .find(|binding| binding.bindings.matches_prefix_sequence(keys))
+        .cloned()
+}
+
+fn navigation_action_binding_match<T>(
+    kb: &crate::config::Keybinds,
+    mut f: impl FnMut(&crate::config::ActionKeybinds, NavigateAction) -> Option<T>,
+) -> Option<T> {
+    for (bindings, action) in [
+        (&kb.help, NavigateAction::Help),
+        (&kb.settings, NavigateAction::Settings),
+        (&kb.workspace_picker, NavigateAction::WorkspacePicker),
+        (
+            &kb.quick_switch_workspace,
+            NavigateAction::QuickSwitchWorkspace,
+        ),
+        (&kb.new_workspace, NavigateAction::NewWorkspace),
+        (&kb.new_worktree, NavigateAction::NewWorktree),
+        (&kb.open_worktree, NavigateAction::OpenWorktree),
+        (&kb.remove_worktree, NavigateAction::RemoveWorktree),
+        (&kb.rename_workspace, NavigateAction::RenameWorkspace),
+        (&kb.close_workspace, NavigateAction::CloseWorkspace),
+        (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
+        (&kb.next_workspace, NavigateAction::NextWorkspace),
+        (&kb.previous_agent, NavigateAction::PreviousAgent),
+        (&kb.next_agent, NavigateAction::NextAgent),
+        (&kb.new_tab, NavigateAction::NewTab),
+        (&kb.rename_tab, NavigateAction::RenameTab),
+        (&kb.previous_tab, NavigateAction::PreviousTab),
+        (&kb.next_tab, NavigateAction::NextTab),
+        (&kb.close_tab, NavigateAction::CloseTab),
+        (&kb.rename_pane, NavigateAction::RenamePane),
+        (&kb.edit_scrollback, NavigateAction::EditScrollback),
+        (&kb.copy_mode, NavigateAction::CopyMode),
+        (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
+        (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
+        (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
+        (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
+        (&kb.open_pane_left, NavigateAction::OpenPaneLeft),
+        (&kb.open_pane_down, NavigateAction::OpenPaneDown),
+        (&kb.open_pane_up, NavigateAction::OpenPaneUp),
+        (&kb.open_pane_right, NavigateAction::OpenPaneRight),
+        (&kb.last_pane, NavigateAction::LastPane),
+        (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
+        (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
+        (&kb.split_vertical, NavigateAction::SplitVertical),
+        (&kb.split_horizontal, NavigateAction::SplitHorizontal),
+        (&kb.close_pane, NavigateAction::ClosePane),
+        (&kb.zoom, NavigateAction::Zoom),
+        (&kb.resize_mode, NavigateAction::EnterResizeMode),
+        (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.reload_config, NavigateAction::ReloadConfig),
+        (
+            &kb.open_notification_target,
+            NavigateAction::OpenNotificationTarget,
+        ),
+        (&kb.detach, NavigateAction::Detach),
+        (&kb.goto, NavigateAction::OpenNavigator),
+    ] {
+        if let Some(result) = f(bindings, action) {
+            return Some(result);
+        }
+    }
+    None
+}
+
 pub(crate) fn command_for_key(
     state: &AppState,
     key: TerminalKey,
@@ -500,6 +694,10 @@ pub(crate) enum NavigateAction {
     FocusPaneDown,
     FocusPaneUp,
     FocusPaneRight,
+    OpenPaneLeft,
+    OpenPaneDown,
+    OpenPaneUp,
+    OpenPaneRight,
     SplitVertical,
     SplitHorizontal,
     ClosePane,
@@ -576,58 +774,9 @@ fn action_for_key(
     }
 
     let kb = &state.keybinds;
-    for (bindings, action) in [
-        (&kb.help, NavigateAction::Help),
-        (&kb.settings, NavigateAction::Settings),
-        (&kb.workspace_picker, NavigateAction::WorkspacePicker),
-        (
-            &kb.quick_switch_workspace,
-            NavigateAction::QuickSwitchWorkspace,
-        ),
-        (&kb.new_workspace, NavigateAction::NewWorkspace),
-        (&kb.new_worktree, NavigateAction::NewWorktree),
-        (&kb.open_worktree, NavigateAction::OpenWorktree),
-        (&kb.remove_worktree, NavigateAction::RemoveWorktree),
-        (&kb.rename_workspace, NavigateAction::RenameWorkspace),
-        (&kb.close_workspace, NavigateAction::CloseWorkspace),
-        (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
-        (&kb.next_workspace, NavigateAction::NextWorkspace),
-        (&kb.previous_agent, NavigateAction::PreviousAgent),
-        (&kb.next_agent, NavigateAction::NextAgent),
-        (&kb.new_tab, NavigateAction::NewTab),
-        (&kb.rename_tab, NavigateAction::RenameTab),
-        (&kb.previous_tab, NavigateAction::PreviousTab),
-        (&kb.next_tab, NavigateAction::NextTab),
-        (&kb.close_tab, NavigateAction::CloseTab),
-        (&kb.rename_pane, NavigateAction::RenamePane),
-        (&kb.edit_scrollback, NavigateAction::EditScrollback),
-        (&kb.copy_mode, NavigateAction::CopyMode),
-        (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
-        (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
-        (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
-        (&kb.focus_pane_right, NavigateAction::FocusPaneRight),
-        (&kb.last_pane, NavigateAction::LastPane),
-        (&kb.cycle_pane_next, NavigateAction::CyclePaneNext),
-        (&kb.cycle_pane_previous, NavigateAction::CyclePanePrevious),
-        (&kb.split_vertical, NavigateAction::SplitVertical),
-        (&kb.split_horizontal, NavigateAction::SplitHorizontal),
-        (&kb.close_pane, NavigateAction::ClosePane),
-        (&kb.zoom, NavigateAction::Zoom),
-        (&kb.resize_mode, NavigateAction::EnterResizeMode),
-        (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
-        (&kb.reload_config, NavigateAction::ReloadConfig),
-        (
-            &kb.open_notification_target,
-            NavigateAction::OpenNotificationTarget,
-        ),
-        (&kb.detach, NavigateAction::Detach),
-        (&kb.goto, NavigateAction::OpenNavigator),
-    ] {
-        if action_matches(bindings, key, dispatch) {
-            return Some(action);
-        }
-    }
-    None
+    navigation_action_binding_match(kb, |bindings, action| {
+        action_matches(bindings, key, dispatch).then_some(action)
+    })
 }
 
 fn navigate_mode_action_for_key(state: &AppState, key: TerminalKey) -> Option<NavigateAction> {
@@ -785,6 +934,22 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::FocusPaneDown => state.navigate_pane(NavDirection::Down),
         NavigateAction::FocusPaneUp => state.navigate_pane(NavDirection::Up),
         NavigateAction::FocusPaneRight => state.navigate_pane(NavDirection::Right),
+        NavigateAction::OpenPaneLeft => {
+            state.split_pane_directional(terminal_runtimes, NavDirection::Left);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenPaneDown => {
+            state.split_pane_directional(terminal_runtimes, NavDirection::Down);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenPaneUp => {
+            state.split_pane_directional(terminal_runtimes, NavDirection::Up);
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenPaneRight => {
+            state.split_pane_directional(terminal_runtimes, NavDirection::Right);
+            leave_navigate_mode(state);
+        }
         NavigateAction::SplitVertical => {
             state.split_pane(terminal_runtimes, Direction::Horizontal);
             leave_navigate_mode(state);
@@ -900,6 +1065,7 @@ fn finish_custom_command_context(
 }
 
 fn leave_command_mode(state: &mut AppState) {
+    state.pending_chord = None;
     state.mode = if state.active.is_some() {
         Mode::Terminal
     } else {
@@ -1715,6 +1881,267 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    fn app_with_two_panes_for_chord() -> (App, crate::layout::PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].layout.focus_pane(right);
+        app.state.view.pane_infos = app.state.workspaces[0]
+            .active_tab()
+            .unwrap()
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24));
+        app.state.keybinds.focus_pane_left = crate::config::ActionKeybinds::prefix("w+h");
+        (app, root)
+    }
+
+    #[tokio::test]
+    async fn prefix_chord_prefers_longer_match_over_single_prefix_binding() {
+        let (mut app, root) = app_with_two_panes_for_chord();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert!(app.state.pending_chord.is_some());
+        assert!(app.chord_deadline.is_some());
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn prefix_chord_timeout_cancels_without_running_shadowed_binding() {
+        let (mut app, _) = app_with_two_panes_for_chord();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+            .await;
+
+        let deadline = app.chord_deadline.expect("chord should be pending");
+        assert!(app.handle_scheduled_tasks(deadline + Duration::from_millis(1), false));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn prefix_chord_unmatched_key_cancels_sequence() {
+        let (mut app, _) = app_with_two_panes_for_chord();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn zero_chord_timeout_disables_prefix_chord_matching() {
+        let (mut app, _) = app_with_two_panes_for_chord();
+        app.state.keybinds.chord_timeout = Duration::ZERO;
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+            .await;
+
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
+    }
+
+    fn app_with_runtime_workspace_for_split() -> (App, crate::layout::PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (workspace, terminal, runtime) = Workspace::new(
+            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            24,
+            80,
+            app.state.pane_scrollback_limit_bytes,
+            app.state.host_terminal_theme,
+            crate::pane::PaneShellConfig::new(&app.state.default_shell, app.state.shell_mode),
+            app.event_tx.clone(),
+            app.render_notify.clone(),
+            app.render_dirty.clone(),
+        )
+        .expect("workspace should spawn");
+        let root_pane = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        app.state.terminals.insert(terminal.id.clone(), terminal);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        (app, root_pane)
+    }
+
+    async fn press_prefix_then(app: &mut App, key: TerminalKey) {
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(key).await;
+    }
+
+    async fn press_open_pane_chord(app: &mut App, suffix: char) {
+        press_prefix_then(
+            app,
+            TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()),
+        )
+        .await;
+        app.handle_key(TerminalKey::new(
+            KeyCode::Char(suffix),
+            KeyModifiers::empty(),
+        ))
+        .await;
+    }
+
+    fn pane_rect(app: &App, pane_id: crate::layout::PaneId) -> ratatui::layout::Rect {
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 24))
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .expect("pane should be laid out")
+            .rect
+    }
+
+    #[tokio::test]
+    async fn default_open_pane_left_chord_creates_focused_pane_to_left() {
+        let (mut app, root) = app_with_runtime_workspace_for_split();
+
+        press_open_pane_chord(&mut app, 'h').await;
+
+        let new_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(new_pane, root);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(pane_rect(&app, new_pane).x < pane_rect(&app, root).x);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn default_open_pane_down_chord_creates_focused_pane_below() {
+        let (mut app, root) = app_with_runtime_workspace_for_split();
+
+        press_open_pane_chord(&mut app, 'j').await;
+
+        let new_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(new_pane, root);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(pane_rect(&app, new_pane).y > pane_rect(&app, root).y);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn default_open_pane_up_chord_creates_focused_pane_above() {
+        let (mut app, root) = app_with_runtime_workspace_for_split();
+
+        press_open_pane_chord(&mut app, 'k').await;
+
+        let new_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(new_pane, root);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(pane_rect(&app, new_pane).y < pane_rect(&app, root).y);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn default_open_pane_right_chord_creates_focused_pane_to_right() {
+        let (mut app, root) = app_with_runtime_workspace_for_split();
+
+        press_open_pane_chord(&mut app, 'l').await;
+
+        let new_pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(new_pane, root);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(pane_rect(&app, new_pane).x > pane_rect(&app, root).x);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[tokio::test]
+    async fn default_workspace_picker_chord_opens_picker_from_w_leader() {
+        let (mut app, _) = app_with_runtime_workspace_for_split();
+
+        press_open_pane_chord(&mut app, 'w').await;
+
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+    }
+
+    #[tokio::test]
+    async fn existing_split_bindings_still_create_after_focused_pane() {
+        let (mut vertical_app, vertical_root) = app_with_runtime_workspace_for_split();
+
+        press_prefix_then(
+            &mut vertical_app,
+            TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()),
+        )
+        .await;
+
+        let right_pane = vertical_app.state.workspaces[0].focused_pane_id().unwrap();
+        assert!(pane_rect(&vertical_app, right_pane).x > pane_rect(&vertical_app, vertical_root).x);
+
+        let (mut horizontal_app, horizontal_root) = app_with_runtime_workspace_for_split();
+
+        press_prefix_then(
+            &mut horizontal_app,
+            TerminalKey::new(KeyCode::Char('-'), KeyModifiers::empty()),
+        )
+        .await;
+
+        let below_pane = horizontal_app.state.workspaces[0]
+            .focused_pane_id()
+            .unwrap();
+        assert!(
+            pane_rect(&horizontal_app, below_pane).y
+                > pane_rect(&horizontal_app, horizontal_root).y
+        );
     }
 
     #[tokio::test]

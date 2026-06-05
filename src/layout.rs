@@ -60,6 +60,13 @@ pub enum NavDirection {
     Down,
 }
 
+/// Side of the focused pane where a new split pane is inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitPlacement {
+    Before,
+    After,
+}
+
 /// A node in the BSP tree. Public for serialization.
 pub enum Node {
     Pane(PaneId),
@@ -115,10 +122,19 @@ impl TileLayout {
 
     /// Split the focused pane. Returns the new pane's id.
     pub fn split_focused(&mut self, direction: Direction) -> PaneId {
+        self.split_focused_with_placement(direction, SplitPlacement::After)
+    }
+
+    /// Split the focused pane and control whether the new pane is before or after it.
+    pub fn split_focused_with_placement(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+    ) -> PaneId {
         let new_id = PaneId::alloc();
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, self.focus, direction, new_id);
+        self.root = split_at(old, self.focus, direction, new_id, placement);
         self.focus = new_id;
         new_id
     }
@@ -359,14 +375,26 @@ fn collect_ids(node: &Node, ids: &mut Vec<PaneId>) {
     }
 }
 
-fn split_at(node: Node, target: PaneId, direction: Direction, new_id: PaneId) -> Node {
+fn split_at(
+    node: Node,
+    target: PaneId,
+    direction: Direction,
+    new_id: PaneId,
+    placement: SplitPlacement,
+) -> Node {
     match node {
-        Node::Pane(id) if id == target => Node::Split {
-            direction,
-            ratio: 0.5,
-            first: Box::new(Node::Pane(id)),
-            second: Box::new(Node::Pane(new_id)),
-        },
+        Node::Pane(id) if id == target => {
+            let (first, second) = match placement {
+                SplitPlacement::Before => (Node::Pane(new_id), Node::Pane(id)),
+                SplitPlacement::After => (Node::Pane(id), Node::Pane(new_id)),
+            };
+            Node::Split {
+                direction,
+                ratio: 0.5,
+                first: Box::new(first),
+                second: Box::new(second),
+            }
+        }
         Node::Pane(_) => node,
         Node::Split {
             direction: d,
@@ -376,8 +404,8 @@ fn split_at(node: Node, target: PaneId, direction: Direction, new_id: PaneId) ->
         } => Node::Split {
             direction: d,
             ratio,
-            first: Box::new(split_at(*first, target, direction, new_id)),
-            second: Box::new(split_at(*second, target, direction, new_id)),
+            first: Box::new(split_at(*first, target, direction, new_id, placement)),
+            second: Box::new(split_at(*second, target, direction, new_id, placement)),
         },
     }
 }

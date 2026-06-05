@@ -7,7 +7,7 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::{PaneId, TileLayout};
+use crate::layout::{PaneId, SplitPlacement, TileLayout};
 use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
@@ -198,6 +198,31 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            SplitPlacement::After,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            None,
+        )
+    }
+
+    pub fn split_focused_with_placement(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            placement,
             rows,
             cols,
             cwd,
@@ -221,6 +246,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            SplitPlacement::After,
             rows,
             cols,
             cwd,
@@ -243,6 +269,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            SplitPlacement::After,
             rows,
             cols,
             cwd,
@@ -256,6 +283,7 @@ impl Tab {
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,
+        placement: SplitPlacement,
         rows: u16,
         cols: u16,
         cwd: Option<PathBuf>,
@@ -265,7 +293,12 @@ impl Tab {
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
         let previous_focus = self.layout.focused();
-        let new_id = self.layout.split_focused(direction);
+        let new_id = match placement {
+            SplitPlacement::After => self.layout.split_focused(direction),
+            SplitPlacement::Before => self
+                .layout
+                .split_focused_with_placement(direction, placement),
+        };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let launch_argv = if let Some(SplitCommand::Argv { argv }) = &command {

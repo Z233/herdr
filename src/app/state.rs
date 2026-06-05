@@ -4,6 +4,7 @@ use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
 
 use crate::detect::AgentState;
+use crate::input::TerminalKey;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
@@ -1249,6 +1250,11 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingChordState {
+    pub keys: Vec<TerminalKey>,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 pub struct AppState {
@@ -1262,6 +1268,7 @@ pub struct AppState {
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
     pub mode: Mode,
+    pub(crate) pending_chord: Option<PendingChordState>,
     pub should_quit: bool,
     /// In monolithic --no-session mode, detach exits the app because there is no server to detach from.
     pub detach_exits: bool,
@@ -1585,6 +1592,7 @@ impl AppState {
             previous_pane_focus: None,
             selected: 0,
             mode: Mode::Navigate,
+            pending_chord: None,
             should_quit: false,
             detach_exits: false,
             detach_requested: false,

@@ -9,9 +9,9 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::TileLayout;
+use crate::layout::{PaneId, SplitPlacement};
 use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
@@ -402,6 +402,34 @@ impl Workspace {
             .expect("workspace must always have at least one tab")
             .split_focused(
                 direction,
+                rows,
+                cols,
+                cwd,
+                scrollback_limit_bytes,
+                host_terminal_theme,
+                shell_config,
+            )?;
+        self.register_new_pane(new_pane.pane_id);
+        Ok(new_pane)
+    }
+
+    pub fn split_focused_with_placement(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+    ) -> std::io::Result<crate::workspace::tab::NewPane> {
+        let new_pane = self
+            .active_tab_mut()
+            .expect("workspace must always have at least one tab")
+            .split_focused_with_placement(
+                direction,
+                placement,
                 rows,
                 cols,
                 cwd,

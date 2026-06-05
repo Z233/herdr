@@ -9,7 +9,9 @@
 - Full-screen TUIs such as Neovim now receive resize-generated terminal responses after Herdr internal pane resizes, so grown panes redraw without waiting for extra input. (#471)
 
 ### Added
-- Added an in-app workspace picker at `prefix+w` with fuzzy name search and a focused-pane preview for the selected workspace.
+- Added native prefix chord keybindings such as `prefix+w+h`, with configurable `keys.chord_timeout_ms` and longer-match behavior for overlapping bindings.
+- Added directional pane opening at `prefix+w+h/j/k/l` for opening a new pane left/down/up/right of the focused pane.
+- Added an in-app workspace picker at `prefix+w+w` with fuzzy name search and a focused-pane preview for the selected workspace.
 - Added `ctrl+tab` as an MRU quick workspace switcher with release-to-select, expandable tab rows, focused-pane previews, and optional in-overlay search.
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 

@@ -2,12 +2,14 @@
 use crossterm::event::KeyEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::warn;
 
 use super::Config;
 use crate::input::TerminalKey;
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
+pub const MAX_PREFIX_SEQUENCE_LEN: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct LiveKeybindConfig {
@@ -88,12 +90,17 @@ pub enum CustomCommandAction {
 pub enum BindingTrigger {
     Direct(KeyCombo),
     Prefix(KeyCombo),
+    PrefixSequence {
+        keys: [KeyCombo; MAX_PREFIX_SEQUENCE_LEN],
+        len: u8,
+    },
 }
 
 impl BindingTrigger {
     pub fn combo(self) -> KeyCombo {
         match self {
             Self::Direct(combo) | Self::Prefix(combo) => combo,
+            Self::PrefixSequence { keys, .. } => keys[0],
         }
     }
 
@@ -102,7 +109,21 @@ impl BindingTrigger {
     }
 
     pub fn is_prefix(self) -> bool {
-        matches!(self, Self::Prefix(_))
+        matches!(self, Self::Prefix(_) | Self::PrefixSequence { .. })
+    }
+
+    pub fn single_combo(self) -> Option<KeyCombo> {
+        match self {
+            Self::Direct(combo) | Self::Prefix(combo) => Some(combo),
+            Self::PrefixSequence { .. } => None,
+        }
+    }
+
+    pub fn prefix_sequence_keys(&self) -> Option<&[KeyCombo]> {
+        match self {
+            Self::PrefixSequence { keys, len } => Some(&keys[..usize::from(*len)]),
+            _ => None,
+        }
     }
 }
 
@@ -115,11 +136,15 @@ pub struct ResolvedBinding {
 impl ResolvedBinding {
     #[cfg(test)]
     fn matches_key_event(&self, key: &KeyEvent) -> bool {
-        key_event_matches_combo(key, self.trigger.combo())
+        self.trigger
+            .single_combo()
+            .is_some_and(|combo| key_event_matches_combo(key, combo))
     }
 
     fn matches_terminal_key(&self, key: TerminalKey) -> bool {
-        terminal_key_matches_combo(key, self.trigger.combo())
+        self.trigger
+            .single_combo()
+            .is_some_and(|combo| terminal_key_matches_combo(key, combo))
     }
 }
 
@@ -168,15 +193,34 @@ impl ActionKeybinds {
     }
 
     pub fn matches_prefix_key(&self, key: TerminalKey) -> bool {
-        self.bindings
-            .iter()
-            .any(|binding| binding.trigger.is_prefix() && binding.matches_terminal_key(key))
+        self.bindings.iter().any(|binding| {
+            matches!(binding.trigger, BindingTrigger::Prefix(_))
+                && binding.matches_terminal_key(key)
+        })
     }
 
     pub fn matches_direct_key(&self, key: TerminalKey) -> bool {
         self.bindings
             .iter()
             .any(|binding| binding.trigger.is_direct() && binding.matches_terminal_key(key))
+    }
+
+    pub fn matches_prefix_sequence(&self, keys: &[TerminalKey]) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding
+                .trigger
+                .prefix_sequence_keys()
+                .is_some_and(|sequence| terminal_keys_match_sequence(keys, sequence))
+        })
+    }
+
+    pub fn has_longer_prefix_sequence(&self, keys: &[TerminalKey]) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding
+                .trigger
+                .prefix_sequence_keys()
+                .is_some_and(|sequence| terminal_keys_are_sequence_prefix(keys, sequence))
+        })
     }
 
     pub fn labels(&self) -> Vec<String> {
@@ -227,7 +271,11 @@ impl IndexedKeybind {
         let KeyCode::Char(c @ '1'..='9') = key.code else {
             return None;
         };
-        if terminal_key_matches_combo(key, self.trigger.combo()) {
+        if self
+            .trigger
+            .single_combo()
+            .is_some_and(|combo| terminal_key_matches_combo(key, combo))
+        {
             Some((c as usize) - ('1' as usize))
         } else {
             None
@@ -258,6 +306,7 @@ pub struct NavigateKeybinds {
 /// Parsed keybinds for Herdr actions.
 #[derive(Debug, Clone)]
 pub struct Keybinds {
+    pub chord_timeout: Duration,
     pub navigate: NavigateKeybinds,
     pub help: ActionKeybinds,
     pub settings: ActionKeybinds,
@@ -292,6 +341,10 @@ pub struct Keybinds {
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
     pub focus_pane_right: ActionKeybinds,
+    pub open_pane_left: ActionKeybinds,
+    pub open_pane_down: ActionKeybinds,
+    pub open_pane_up: ActionKeybinds,
+    pub open_pane_right: ActionKeybinds,
     pub cycle_pane_next: ActionKeybinds,
     pub cycle_pane_previous: ActionKeybinds,
     pub last_pane: ActionKeybinds,
@@ -320,6 +373,7 @@ struct BindingRegistry {
     prefix_combo: KeyCombo,
     direct: std::collections::HashMap<KeyCombo, String>,
     prefix: std::collections::HashMap<KeyCombo, String>,
+    prefix_sequences: std::collections::HashMap<Vec<KeyCombo>, String>,
 }
 
 impl BindingRegistry {
@@ -328,6 +382,7 @@ impl BindingRegistry {
             prefix_combo: normalize_key_combo(prefix_combo),
             direct: std::collections::HashMap::new(),
             prefix: std::collections::HashMap::new(),
+            prefix_sequences: std::collections::HashMap::new(),
         }
     }
 
@@ -337,8 +392,18 @@ impl BindingRegistry {
             .or_insert_with(|| field.to_string());
     }
 
-    fn prefix_rhs_is_reserved(&self, combo: KeyCombo) -> bool {
-        normalize_key_combo(combo) == self.prefix_combo
+    fn prefix_rhs_is_reserved(&self, trigger: &BindingTrigger) -> bool {
+        match trigger {
+            BindingTrigger::Direct(_) => false,
+            BindingTrigger::Prefix(combo) => normalize_key_combo(*combo) == self.prefix_combo,
+            BindingTrigger::PrefixSequence { .. } => {
+                trigger.prefix_sequence_keys().is_some_and(|sequence| {
+                    sequence
+                        .iter()
+                        .any(|combo| normalize_key_combo(*combo) == self.prefix_combo)
+                })
+            }
+        }
     }
 
     fn conflict(&self, binding: &ResolvedBinding) -> Option<&str> {
@@ -351,6 +416,13 @@ impl BindingRegistry {
                 .prefix
                 .get(&normalize_key_combo(combo))
                 .map(String::as_str),
+            BindingTrigger::PrefixSequence { .. } => {
+                binding.trigger.prefix_sequence_keys().and_then(|sequence| {
+                    self.prefix_sequences
+                        .get(&normalize_key_sequence(sequence))
+                        .map(String::as_str)
+                })
+            }
         }
     }
 
@@ -363,6 +435,12 @@ impl BindingRegistry {
             BindingTrigger::Prefix(combo) => {
                 self.prefix
                     .insert(normalize_key_combo(combo), field.to_string());
+            }
+            BindingTrigger::PrefixSequence { .. } => {
+                if let Some(sequence) = binding.trigger.prefix_sequence_keys() {
+                    self.prefix_sequences
+                        .insert(normalize_key_sequence(sequence), field.to_string());
+                }
             }
         }
     }
@@ -398,6 +476,7 @@ impl Config {
         }
 
         let mut keybinds = Keybinds {
+            chord_timeout: Duration::from_millis(self.keys.chord_timeout_ms),
             navigate: NavigateKeybinds {
                 workspace_up: parse_navigate_bindings(
                     "keys.navigate_workspace_up",
@@ -475,6 +554,10 @@ impl Config {
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),
             focus_pane_right: action!("keys.focus_pane_right", &self.keys.focus_pane_right),
+            open_pane_left: action!("keys.open_pane_left", &self.keys.open_pane_left),
+            open_pane_down: action!("keys.open_pane_down", &self.keys.open_pane_down),
+            open_pane_up: action!("keys.open_pane_up", &self.keys.open_pane_up),
+            open_pane_right: action!("keys.open_pane_right", &self.keys.open_pane_right),
             last_pane: action!("keys.last_pane", &self.keys.last_pane),
             cycle_pane_next: action!("keys.cycle_pane_next", &self.keys.cycle_pane_next),
             cycle_pane_previous: action!(
@@ -674,7 +757,11 @@ fn parse_indexed_bindings(
         .bindings
         .into_iter()
         .filter_map(|binding| {
-            if matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+            if binding
+                .trigger
+                .single_combo()
+                .is_some_and(|combo| matches!(combo.0, KeyCode::Char('1'..='9')))
+            {
                 Some(IndexedKeybind {
                     trigger: binding.trigger,
                     label: binding.label,
@@ -747,7 +834,11 @@ fn reject_navigate_binding(
         return true;
     }
 
-    if matches!(normalize_key_combo(binding.trigger.combo()).0, KeyCode::Esc) {
+    if binding
+        .trigger
+        .single_combo()
+        .is_some_and(|combo| matches!(normalize_key_combo(combo).0, KeyCode::Esc))
+    {
         let diag = format!(
             "navigate keybinding cannot use esc: {field} = {:?}; disabling binding",
             binding.label
@@ -773,7 +864,7 @@ fn reject_binding(
     registry: &BindingRegistry,
     diagnostics: &mut Vec<String>,
 ) -> bool {
-    if binding.trigger.is_prefix() && registry.prefix_rhs_is_reserved(binding.trigger.combo()) {
+    if registry.prefix_rhs_is_reserved(&binding.trigger) {
         let diag = format!(
             "reserved keybinding: {field} = {:?} uses keys.prefix as the prefix-mode key; pressing the prefix twice sends a literal prefix key, so this binding is disabled",
             binding.label
@@ -790,7 +881,11 @@ fn reject_binding(
         return true;
     }
 
-    if binding.trigger.is_direct() && is_unmodified_printable(binding.trigger.combo()) {
+    if binding
+        .trigger
+        .single_combo()
+        .is_some_and(|combo| binding.trigger.is_direct() && is_unmodified_printable(combo))
+    {
         let suggestion = format!("prefix+{}", binding.label);
         let diag = format!(
             "unsafe direct keybinding: {field} = {:?} would intercept typing; use {:?} to require the prefix; disabling binding",
@@ -837,20 +932,109 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
         return Some(ParsedBinding::Range(bindings));
     }
 
+    if trigger_prefix {
+        let sequence = parse_prefix_sequence(body)?;
+        let label = format_prefix_sequence_label(&sequence);
+        let trigger = prefix_sequence_trigger(&sequence)?;
+        return Some(ParsedBinding::Single(ResolvedBinding { trigger, label }));
+    }
+
     let combo = parse_key_combo(body)?;
-    let label = if trigger_prefix {
-        format!("prefix+{}", format_key_combo(combo))
-    } else {
-        format_key_combo(combo)
-    };
+    let label = format_key_combo(combo);
     Some(ParsedBinding::Single(ResolvedBinding {
-        trigger: if trigger_prefix {
-            BindingTrigger::Prefix(combo)
-        } else {
-            BindingTrigger::Direct(combo)
-        },
+        trigger: BindingTrigger::Direct(combo),
         label,
     }))
+}
+
+fn parse_prefix_sequence(body: &str) -> Option<Vec<KeyCombo>> {
+    let parts: Vec<&str> = body.split('+').map(str::trim).collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+
+    let mut sequence = Vec::new();
+    let mut current_parts: Vec<&str> = Vec::new();
+    let mut current_has_key = false;
+
+    for part in parts {
+        if parse_modifier_token(part).is_some() {
+            if current_has_key {
+                sequence.push(parse_key_combo(&current_parts.join("+"))?);
+                current_parts.clear();
+                current_has_key = false;
+            }
+            current_parts.push(part);
+        } else {
+            if current_has_key {
+                sequence.push(parse_key_combo(&current_parts.join("+"))?);
+                current_parts.clear();
+            }
+            current_parts.push(part);
+            current_has_key = true;
+        }
+
+        if sequence.len() >= MAX_PREFIX_SEQUENCE_LEN {
+            return None;
+        }
+    }
+
+    if current_parts.is_empty() || !current_has_key {
+        return None;
+    }
+    sequence.push(parse_key_combo(&current_parts.join("+"))?);
+    (1..=MAX_PREFIX_SEQUENCE_LEN)
+        .contains(&sequence.len())
+        .then_some(sequence)
+}
+
+fn prefix_sequence_trigger(sequence: &[KeyCombo]) -> Option<BindingTrigger> {
+    match sequence {
+        [combo] => Some(BindingTrigger::Prefix(*combo)),
+        [first, rest @ ..] if sequence.len() <= MAX_PREFIX_SEQUENCE_LEN => {
+            let mut keys = [*first; MAX_PREFIX_SEQUENCE_LEN];
+            for (idx, combo) in rest.iter().enumerate() {
+                keys[idx + 1] = *combo;
+            }
+            Some(BindingTrigger::PrefixSequence {
+                keys,
+                len: sequence.len() as u8,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn format_prefix_sequence_label(sequence: &[KeyCombo]) -> String {
+    let keys = sequence
+        .iter()
+        .map(|combo| format_key_combo(*combo))
+        .collect::<Vec<_>>()
+        .join("+");
+    format!("prefix+{keys}")
+}
+
+fn normalize_key_sequence(sequence: &[KeyCombo]) -> Vec<KeyCombo> {
+    sequence
+        .iter()
+        .map(|combo| normalize_key_combo(*combo))
+        .collect()
+}
+
+fn terminal_keys_match_sequence(keys: &[TerminalKey], sequence: &[KeyCombo]) -> bool {
+    keys.len() == sequence.len()
+        && keys
+            .iter()
+            .zip(sequence)
+            .all(|(key, combo)| terminal_key_matches_combo(*key, *combo))
+}
+
+fn terminal_keys_are_sequence_prefix(keys: &[TerminalKey], sequence: &[KeyCombo]) -> bool {
+    keys.len() < sequence.len()
+        && keys
+            .iter()
+            .zip(sequence)
+            .all(|(key, combo)| terminal_key_matches_combo(*key, *combo))
 }
 
 pub fn format_key_combo(binding: KeyCombo) -> String {
@@ -1356,6 +1540,91 @@ next_tab = ["prefix+n", "ctrl+alt+]"]
             ]
         );
         assert_eq!(kb.next_tab.prefix_rhs_label().as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn prefix_chord_binding_parses_as_sequence() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+workspace_picker = "prefix+w"
+open_pane_left = ""
+focus_pane_left = "prefix+w+h"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(
+            binding_triggers(&kb.focus_pane_left),
+            vec![BindingTrigger::PrefixSequence {
+                keys: [
+                    (KeyCode::Char('w'), KeyModifiers::empty()),
+                    (KeyCode::Char('h'), KeyModifiers::empty()),
+                    (KeyCode::Char('w'), KeyModifiers::empty()),
+                ],
+                len: 2,
+            }]
+        );
+        assert_eq!(
+            kb.focus_pane_left.prefix_rhs_label().as_deref(),
+            Some("w+h")
+        );
+        assert!(kb.focus_pane_left.matches_prefix_sequence(&[
+            TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()),
+            TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()),
+        ]));
+        assert!(config.collect_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn prefix_chord_parser_keeps_modifier_groups_as_single_keys() {
+        let bindings = ActionKeybinds::prefix("ctrl+h+shift+j");
+
+        assert_eq!(
+            binding_triggers(&bindings),
+            vec![BindingTrigger::PrefixSequence {
+                keys: [
+                    (KeyCode::Char('h'), KeyModifiers::CONTROL),
+                    (KeyCode::Char('j'), KeyModifiers::SHIFT),
+                    (KeyCode::Char('h'), KeyModifiers::CONTROL),
+                ],
+                len: 2,
+            }]
+        );
+        assert_eq!(bindings.label().as_deref(), Some("prefix+ctrl+h+shift+j"));
+    }
+
+    #[test]
+    fn invalid_prefix_chord_reports_config_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+focus_pane_left = "prefix+w++h"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.keybinds().focus_pane_left.bindings.is_empty());
+        assert!(config.collect_diagnostics().iter().any(|diag| {
+            diag.contains("invalid keybinding") && diag.contains("keys.focus_pane_left")
+        }));
+    }
+
+    #[test]
+    fn default_directional_pane_opening_chords_are_bound() {
+        let kb = Config::default().keybinds();
+        for (bindings, suffix) in [
+            (&kb.open_pane_left, 'h'),
+            (&kb.open_pane_down, 'j'),
+            (&kb.open_pane_up, 'k'),
+            (&kb.open_pane_right, 'l'),
+        ] {
+            assert!(bindings.matches_prefix_sequence(&[
+                TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()),
+                TerminalKey::new(KeyCode::Char(suffix), KeyModifiers::empty()),
+            ]));
+        }
     }
 
     #[test]

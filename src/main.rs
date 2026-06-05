@@ -112,6 +112,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Most reliable direct bindings are ctrl+letter, function keys, and explicit modified chords.
 # alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
+# Prefix chord sequences can bind up to 3 keys after prefix, e.g. "prefix+w+h".
+# Set 0 to disable prefix chord sequences.
+# chord_timeout_ms = 500
 
 # Prefix-mode actions
 # help = "prefix+?"
@@ -119,7 +122,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
-# workspace_picker = "prefix+w"
+# workspace_picker = ["prefix+w", "prefix+w+w"]
 # quick_switch_workspace = "ctrl+tab"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"
@@ -146,6 +149,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # focus_pane_down = "prefix+j"
 # focus_pane_up = "prefix+k"
 # focus_pane_right = "prefix+l"
+# open_pane_left = "prefix+w+h"
+# open_pane_down = "prefix+w+j"
+# open_pane_up = "prefix+w+k"
+# open_pane_right = "prefix+w+l"
 # cycle_pane_next = "prefix+tab"
 # cycle_pane_previous = "prefix+shift+tab"
 # last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth

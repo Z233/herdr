@@ -213,6 +213,21 @@ impl App {
             changed = true;
         }
 
+        if self.chord_deadline.is_some_and(|deadline| now >= deadline) {
+            let previous_mode = self.state.mode;
+            self.chord_deadline = None;
+            self.state.pending_chord = None;
+            if previous_mode == Mode::Prefix {
+                self.state.mode = if self.state.active.is_some() {
+                    Mode::Terminal
+                } else {
+                    Mode::Navigate
+                };
+            }
+            self.sync_prefix_input_source(previous_mode);
+            changed = true;
+        }
+
         if self
             .next_animation_tick
             .is_some_and(|deadline| now >= deadline)
@@ -520,6 +535,7 @@ impl App {
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            self.chord_deadline,
             render_deadline,
         ]
         .into_iter()

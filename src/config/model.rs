@@ -239,6 +239,8 @@ pub struct LoadedConfig {
 pub struct KeysConfig {
     /// Prefix key to enter prefix mode (e.g. "ctrl+b", "f12", "esc").
     pub prefix: String,
+    /// Timeout for incomplete prefix chord sequences. Set 0 to disable chord sequences.
+    pub chord_timeout_ms: u64,
     /// Open keybinding help. Default: "prefix+?"
     pub help: BindingConfig,
     /// Open settings. Default: "prefix+s"
@@ -255,7 +257,7 @@ pub struct KeysConfig {
     pub rename_workspace: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
-    /// Open the searchable workspace picker. Default: "prefix+w"
+    /// Open the searchable workspace picker. Default: ["prefix+w", "prefix+w+w"]
     pub workspace_picker: BindingConfig,
     /// Open the MRU quick workspace switcher. Default: "ctrl+tab"
     pub quick_switch_workspace: BindingConfig,
@@ -317,6 +319,14 @@ pub struct KeysConfig {
     pub focus_pane_up: BindingConfig,
     /// Focus the pane to the right. Default: "prefix+l".
     pub focus_pane_right: BindingConfig,
+    /// Open a new pane to the left. Default: "prefix+w+h".
+    pub open_pane_left: BindingConfig,
+    /// Open a new pane below. Default: "prefix+w+j".
+    pub open_pane_down: BindingConfig,
+    /// Open a new pane above. Default: "prefix+w+k".
+    pub open_pane_up: BindingConfig,
+    /// Open a new pane to the right. Default: "prefix+w+l".
+    pub open_pane_right: BindingConfig,
     /// Cycle to the next pane. Default: "prefix+tab".
     pub cycle_pane_next: BindingConfig,
     /// Cycle to the previous pane. Default: "prefix+shift+tab".
@@ -491,6 +501,7 @@ impl Default for KeysConfig {
     fn default() -> Self {
         Self {
             prefix: "ctrl+b".into(),
+            chord_timeout_ms: 500,
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),
@@ -499,7 +510,7 @@ impl Default for KeysConfig {
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             close_workspace: BindingConfig::one("prefix+shift+d"),
-            workspace_picker: BindingConfig::one("prefix+w"),
+            workspace_picker: BindingConfig::Many(vec!["prefix+w".into(), "prefix+w+w".into()]),
             quick_switch_workspace: BindingConfig::one("ctrl+tab"),
             goto: BindingConfig::one("prefix+g"),
             navigate_workspace_up: BindingConfig::one("up"),
@@ -530,6 +541,10 @@ impl Default for KeysConfig {
             focus_pane_down: BindingConfig::one("prefix+j"),
             focus_pane_up: BindingConfig::one("prefix+k"),
             focus_pane_right: BindingConfig::one("prefix+l"),
+            open_pane_left: BindingConfig::one("prefix+w+h"),
+            open_pane_down: BindingConfig::one("prefix+w+j"),
+            open_pane_up: BindingConfig::one("prefix+w+k"),
+            open_pane_right: BindingConfig::one("prefix+w+l"),
             cycle_pane_next: BindingConfig::one("prefix+tab"),
             cycle_pane_previous: BindingConfig::one("prefix+shift+tab"),
             last_pane: BindingConfig::empty(),

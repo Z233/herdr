@@ -61,7 +61,7 @@ Press `ctrl+b q` to detach the client. The server and pane processes keep runnin
 
 **Update and restore.** `herdr update` installs a new binary, but a running server keeps using the old process until it is stopped or handed off. Stop the old server to use the new version. Stopping exits pane processes. Run `herdr server stop`, then run `herdr` again for the default session. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again. `herdr update --handoff` is experimental and tries to move live panes, including foreground processes such as dev servers, from the old server to the new one. With current official integrations installed, supported agent panes can restart from their native agent sessions after a server restart or update.
 
-**Keybindings.** Herdr uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
+**Keybindings.** Herdr uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. Prefix chords such as `prefix+w+h` can bind up to three keys after the prefix and wait up to `keys.chord_timeout_ms` for the next key. `prefix+w` is a default chord leader: `h/j/k/l` open a pane left/down/up/right, and `w` opens the workspace picker. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
 
 **Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations can add native session identity for restore, semantic state reports, or both.
 
@@ -218,7 +218,8 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+c` | new tab |
 | `prefix+n` / `prefix+p` | next / previous tab |
 | `prefix+1..9` | switch tab |
-| `prefix+w` | workspace picker |
+| `prefix+w w` | workspace picker |
+| `prefix+w h/j/k/l` | open pane left/down/up/right |
 | `ctrl+tab` | quick workspace switcher |
 | `prefix+g` | session navigator |
 | `prefix+shift+n` | new workspace |
@@ -233,7 +234,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+r` | resize mode |
 | `prefix+q` | detach |
 
-Mouse is supported throughout. Resize mode uses `h`/`l` for width, `j`/`k` for height, and `esc` to exit. Full syntax, optional actions, indexed bindings, and custom command bindings live in the [configuration docs](https://herdr.dev/docs/configuration/).
+Mouse is supported throughout. Resize mode uses `h`/`l` for width, `j`/`k` for height, and `esc` to exit. Full syntax, optional actions, indexed bindings, prefix chords, and custom command bindings live in the [configuration docs](https://herdr.dev/docs/configuration/).
 
 ## configuration
 

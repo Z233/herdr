@@ -110,6 +110,7 @@ pub struct App {
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
+    pub(crate) chord_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
@@ -406,6 +407,7 @@ impl App {
             previous_pane_focus: None,
             selected,
             mode,
+            pending_chord: None,
             should_quit: false,
             detach_exits: no_session,
             detach_requested: false,
@@ -589,6 +591,7 @@ impl App {
             session_save_deadline: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
+            chord_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
             suppressed_repeat_keys: HashSet::new(),
@@ -1138,6 +1141,8 @@ impl App {
                     self.state.prefix_code = live.prefix.0;
                     self.state.prefix_mods = live.prefix.1;
                     self.state.keybinds = live.keybinds;
+                    self.state.pending_chord = None;
+                    self.chord_deadline = None;
                 }
                 Err(keybind_diagnostics) => {
                     diagnostics.extend(
@@ -3203,6 +3208,18 @@ mod tests {
             app.next_loop_deadline(now, false),
             app.session_save_deadline
         );
+    }
+
+    #[test]
+    fn next_loop_deadline_includes_chord_deadline() {
+        let mut app = test_app();
+        let now = Instant::now();
+        app.next_resize_poll = now + Duration::from_millis(300);
+        app.chord_deadline = Some(now + Duration::from_millis(5));
+        app.next_animation_tick = Some(now + Duration::from_millis(100));
+        app.session_save_deadline = Some(now + Duration::from_millis(200));
+
+        assert_eq!(app.next_loop_deadline(now, false), app.chord_deadline);
     }
 
     #[test]
