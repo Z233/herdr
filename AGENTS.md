@@ -1,5 +1,11 @@
 # herdr
 
+<mandatory-feedback-step>
+When the user task is complete, you MUST call the AskUserQuestion MCP tool to request feedback. The question must use the header `Feedback` and include options like `Looks good`, `Needs changes`, `Not what I wanted`, and `Commit the changes`. This is a mandatory final step for every completed task and must not be skipped. Respond appropriately based on the feedback received.
+
+Important: use the external AskUserQuestion MCP tool only. Do NOT use Codex's built-in ask/request-user-input tool for this feedback step.
+</mandatory-feedback-step>
+
 Terminal workspace manager for AI coding agents. Rust + ratatui.
 
 ## Principles
