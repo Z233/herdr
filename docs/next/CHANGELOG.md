@@ -10,6 +10,7 @@
 
 ### Added
 - Added an in-app workspace picker at `prefix+w` with fuzzy name search and a focused-pane preview for the selected workspace.
+- Added `ctrl+tab` as an MRU quick workspace switcher with release-to-select, expandable tab rows, focused-pane previews, and optional in-overlay search.
 - Added `herdr integration install droid` for Factory Droid hooks that report session ids through Herdr's socket API. When native agent session restore is enabled, Herdr can resume Droid panes with `droid --resume <id>`.
 
 ## [0.6.8] - 2026-06-04

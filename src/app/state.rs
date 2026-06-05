@@ -810,12 +810,39 @@ pub(crate) struct NavigatorState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspacePickerTarget {
+    Workspace { ws_idx: usize },
+    Tab { ws_idx: usize, tab_idx: usize },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum WorkspacePickerMode {
+    #[default]
+    Search,
+    QuickSwitch,
+    QuickSwitchSearch,
+}
+
+impl WorkspacePickerMode {
+    pub(crate) fn search_visible(self) -> bool {
+        matches!(self, Self::Search | Self::QuickSwitchSearch)
+    }
+
+    pub(crate) fn is_quick_switch(self) -> bool {
+        matches!(self, Self::QuickSwitch | Self::QuickSwitchSearch)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspacePickerRow {
+    pub target: WorkspacePickerTarget,
     pub ws_idx: usize,
+    pub depth: u8,
     pub label: String,
     pub meta: String,
     pub is_current: bool,
-    pub pane_count: usize,
+    pub expanded: bool,
+    pub is_tab: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,11 +861,13 @@ impl Default for WorkspacePickerPreview {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePickerState {
+    pub mode: WorkspacePickerMode,
     pub query: String,
     pub selected: usize,
     pub scroll: usize,
     pub preview: WorkspacePickerPreview,
     pub preview_ws_idx: Option<usize>,
+    pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1271,6 +1300,7 @@ pub struct AppState {
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
     pub workspace_picker: WorkspacePickerState,
+    pub workspace_mru: Vec<String>,
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
@@ -1586,6 +1616,7 @@ impl AppState {
             keybind_help: KeybindHelpState { scroll: 0 },
             navigator: NavigatorState::default(),
             workspace_picker: WorkspacePickerState::default(),
+            workspace_mru: Vec::new(),
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,

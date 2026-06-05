@@ -312,7 +312,7 @@ fn setup_terminal_with_capabilities(
             io::stdout(),
             EnableBracketedPaste,
             EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
+            PushKeyboardEnhancementFlags(crate::input::host_keyboard_enhancement_flags())
         )?;
     } else if mouse_capture {
         execute!(io::stdout(), EnableMouseCapture)?;

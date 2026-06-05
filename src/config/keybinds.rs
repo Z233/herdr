@@ -268,6 +268,7 @@ pub struct Keybinds {
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
+    pub quick_switch_workspace: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
@@ -444,6 +445,10 @@ impl Config {
             rename_workspace: action!("keys.rename_workspace", &self.keys.rename_workspace),
             close_workspace: action!("keys.close_workspace", &self.keys.close_workspace),
             workspace_picker: action!("keys.workspace_picker", &self.keys.workspace_picker),
+            quick_switch_workspace: action!(
+                "keys.quick_switch_workspace",
+                &self.keys.quick_switch_workspace
+            ),
             goto: action!("keys.goto", &self.keys.goto),
             detach: action!("keys.detach", &self.keys.detach),
             reload_config: action!("keys.reload_config", &self.keys.reload_config),
@@ -1690,6 +1695,27 @@ command = "echo no"
     }
 
     #[test]
+    fn quick_switch_workspace_conflict_is_reported() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+quick_switch_workspace = "ctrl+alt+g"
+new_tab = "ctrl+alt+g"
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.collect_diagnostics();
+        let keybinds = config.keybinds();
+
+        assert!(!keybinds.quick_switch_workspace.bindings.is_empty());
+        assert!(keybinds.new_tab.bindings.is_empty());
+        assert!(diagnostics.iter().any(|diag| {
+            diag.contains("kept keys.quick_switch_workspace")
+                && diag.contains("disabled keys.new_tab")
+        }));
+    }
+
+    #[test]
     fn prefixed_indexed_bindings_support_modifiers() {
         let config: Config = toml::from_str(
             r#"
@@ -1734,6 +1760,13 @@ switch_workspace = "prefix+shift+1..9"
             .bindings
             .iter()
             .all(|binding| binding.trigger.is_prefix()));
+        assert_eq!(
+            binding_triggers(&kb.quick_switch_workspace),
+            vec![BindingTrigger::Direct((
+                KeyCode::Tab,
+                KeyModifiers::CONTROL
+            ))]
+        );
     }
 
     #[test]

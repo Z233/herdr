@@ -461,6 +461,51 @@ mod tests {
     }
 
     #[test]
+    fn parse_ctrl_tab_modify_other_keys_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[27;5;9~").unwrap();
+        assert_eq!(key.code, KeyCode::Tab);
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.shifted_codepoint, None);
+    }
+
+    #[test]
+    fn parse_ctrl_tab_kitty_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[9;5u").unwrap();
+        assert_eq!(key.code, KeyCode::Tab);
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(key.shifted_codepoint, None);
+    }
+
+    #[test]
+    fn parse_ctrl_tab_kitty_release_sequence() {
+        let key = parse_terminal_key_sequence("\x1b[9;5:3u").unwrap();
+        assert_eq!(key.code, KeyCode::Tab);
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+        assert_eq!(key.shifted_codepoint, None);
+    }
+
+    #[test]
+    fn parse_left_control_kitty_press_and_release_sequences() {
+        let press = parse_terminal_key_sequence("\x1b[57442;5u").unwrap();
+        assert_eq!(press.code, KeyCode::Modifier(ModifierKeyCode::LeftControl));
+        assert_eq!(press.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(press.kind, crossterm::event::KeyEventKind::Press);
+        assert_eq!(press.shifted_codepoint, None);
+
+        let release = parse_terminal_key_sequence("\x1b[57442;1:3u").unwrap();
+        assert_eq!(
+            release.code,
+            KeyCode::Modifier(ModifierKeyCode::LeftControl)
+        );
+        assert_eq!(release.modifiers, KeyModifiers::empty());
+        assert_eq!(release.kind, crossterm::event::KeyEventKind::Release);
+        assert_eq!(release.shifted_codepoint, None);
+    }
+
+    #[test]
     fn parse_legacy_uppercase_letter_as_shifted_char() {
         let key = parse_terminal_key_sequence("L").unwrap();
         assert_eq!(key.code, KeyCode::Char('L'));

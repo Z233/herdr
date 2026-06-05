@@ -485,6 +485,7 @@ pub(crate) enum NavigateAction {
     SwitchTab(usize),
     FocusAgent(usize),
     WorkspacePicker,
+    QuickSwitchWorkspace,
     PreviousWorkspace,
     NextWorkspace,
     PreviousAgent,
@@ -579,6 +580,10 @@ fn action_for_key(
         (&kb.help, NavigateAction::Help),
         (&kb.settings, NavigateAction::Settings),
         (&kb.workspace_picker, NavigateAction::WorkspacePicker),
+        (
+            &kb.quick_switch_workspace,
+            NavigateAction::QuickSwitchWorkspace,
+        ),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.new_worktree, NavigateAction::NewWorktree),
         (&kb.open_worktree, NavigateAction::OpenWorktree),
@@ -723,6 +728,9 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::WorkspacePicker => {
             state.open_workspace_picker_from(terminal_runtimes);
+        }
+        NavigateAction::QuickSwitchWorkspace => {
+            state.open_quick_switch_workspace_from(terminal_runtimes);
         }
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
@@ -1522,6 +1530,18 @@ navigate_pane_right = "ctrl+l"
         );
 
         assert_eq!(action, Some(NavigateAction::LastPane));
+    }
+
+    #[test]
+    fn terminal_direct_quick_switch_workspace_shortcut_maps_to_navigation_action() {
+        let state = state_with_workspaces(&["test"]);
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(action, Some(NavigateAction::QuickSwitchWorkspace));
     }
 
     #[test]

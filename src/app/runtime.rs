@@ -127,7 +127,7 @@ impl App {
                     }
                     crossterm::event::KeyEventKind::Release => {
                         self.suppressed_repeat_keys.remove(&key_id);
-                        false
+                        self.handle_key_release(key)
                     }
                 }
             }

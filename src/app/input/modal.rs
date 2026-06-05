@@ -4,6 +4,7 @@ use ratatui::layout::{Direction, Rect};
 use crate::{
     app::state::{
         AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+        WorkspacePickerMode,
     },
     input::TerminalKey,
     layout::NavDirection,
@@ -288,7 +289,17 @@ pub(crate) fn handle_workspace_picker_key(
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     key: KeyEvent,
 ) {
+    if state.workspace_picker.mode.is_quick_switch()
+        && state.workspace_picker.mode != WorkspacePickerMode::QuickSwitchSearch
+    {
+        handle_quick_switch_workspace_picker_key(state, terminal_runtimes, key);
+        return;
+    }
+
     match key.code {
+        KeyCode::Esc if state.workspace_picker.mode == WorkspacePickerMode::QuickSwitchSearch => {
+            state.leave_quick_switch_search_from(terminal_runtimes);
+        }
         KeyCode::Esc => leave_modal(state),
         KeyCode::Enter => {
             state.accept_workspace_picker_selection_from(terminal_runtimes);
@@ -350,6 +361,55 @@ pub(crate) fn handle_workspace_picker_key(
         }
         _ => {}
     }
+}
+
+fn handle_quick_switch_workspace_picker_key(
+    state: &mut AppState,
+    terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    key: KeyEvent,
+) {
+    match key.code {
+        KeyCode::Esc => leave_modal(state),
+        KeyCode::Enter => {
+            state.accept_workspace_picker_selection_from(terminal_runtimes);
+        }
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => leave_modal(state),
+        KeyCode::Tab => state.cycle_quick_switch_workspace_from(terminal_runtimes, 1),
+        KeyCode::BackTab => state.cycle_quick_switch_workspace_from(terminal_runtimes, -1),
+        KeyCode::Char('s') if quick_switch_command_modifiers(key.modifiers) => {
+            state.enter_quick_switch_search_from(terminal_runtimes);
+        }
+        KeyCode::Char('l') if quick_switch_command_modifiers(key.modifiers) => {
+            state.expand_selected_workspace_picker_workspace_from(terminal_runtimes);
+        }
+        KeyCode::Char('h') if quick_switch_command_modifiers(key.modifiers) => {
+            state.collapse_selected_workspace_picker_workspace_from(terminal_runtimes);
+        }
+        KeyCode::Down | KeyCode::Char('j') if quick_switch_command_modifiers(key.modifiers) => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+        }
+        KeyCode::Up | KeyCode::Char('k') if quick_switch_command_modifiers(key.modifiers) => {
+            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+        }
+        KeyCode::Home => {
+            state.workspace_picker.selected = 0;
+            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+        }
+        KeyCode::End => {
+            state.workspace_picker.selected = state
+                .workspace_picker_rows_from(terminal_runtimes)
+                .len()
+                .saturating_sub(1);
+            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+        }
+        _ => {}
+    }
+}
+
+fn quick_switch_command_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty() || modifiers == KeyModifiers::CONTROL
 }
 
 pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
@@ -981,6 +1041,95 @@ mod tests {
 
         assert_eq!(state.active, Some(0));
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn quick_switch_search_toggle_returns_to_quick_switch_on_escape() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_quick_switch_workspace_from(&terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
+        );
+        assert_eq!(
+            state.workspace_picker.mode,
+            WorkspacePickerMode::QuickSwitchSearch
+        );
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.workspace_picker.mode,
+            WorkspacePickerMode::QuickSwitch
+        );
+        assert_eq!(state.mode, Mode::WorkspacePicker);
+    }
+
+    #[test]
+    fn quick_switch_accepts_control_modified_commands_while_shortcut_is_held() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.workspaces[1].test_add_tab(Some("logs"));
+        state.switch_workspace(1);
+        state.switch_workspace(0);
+        state.open_quick_switch_workspace_from(&terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        );
+        assert!(state
+            .workspace_picker_rows_from(&terminal_runtimes)
+            .iter()
+            .any(|row| row.ws_idx == 1 && row.is_tab && row.label == "logs"));
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+                .is_tab
+        );
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            !state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+                .is_tab
+        );
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+        );
+        assert!(!state
+            .workspace_picker_rows_from(&terminal_runtimes)
+            .iter()
+            .any(|row| row.ws_idx == 1 && row.is_tab));
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            state.workspace_picker.mode,
+            WorkspacePickerMode::QuickSwitchSearch
+        );
     }
 
     #[test]

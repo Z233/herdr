@@ -102,6 +102,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
 
     let workspace_tab = vec![
         help_entry(keybind_label(&kb.workspace_picker), "workspace picker"),
+        help_entry(
+            keybind_label(&kb.quick_switch_workspace),
+            "quick workspace switch",
+        ),
         help_entry(keybind_label(&kb.goto), "session navigator"),
         help_entry(keybind_label(&kb.new_workspace), "new workspace"),
         help_entry(keybind_label(&kb.new_worktree), "new worktree"),

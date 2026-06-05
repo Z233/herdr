@@ -41,10 +41,9 @@ impl From<KeyEvent> for TerminalKey {
     }
 }
 
-pub fn ime_compatible_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
-    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+pub fn host_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,13 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_enhancement_flags_stay_ime_compatible() {
-        let flags = ime_compatible_keyboard_enhancement_flags();
+    fn keyboard_enhancement_flags_request_key_release_events() {
+        let flags = host_keyboard_enhancement_flags();
 
-        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
-        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
     }
 
     #[test]

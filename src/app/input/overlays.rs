@@ -438,20 +438,34 @@ impl AppState {
     }
 
     pub(crate) fn workspace_picker_search_rect(&self) -> Rect {
+        if !self.workspace_picker.mode.search_visible() {
+            return Rect::default();
+        }
         let inner = self.workspace_picker_inner_rect();
         Rect::new(inner.x, inner.y, inner.width, inner.height.min(1))
     }
 
     pub(crate) fn workspace_picker_content_rect(&self) -> Rect {
         let inner = self.workspace_picker_inner_rect();
-        if inner.height <= 3 {
+        if self.workspace_picker.mode.search_visible() {
+            if inner.height <= 3 {
+                return Rect::default();
+            }
+            return Rect::new(
+                inner.x,
+                inner.y + 2,
+                inner.width,
+                inner.height.saturating_sub(3),
+            );
+        }
+        if inner.height <= 1 {
             return Rect::default();
         }
         Rect::new(
             inner.x,
-            inner.y + 2,
+            inner.y,
             inner.width,
-            inner.height.saturating_sub(3),
+            inner.height.saturating_sub(1),
         )
     }
 

@@ -11,7 +11,7 @@ use super::{
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::{
-    app::state::{AppState, WorkspacePickerPreview, WorkspacePickerRow},
+    app::state::{AppState, WorkspacePickerMode, WorkspacePickerPreview, WorkspacePickerRow},
     terminal::TerminalRuntimeRegistry,
 };
 
@@ -32,12 +32,14 @@ pub(super) fn render_workspace_picker_overlay(
     let preview = app.workspace_picker_preview_rect();
     let footer = app.workspace_picker_footer_rect();
 
-    render_search(app, terminal_runtimes, frame, search);
-    render_separator(
-        frame,
-        Rect::new(inner.x, search.y + 1, inner.width, 1),
-        app.palette.surface1,
-    );
+    if app.workspace_picker.mode.search_visible() {
+        render_search(app, terminal_runtimes, frame, search);
+        render_separator(
+            frame,
+            Rect::new(inner.x, search.y + 1, inner.width, 1),
+            app.palette.surface1,
+        );
+    }
     render_rows(app, terminal_runtimes, frame, body);
     render_workspace_picker_scrollbar(app, terminal_runtimes, frame, body);
     render_vertical_divider(app, frame, divider);
@@ -58,10 +60,13 @@ fn render_search(
     let p = &app.palette;
     let rows = app.workspace_picker_rows_from(terminal_runtimes);
     let query = app.workspace_picker.query.trim();
-    let mut spans = vec![
-        Span::styled(" workspaces ", Style::default().fg(p.accent)),
-        Span::styled("/ ", Style::default().fg(p.overlay0)),
-    ];
+    let title = if app.workspace_picker.mode.is_quick_switch() {
+        " quick switch "
+    } else {
+        " workspaces "
+    };
+    let mut spans = vec![Span::styled(title, Style::default().fg(p.accent))];
+    spans.push(Span::styled("/ ", Style::default().fg(p.overlay0)));
     if query.is_empty() {
         spans.push(Span::styled(
             "search workspace names",
@@ -94,8 +99,13 @@ fn render_rows(
 
     let rows = app.workspace_picker_rows_from(terminal_runtimes);
     if rows.is_empty() {
+        let message = if app.workspaces.is_empty() {
+            " no workspaces"
+        } else {
+            " no matching workspaces"
+        };
         frame.render_widget(
-            Paragraph::new(" no workspaces").style(Style::default().fg(app.palette.overlay0)),
+            Paragraph::new(message).style(Style::default().fg(app.palette.overlay0)),
             body,
         );
         return;
@@ -143,7 +153,19 @@ fn render_row(
 
     let marker = if selected { "→" } else { " " };
     let current = if row.is_current { "◆" } else { " " };
-    let fixed = format!(" {marker} {current} ");
+    let fixed = if app.workspace_picker.mode.is_quick_switch() {
+        let caret = if row.is_tab {
+            " "
+        } else if row.expanded {
+            "▾"
+        } else {
+            "▸"
+        };
+        let indent = "  ".repeat(row.depth as usize);
+        format!(" {indent}{caret} {marker} {current} ")
+    } else {
+        format!(" {marker} {current} ")
+    };
     let meta_width = row_meta_width(rect.width);
     let title_budget = rect
         .width
@@ -292,16 +314,36 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let key = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
-    let line = Line::from(vec![
-        Span::styled(" enter", key),
-        Span::styled(" switch  ", dim),
-        Span::styled("type", key),
-        Span::styled(" search  ", dim),
-        Span::styled("j/k/↑↓", key),
-        Span::styled(" move  ", dim),
-        Span::styled("esc", key),
-        Span::styled(" close", dim),
-    ]);
+    let line = if app.workspace_picker.mode.is_quick_switch() {
+        let esc_label = if app.workspace_picker.mode == WorkspacePickerMode::QuickSwitchSearch {
+            " back"
+        } else {
+            " close"
+        };
+        Line::from(vec![
+            Span::styled(" enter", key),
+            Span::styled(" switch  ", dim),
+            Span::styled("tab", key),
+            Span::styled(" cycle  ", dim),
+            Span::styled("l/h", key),
+            Span::styled(" expand  ", dim),
+            Span::styled("s", key),
+            Span::styled(" search  ", dim),
+            Span::styled("esc", key),
+            Span::styled(esc_label, dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" enter", key),
+            Span::styled(" switch  ", dim),
+            Span::styled("type", key),
+            Span::styled(" search  ", dim),
+            Span::styled("j/k/↑↓", key),
+            Span::styled(" move  ", dim),
+            Span::styled("esc", key),
+            Span::styled(" close", dim),
+        ])
+    };
     frame.render_widget(Paragraph::new(line), area);
 }
 

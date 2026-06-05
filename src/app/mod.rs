@@ -446,6 +446,7 @@ impl App {
             keybind_help: state::KeybindHelpState { scroll: 0 },
             navigator: state::NavigatorState::default(),
             workspace_picker: state::WorkspacePickerState::default(),
+            workspace_mru: Vec::new(),
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
@@ -1336,6 +1337,7 @@ impl App {
                         }
                         crossterm::event::KeyEventKind::Release => {
                             self.suppressed_repeat_keys.remove(&key_id);
+                            self.handle_key_release(key);
                         }
                     }
                 }
@@ -1479,7 +1481,7 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Mutex;
@@ -3500,6 +3502,112 @@ last_pane = "prefix+tab"
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(second_root));
+    }
+
+    #[test]
+    fn route_client_events_quick_switch_release_accepts_selected_workspace() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.switch_workspace(1);
+        app.state.switch_workspace(2);
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+        assert_eq!(
+            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_picker.selected]
+                .ws_idx,
+            1
+        );
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Modifier(ModifierKeyCode::LeftControl),
+                KeyModifiers::empty(),
+                KeyEventKind::Release,
+            )],
+            true,
+        );
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(1));
+    }
+
+    #[tokio::test]
+    async fn raw_input_release_quick_switch_binding_accepts_selected_workspace() {
+        let mut app = test_app();
+        app.state.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.switch_workspace(1);
+        app.state.switch_workspace(2);
+
+        let press_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ))
+            .await;
+        assert!(press_handled);
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+
+        let cycle_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ))
+            .await;
+        assert!(cycle_handled);
+        assert_eq!(
+            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_picker.selected]
+                .ws_idx,
+            0
+        );
+
+        let unrelated_release_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::empty(),
+                KeyEventKind::Release,
+            ))
+            .await;
+        assert!(!unrelated_release_handled);
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+
+        let release_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Modifier(ModifierKeyCode::LeftControl),
+                KeyModifiers::empty(),
+                KeyEventKind::Release,
+            ))
+            .await;
+
+        assert!(release_handled);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.active, Some(0));
     }
 
     #[tokio::test]

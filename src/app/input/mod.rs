@@ -1,6 +1,8 @@
 //! Input handling — translates crossterm key/mouse events into state mutations.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
@@ -33,6 +35,7 @@ mod settings;
 mod sidebar;
 mod terminal;
 
+use self::navigate::NavigateAction;
 pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
@@ -48,7 +51,7 @@ use self::{
     },
     settings::SettingsAction,
 };
-use super::state::{AppState, Mode};
+use super::state::{AppState, Mode, WorkspacePickerMode};
 use super::App;
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,27 @@ use super::App;
 // ---------------------------------------------------------------------------
 
 impl App {
+    pub(crate) fn handle_key_release(&mut self, key: TerminalKey) -> bool {
+        if self.state.mode != Mode::WorkspacePicker
+            || self.state.workspace_picker.mode != WorkspacePickerMode::QuickSwitch
+        {
+            return false;
+        }
+
+        if terminal_direct_navigation_action(&self.state, key)
+            != Some(NavigateAction::QuickSwitchWorkspace)
+            && !quick_switch_modifier_release_matches(
+                &self.state.keybinds.quick_switch_workspace,
+                key,
+            )
+        {
+            return false;
+        }
+
+        self.state
+            .accept_workspace_picker_selection_from(&self.terminal_runtimes)
+    }
+
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
@@ -383,6 +407,44 @@ impl App {
                 Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
         }
         copied
+    }
+}
+
+fn quick_switch_modifier_release_matches(
+    bindings: &crate::config::ActionKeybinds,
+    key: TerminalKey,
+) -> bool {
+    let Some(modifier) = released_modifier(key.code) else {
+        return false;
+    };
+
+    bindings
+        .bindings
+        .iter()
+        .any(|binding| binding.trigger.is_direct() && binding.trigger.combo().1.contains(modifier))
+}
+
+fn released_modifier(code: KeyCode) -> Option<KeyModifiers> {
+    match code {
+        KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift) => {
+            Some(KeyModifiers::SHIFT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl) => {
+            Some(KeyModifiers::CONTROL)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt) => {
+            Some(KeyModifiers::ALT)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper) => {
+            Some(KeyModifiers::SUPER)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftHyper | ModifierKeyCode::RightHyper) => {
+            Some(KeyModifiers::HYPER)
+        }
+        KeyCode::Modifier(ModifierKeyCode::LeftMeta | ModifierKeyCode::RightMeta) => {
+            Some(KeyModifiers::META)
+        }
+        _ => None,
     }
 }
 
