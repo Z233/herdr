@@ -103,33 +103,16 @@ impl App {
     ) -> bool {
         let previous_mode = self.state.mode;
         let changed = match event {
-            crate::raw_input::RawInputEvent::Key(key) => {
-                let key_id = repeat_key_identity(&key);
-                match key.kind {
-                    crossterm::event::KeyEventKind::Press => {
-                        if self.state.mode == Mode::Terminal {
-                            self.suppressed_repeat_keys.remove(&key_id);
-                        } else {
-                            self.suppressed_repeat_keys.insert(key_id);
-                        }
-                        self.handle_key(key).await;
-                        true
-                    }
-                    crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
-                            && !self.suppressed_repeat_keys.contains(&key_id)
-                        {
-                            self.handle_key(key).await;
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    crossterm::event::KeyEventKind::Release => {
-                        self.suppressed_repeat_keys.remove(&key_id);
-                        self.handle_key_release(key)
-                    }
+            crate::raw_input::RawInputEvent::Key(key) => self.handle_raw_key_event(key).await,
+            crate::raw_input::RawInputEvent::Text(text) => {
+                let mut changed = false;
+                for event in crate::raw_input::text_input_events(&text) {
+                    let crate::raw_input::RawInputEvent::Key(key) = event else {
+                        continue;
+                    };
+                    changed |= self.handle_raw_key_event(key).await;
                 }
+                changed
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
                 self.handle_paste(text).await;
@@ -164,6 +147,35 @@ impl App {
         self.sync_prefix_input_source(previous_mode);
         self.shutdown_detached_terminal_runtimes();
         changed
+    }
+
+    async fn handle_raw_key_event(&mut self, key: crate::input::TerminalKey) -> bool {
+        let key_id = repeat_key_identity(&key);
+        match key.kind {
+            crossterm::event::KeyEventKind::Press => {
+                if self.state.mode == Mode::Terminal {
+                    self.suppressed_repeat_keys.remove(&key_id);
+                } else {
+                    self.suppressed_repeat_keys.insert(key_id);
+                }
+                self.handle_key(key).await;
+                true
+            }
+            crossterm::event::KeyEventKind::Repeat => {
+                if self.state.mode == Mode::Terminal
+                    && !self.suppressed_repeat_keys.contains(&key_id)
+                {
+                    self.handle_key(key).await;
+                    true
+                } else {
+                    false
+                }
+            }
+            crossterm::event::KeyEventKind::Release => {
+                self.suppressed_repeat_keys.remove(&key_id);
+                self.handle_key_release(key)
+            }
+        }
     }
 
     fn handle_resize_poll(&mut self) -> bool {

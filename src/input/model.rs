@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags};
 use serde::{Deserialize, Serialize};
 
+const KITTY_REPORT_ASSOCIATED_TEXT: u8 = 0b0001_0000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalKey {
     pub code: KeyCode,
@@ -42,8 +44,15 @@ impl From<KeyEvent> for TerminalKey {
 }
 
 pub fn host_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
-    KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+    let exposed_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+
+    // Crossterm 0.29 does not expose kitty's associated-text bit yet. Keep the
+    // unknown bit so terminals can report IME/composed text while all-keys mode
+    // is enabled for modifier-only press/release events.
+    KeyboardEnhancementFlags::from_bits_retain(exposed_flags.bits() | KITTY_REPORT_ASSOCIATED_TEXT)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,13 +147,17 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_enhancement_flags_request_key_release_events() {
+    fn keyboard_enhancement_flags_request_release_events_and_associated_text() {
         let flags = host_keyboard_enhancement_flags();
 
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
-        assert!(!flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert_eq!(
+            flags.bits() & KITTY_REPORT_ASSOCIATED_TEXT,
+            KITTY_REPORT_ASSOCIATED_TEXT
+        );
     }
 
     #[test]

@@ -1381,6 +1381,12 @@ impl App {
                         }
                     }
                 }
+                crate::raw_input::RawInputEvent::Text(text) => {
+                    self.route_client_events(
+                        crate::raw_input::text_input_events(&text),
+                        apply_host_terminal_theme,
+                    );
+                }
                 crate::raw_input::RawInputEvent::OuterFocusGained
                 | crate::raw_input::RawInputEvent::OuterFocusLost => {}
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
@@ -3768,6 +3774,31 @@ last_pane = "prefix+tab"
         app.state.mode = Mode::Terminal;
 
         app.route_client_input(text.as_bytes().to_vec());
+
+        let mut forwarded = Vec::new();
+        for _ in text.chars() {
+            let chunk = rx.recv().await.unwrap();
+            forwarded.extend_from_slice(&chunk);
+        }
+        assert_eq!(forwarded, text.as_bytes());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn route_client_input_forwards_kitty_associated_ime_text_to_focused_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let text = "你好";
+        let (runtime, mut rx) =
+            TerminalRuntime::test_with_channel_capacity(80, 24, text.chars().count());
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        app.route_client_input(b"\x1b[0;;20320:22909u".to_vec());
 
         let mut forwarded = Vec::new();
         for _ in text.chars() {

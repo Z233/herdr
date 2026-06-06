@@ -10,4 +10,4 @@ pub use model::{
     host_keyboard_enhancement_flags, host_modify_other_keys_mode, KeyboardProtocol,
     MouseProtocolEncoding, MouseProtocolMode, TerminalKey,
 };
-pub use parse::parse_terminal_key_sequence;
+pub use parse::{parse_kitty_associated_text, parse_terminal_key_sequence};

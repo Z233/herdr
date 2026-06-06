@@ -1,12 +1,32 @@
-use crossterm::event::{KeyCode, KeyModifiers, MediaKeyCode, ModifierKeyCode};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MediaKeyCode, ModifierKeyCode};
 
 use super::TerminalKey;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KittyAssociatedText {
+    pub text: String,
+    pub kind: KeyEventKind,
+}
 
 #[allow(dead_code)] // Next step: raw stdin parser will feed TerminalKey directly through this path.
 pub fn parse_terminal_key_sequence(data: &str) -> Option<TerminalKey> {
     parse_kitty_key_sequence(data)
         .or_else(|| parse_modify_other_keys_sequence(data))
         .or_else(|| parse_legacy_key_sequence(data))
+}
+
+pub fn parse_kitty_associated_text(data: &str) -> Option<KittyAssociatedText> {
+    let body = data.strip_prefix("\x1b[")?.strip_suffix('u')?;
+    let (head, text_part) = body.rsplit_once(';')?;
+    let text = parse_associated_text_codepoints(text_part)?;
+    let (_key_part, modifier_and_event) = head.rsplit_once(';')?;
+    let event_type = modifier_and_event
+        .split_once(':')
+        .map(|(_modifier, event)| event)
+        .filter(|event| !event.is_empty());
+    let kind = parse_kitty_event_type(event_type)?;
+
+    Some(KittyAssociatedText { text, kind })
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -220,6 +240,23 @@ fn parse_kitty_event_type(value: Option<&str>) -> Option<crossterm::event::KeyEv
         "3" => Some(crossterm::event::KeyEventKind::Release),
         _ => None,
     }
+}
+
+fn parse_associated_text_codepoints(value: &str) -> Option<String> {
+    let mut text = String::new();
+    for field in value.split(':') {
+        if field.is_empty() {
+            return None;
+        }
+        let codepoint = field.parse::<u32>().ok()?;
+        let ch = char::from_u32(codepoint)?;
+        if ch.is_control() {
+            return None;
+        }
+        text.push(ch);
+    }
+
+    (!text.is_empty()).then_some(text)
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -440,6 +477,29 @@ mod tests {
         assert_eq!(key.modifiers, KeyModifiers::SHIFT);
         assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
         assert_eq!(key.shifted_codepoint, Some('L' as u32));
+    }
+
+    #[test]
+    fn parse_kitty_associated_text_accepts_pure_ime_text() {
+        let associated = parse_kitty_associated_text("\x1b[0;;20320:22909u").unwrap();
+        assert_eq!(associated.text, "你好");
+        assert_eq!(associated.kind, crossterm::event::KeyEventKind::Press);
+    }
+
+    #[test]
+    fn parse_kitty_associated_text_preserves_event_kind() {
+        let repeat = parse_kitty_associated_text("\x1b[97;1:2;97u").unwrap();
+        assert_eq!(repeat.text, "a");
+        assert_eq!(repeat.kind, crossterm::event::KeyEventKind::Repeat);
+
+        let release = parse_kitty_associated_text("\x1b[97;1:3;97u").unwrap();
+        assert_eq!(release.text, "a");
+        assert_eq!(release.kind, crossterm::event::KeyEventKind::Release);
+    }
+
+    #[test]
+    fn parse_kitty_associated_text_rejects_control_code_text() {
+        assert!(parse_kitty_associated_text("\x1b[13;1;13u").is_none());
     }
 
     #[test]

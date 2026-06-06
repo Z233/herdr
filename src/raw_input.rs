@@ -94,7 +94,7 @@ pub fn parse_raw_input_bytes_sync(data: &[u8]) -> Vec<RawInputEvent> {
 use std::os::fd::AsRawFd;
 use tokio::sync::mpsc;
 
-use crate::input::{parse_terminal_key_sequence, TerminalKey};
+use crate::input::{parse_kitty_associated_text, parse_terminal_key_sequence, TerminalKey};
 use crate::terminal_theme::{parse_default_color_response, DefaultColorKind, RgbColor};
 
 const ESC: u8 = 0x1b;
@@ -104,6 +104,7 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 #[derive(Debug)]
 pub enum RawInputEvent {
     Key(TerminalKey),
+    Text(String),
     Paste(String),
     Mouse(MouseEvent),
     OuterFocusGained,
@@ -132,20 +133,38 @@ impl RawInputFramer {
     fn events_from_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
         chunks
             .into_iter()
-            .filter_map(|chunk| {
+            .flat_map(|chunk| {
                 if chunk.as_slice() == [ESC] {
-                    return Some(RawInputEvent::Key(TerminalKey::new(
+                    return vec![RawInputEvent::Key(TerminalKey::new(
                         crossterm::event::KeyCode::Esc,
                         KeyModifiers::empty(),
-                    )));
+                    ))];
                 }
-                extract_one_event(&chunk).map(|(event, _consumed)| {
-                    tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
-                    event
-                })
+                let Some((event, _consumed)) = extract_one_event(&chunk) else {
+                    return Vec::new();
+                };
+                tracing::debug!(raw_bytes = ?chunk, event = ?event, "raw input event parsed");
+                expand_text_event(event)
             })
             .collect()
     }
+}
+
+pub(crate) fn expand_text_event(event: RawInputEvent) -> Vec<RawInputEvent> {
+    match event {
+        RawInputEvent::Text(text) => text
+            .chars()
+            .filter_map(|ch| {
+                let mut buf = [0u8; 4];
+                parse_terminal_key_sequence(ch.encode_utf8(&mut buf)).map(RawInputEvent::Key)
+            })
+            .collect(),
+        other => vec![other],
+    }
+}
+
+pub(crate) fn text_input_events(text: &str) -> Vec<RawInputEvent> {
+    expand_text_event(RawInputEvent::Text(text.to_string()))
 }
 
 #[derive(Default)]
@@ -353,7 +372,9 @@ fn drain_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent>) {
             continue;
         };
         tracing::debug!(raw_bytes = ?bytes, event = ?event, "raw input event parsed");
-        let _ = tx.blocking_send(event);
+        for event in expand_text_event(event) {
+            let _ = tx.blocking_send(event);
+        }
     }
 }
 
@@ -383,7 +404,9 @@ fn flush_incomplete_buffer(buffer: &mut Vec<u8>, tx: &mpsc::Sender<RawInputEvent
         let Some((event, _consumed)) = extract_one_event(&bytes) else {
             return;
         };
-        let _ = tx.blocking_send(event);
+        for event in expand_text_event(event) {
+            let _ = tx.blocking_send(event);
+        }
     }
 }
 
@@ -472,6 +495,15 @@ fn extract_one_event(buffer: &[u8]) -> Option<(RawInputEvent, usize)> {
 
         if let Some(mouse) = parse_sgr_mouse(seq) {
             return Some((RawInputEvent::Mouse(mouse), seq_len));
+        }
+
+        if let Some(associated) = parse_kitty_associated_text(seq) {
+            if matches!(
+                associated.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
+                return Some((RawInputEvent::Text(associated.text), seq_len));
+            }
         }
 
         if let Some(key) = parse_terminal_key_sequence(seq) {
@@ -795,6 +827,50 @@ mod tests {
         assert_eq!(key.modifiers, KeyModifiers::SHIFT);
         assert_eq!(key.kind, KeyEventKind::Release);
         assert_eq!(key.shifted_codepoint, Some('L' as u32));
+    }
+
+    #[test]
+    fn parses_kitty_associated_text_as_text_event() {
+        let (RawInputEvent::Text(text), consumed) =
+            extract_one_event(b"\x1b[0;;20320:22909u").unwrap()
+        else {
+            panic!("expected text");
+        };
+        assert_eq!(consumed, 17);
+        assert_eq!(text, "你好");
+    }
+
+    #[test]
+    fn kitty_associated_text_expands_to_character_key_events() {
+        let events = parse_raw_input_bytes_sync(b"\x1b[0;;20320:22909u");
+        assert_eq!(events.len(), 2);
+
+        let RawInputEvent::Key(first) = &events[0] else {
+            panic!("expected first key");
+        };
+        assert_eq!(first.code, KeyCode::Char('你'));
+        assert_eq!(first.modifiers, KeyModifiers::empty());
+        assert_eq!(first.kind, KeyEventKind::Press);
+
+        let RawInputEvent::Key(second) = &events[1] else {
+            panic!("expected second key");
+        };
+        assert_eq!(second.code, KeyCode::Char('好'));
+        assert_eq!(second.modifiers, KeyModifiers::empty());
+        assert_eq!(second.kind, KeyEventKind::Press);
+    }
+
+    #[test]
+    fn kitty_associated_text_expansion_preserves_printable_shift_text() {
+        let events = parse_raw_input_bytes_sync(b"\x1b[97:65;2:1;65u");
+        assert_eq!(events.len(), 1);
+
+        let RawInputEvent::Key(key) = &events[0] else {
+            panic!("expected key");
+        };
+        assert_eq!(key.code, KeyCode::Char('A'));
+        assert_eq!(key.modifiers, KeyModifiers::SHIFT);
+        assert_eq!(key.kind, KeyEventKind::Press);
     }
 
     #[test]
