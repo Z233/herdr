@@ -38,6 +38,10 @@ impl App {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
+        if raw_key.is_modifier_only() {
+            return;
+        }
+
         if self.state.pending_chord.is_none() && self.state.is_prefix_key(raw_key) {
             if !self.pass_through_key_to_focused_pane(raw_key) {
                 leave_command_mode(&mut self.state);
@@ -1136,7 +1140,7 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
     use ratatui::layout::Direction;
 
     use super::super::{state_with_workspaces, unique_temp_path, wait_for_file};
@@ -2612,5 +2616,50 @@ last_pane = "prefix+tab"
 
         assert!(state.detach_requested);
         assert!(!state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn standalone_modifier_key_does_not_exit_prefix_mode() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        // Enter prefix mode
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        assert_eq!(app.state.mode, Mode::Prefix);
+
+        // Standalone LeftShift (press) should NOT exit prefix mode
+        app.handle_key(TerminalKey::new(
+            KeyCode::Modifier(ModifierKeyCode::LeftShift),
+            KeyModifiers::SHIFT,
+        ))
+        .await;
+
+        assert_eq!(app.state.mode, Mode::Prefix);
+
+        // Standalone LeftShift (release) should also NOT exit prefix mode
+        app.handle_key(
+            TerminalKey::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::SHIFT,
+            )
+            .with_kind(KeyEventKind::Release),
+        )
+        .await;
+
+        assert_eq!(app.state.mode, Mode::Prefix);
     }
 }

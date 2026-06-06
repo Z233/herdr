@@ -35,6 +35,15 @@ impl TerminalKey {
     pub fn as_key_event(self) -> KeyEvent {
         KeyEvent::new_with_kind(self.code, self.modifiers, self.kind)
     }
+
+    /// Returns true if this key event represents a standalone modifier key
+    /// (e.g. LeftShift, RightControl) without an accompanying character.
+    ///
+    /// See also `terminal.rs` `is_modifier_only_key` for the equivalent free
+    /// function used before this method existed.
+    pub fn is_modifier_only(&self) -> bool {
+        matches!(self.code, KeyCode::Modifier(_))
+    }
 }
 
 impl From<KeyEvent> for TerminalKey {
