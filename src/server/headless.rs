@@ -3340,6 +3340,9 @@ mod tests {
 
     use crate::app::AppState;
     use crate::protocol::CursorState;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_HEADLESS_SERVER_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn test_headless_server() -> HeadlessServer {
         let config = crate::config::Config::default();
@@ -3347,10 +3350,12 @@ mod tests {
         let mut app = crate::app::App::new(&config, true, None, api_rx, api::EventHub::default());
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        let dir_id = TEST_HEADLESS_SERVER_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         let dir = std::env::temp_dir().join(format!(
-            "hh-{}-{}",
+            "hh-{}-{}-{}",
             std::process::id(),
+            dir_id,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
