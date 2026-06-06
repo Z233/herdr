@@ -36,7 +36,6 @@ mod settings;
 mod sidebar;
 mod terminal;
 
-use self::navigate::NavigateAction;
 pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
@@ -67,12 +66,23 @@ impl App {
             return false;
         }
 
-        if terminal_direct_navigation_action(&self.state, key)
-            != Some(NavigateAction::QuickSwitchWorkspace)
-            && !quick_switch_modifier_release_matches(
-                &self.state.keybinds.quick_switch_workspace,
-                key,
-            )
+        // Defensive: bare bindings have no modifier to release-accept.
+        // This is intentionally redundant — `quick_switch_modifier_release_matches`
+        // would already return `false` for bare bindings, but the explicit guard
+        // makes the limitation visible via `tracing::trace!`.
+        if self
+            .state
+            .keybinds
+            .quick_switch_workspace
+            .bindings
+            .iter()
+            .all(|b| b.trigger.is_direct() && b.trigger.combo().1.is_empty())
+        {
+            tracing::trace!("quick_switch_workspace has no modifiers; release-accept unavailable");
+            return false;
+        }
+
+        if !quick_switch_modifier_release_matches(&self.state.keybinds.quick_switch_workspace, key)
         {
             return false;
         }
