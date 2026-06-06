@@ -1,6 +1,4 @@
-#[cfg(test)]
-use crossterm::event::KeyEvent;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
@@ -205,6 +203,15 @@ impl ActionKeybinds {
             .any(|binding| binding.trigger.is_direct() && binding.matches_terminal_key(key))
     }
 
+    pub fn first_direct_combo(&self) -> Option<KeyCombo> {
+        self.bindings
+            .iter()
+            .find_map(|binding| match binding.trigger {
+                BindingTrigger::Direct(combo) => Some(combo),
+                _ => None,
+            })
+    }
+
     pub fn matches_prefix_sequence(&self, keys: &[TerminalKey]) -> bool {
         self.bindings.iter().any(|binding| {
             binding
@@ -318,6 +325,7 @@ pub struct Keybinds {
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub quick_switch_workspace: ActionKeybinds,
+    pub quick_switch_workspace_backward: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
@@ -361,6 +369,31 @@ impl Default for Keybinds {
     fn default() -> Self {
         Config::default().keybinds()
     }
+}
+
+impl Keybinds {
+    pub fn quick_switch_forward_combo(&self) -> Option<KeyCombo> {
+        self.quick_switch_workspace.first_direct_combo()
+    }
+
+    pub fn quick_switch_backward_combo(&self) -> Option<KeyCombo> {
+        self.quick_switch_workspace_backward
+            .first_direct_combo()
+            .or_else(|| {
+                self.quick_switch_forward_combo()
+                    .map(derived_quick_switch_backward_combo)
+            })
+    }
+
+    pub fn quick_switch_command_modifiers(&self) -> Option<KeyModifiers> {
+        self.quick_switch_forward_combo()
+            .map(|(_, modifiers)| modifiers)
+    }
+}
+
+fn derived_quick_switch_backward_combo((code, mut modifiers): KeyCombo) -> KeyCombo {
+    modifiers.insert(KeyModifiers::SHIFT);
+    normalize_key_combo((code, modifiers))
 }
 
 #[derive(Clone)]
@@ -527,6 +560,10 @@ impl Config {
             quick_switch_workspace: action!(
                 "keys.quick_switch_workspace",
                 &self.keys.quick_switch_workspace
+            ),
+            quick_switch_workspace_backward: action!(
+                "keys.quick_switch_workspace_backward",
+                &self.keys.quick_switch_workspace_backward
             ),
             goto: action!("keys.goto", &self.keys.goto),
             detach: action!("keys.detach", &self.keys.detach),
@@ -1245,7 +1282,6 @@ pub fn normalize_key_combo((mut code, mut modifiers): KeyCombo) -> KeyCombo {
     (code, modifiers)
 }
 
-#[cfg(test)]
 pub fn key_event_matches_combo(key: &KeyEvent, combo: KeyCombo) -> bool {
     key_parts_match_combo(key.code, key.modifiers, None, combo)
 }
@@ -1985,6 +2021,56 @@ new_tab = "ctrl+alt+g"
     }
 
     #[test]
+    fn quick_switch_backward_combo_derives_from_forward_direct_binding() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+quick_switch_workspace = "cmd+f13"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(
+            kb.quick_switch_forward_combo(),
+            Some((KeyCode::F(13), KeyModifiers::SUPER))
+        );
+        assert_eq!(
+            kb.quick_switch_backward_combo(),
+            Some((KeyCode::F(13), KeyModifiers::SUPER | KeyModifiers::SHIFT))
+        );
+        assert_eq!(
+            kb.quick_switch_command_modifiers(),
+            Some(KeyModifiers::SUPER)
+        );
+    }
+
+    #[test]
+    fn quick_switch_backward_combo_uses_explicit_binding() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+quick_switch_workspace = "cmd+f13"
+quick_switch_workspace_backward = "cmd+f14"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+
+        assert_eq!(
+            kb.quick_switch_backward_combo(),
+            Some((KeyCode::F(14), KeyModifiers::SUPER))
+        );
+        assert_eq!(
+            binding_triggers(&kb.quick_switch_workspace_backward),
+            vec![BindingTrigger::Direct((
+                KeyCode::F(14),
+                KeyModifiers::SUPER
+            ))]
+        );
+    }
+
+    #[test]
     fn prefixed_indexed_bindings_support_modifiers() {
         let config: Config = toml::from_str(
             r#"
@@ -2035,6 +2121,11 @@ switch_workspace = "prefix+shift+1..9"
                 KeyCode::Tab,
                 KeyModifiers::CONTROL
             ))]
+        );
+        assert!(kb.quick_switch_workspace_backward.bindings.is_empty());
+        assert_eq!(
+            kb.quick_switch_backward_combo(),
+            Some((KeyCode::BackTab, KeyModifiers::CONTROL))
         );
     }
 

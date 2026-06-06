@@ -3565,6 +3565,51 @@ last_pane = "prefix+tab"
         assert_eq!(app.state.active, Some(1));
     }
 
+    #[test]
+    fn route_client_events_quick_switch_release_accepts_configured_modifier() {
+        let cases = [
+            (
+                "ctrl+tab",
+                KeyModifiers::CONTROL,
+                ModifierKeyCode::LeftControl,
+            ),
+            ("cmd+tab", KeyModifiers::SUPER, ModifierKeyCode::LeftSuper),
+            ("alt+tab", KeyModifiers::ALT, ModifierKeyCode::LeftAlt),
+            ("super+tab", KeyModifiers::SUPER, ModifierKeyCode::LeftSuper),
+        ];
+
+        for (binding, modifiers, release_code) in cases {
+            let config: Config =
+                toml::from_str(&format!("[keys]\nquick_switch_workspace = {binding:?}\n"))
+                    .expect("quick switch config should parse");
+            let mut app = test_app();
+            app.state.keybinds = config.keybinds();
+            app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.mode = Mode::Terminal;
+            app.state.switch_workspace(1);
+
+            app.route_client_events(
+                vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Press)],
+                true,
+            );
+            assert_eq!(app.state.mode, Mode::WorkspacePicker, "{binding}");
+
+            app.route_client_events(
+                vec![raw_key(
+                    KeyCode::Modifier(release_code),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Release,
+                )],
+                true,
+            );
+
+            assert_eq!(app.state.mode, Mode::Terminal, "{binding}");
+            assert_eq!(app.state.active, Some(0), "{binding}");
+        }
+    }
+
     #[tokio::test]
     async fn raw_input_release_quick_switch_binding_accepts_selected_workspace() {
         let mut app = test_app();

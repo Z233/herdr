@@ -1711,6 +1711,32 @@ navigate_pane_right = "ctrl+l"
     }
 
     #[test]
+    fn terminal_direct_quick_switch_workspace_shortcut_uses_configured_key() {
+        let cases = [
+            ("cmd+tab", KeyCode::Tab, KeyModifiers::SUPER),
+            ("cmd+f13", KeyCode::F(13), KeyModifiers::SUPER),
+            ("ctrl+f13", KeyCode::F(13), KeyModifiers::CONTROL),
+        ];
+
+        for (binding, code, modifiers) in cases {
+            let config: Config =
+                toml::from_str(&format!("[keys]\nquick_switch_workspace = {binding:?}\n"))
+                    .expect("quick switch config should parse");
+            let mut state = state_with_workspaces(&["test"]);
+            state.keybinds = config.keybinds();
+
+            let action =
+                terminal_direct_navigation_action(&state, TerminalKey::new(code, modifiers));
+
+            assert_eq!(
+                action,
+                Some(NavigateAction::QuickSwitchWorkspace),
+                "{binding}"
+            );
+        }
+    }
+
+    #[test]
     fn prefix_tab_override_can_map_to_last_pane() {
         let config: Config = toml::from_str(
             r#"

@@ -13,9 +13,9 @@ pub use self::{
         upsert_section_value,
     },
     keybinds::{
-        format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
-        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        IndexedKeybind, Keybinds, LiveKeybindConfig, MAX_PREFIX_SEQUENCE_LEN,
+        format_key_combo, key_event_matches_combo, normalize_key_combo, terminal_key_matches_combo,
+        ActionKeybinds, BindingConfig, CommandKeybindConfig, CustomCommandAction,
+        CustomCommandKeybind, IndexedKeybind, Keybinds, LiveKeybindConfig, MAX_PREFIX_SEQUENCE_LEN,
     },
     model::{
         validated_sidebar_bounds, AgentPanelScopeConfig, Config, ConfigReloadReport,

@@ -261,6 +261,8 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the MRU quick workspace switcher. Default: "ctrl+tab"
     pub quick_switch_workspace: BindingConfig,
+    /// Cycle backward in the MRU quick workspace switcher. Derived from quick_switch_workspace when unset.
+    pub quick_switch_workspace_backward: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
@@ -512,6 +514,7 @@ impl Default for KeysConfig {
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::Many(vec!["prefix+w".into(), "prefix+w+w".into()]),
             quick_switch_workspace: BindingConfig::one("ctrl+tab"),
+            quick_switch_workspace_backward: BindingConfig::empty(),
             goto: BindingConfig::one("prefix+g"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),

@@ -6,6 +6,7 @@ use crate::{
         AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
         WorkspacePickerMode,
     },
+    config::key_event_matches_combo,
     input::TerminalKey,
     layout::NavDirection,
 };
@@ -368,27 +369,38 @@ fn handle_quick_switch_workspace_picker_key(
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     key: KeyEvent,
 ) {
+    let forward_cycle = state.keybinds.quick_switch_forward_combo();
+    let backward_cycle = state.keybinds.quick_switch_backward_combo();
+
     match key.code {
         KeyCode::Esc => leave_modal(state),
         KeyCode::Enter => {
             state.accept_workspace_picker_selection_from(terminal_runtimes);
         }
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => leave_modal(state),
-        KeyCode::Tab => state.cycle_quick_switch_workspace_from(terminal_runtimes, 1),
-        KeyCode::BackTab => state.cycle_quick_switch_workspace_from(terminal_runtimes, -1),
-        KeyCode::Char('s') if quick_switch_command_modifiers(key.modifiers) => {
+        _ if forward_cycle.is_some_and(|combo| key_event_matches_combo(&key, combo)) => {
+            state.cycle_quick_switch_workspace_from(terminal_runtimes, 1);
+        }
+        _ if backward_cycle.is_some_and(|combo| key_event_matches_combo(&key, combo)) => {
+            state.cycle_quick_switch_workspace_from(terminal_runtimes, -1);
+        }
+        KeyCode::Char('s') if quick_switch_command_modifiers(state, key.modifiers) => {
             state.enter_quick_switch_search_from(terminal_runtimes);
         }
-        KeyCode::Char('l') if quick_switch_command_modifiers(key.modifiers) => {
+        KeyCode::Char('l') if quick_switch_command_modifiers(state, key.modifiers) => {
             state.expand_selected_workspace_picker_workspace_from(terminal_runtimes);
         }
-        KeyCode::Char('h') if quick_switch_command_modifiers(key.modifiers) => {
+        KeyCode::Char('h') if quick_switch_command_modifiers(state, key.modifiers) => {
             state.collapse_selected_workspace_picker_workspace_from(terminal_runtimes);
         }
-        KeyCode::Down | KeyCode::Char('j') if quick_switch_command_modifiers(key.modifiers) => {
+        KeyCode::Down | KeyCode::Char('j')
+            if quick_switch_command_modifiers(state, key.modifiers) =>
+        {
             state.move_workspace_picker_selection_from(terminal_runtimes, 1);
         }
-        KeyCode::Up | KeyCode::Char('k') if quick_switch_command_modifiers(key.modifiers) => {
+        KeyCode::Up | KeyCode::Char('k')
+            if quick_switch_command_modifiers(state, key.modifiers) =>
+        {
             state.move_workspace_picker_selection_from(terminal_runtimes, -1);
         }
         KeyCode::Home => {
@@ -408,8 +420,12 @@ fn handle_quick_switch_workspace_picker_key(
     }
 }
 
-fn quick_switch_command_modifiers(modifiers: KeyModifiers) -> bool {
-    modifiers.is_empty() || modifiers == KeyModifiers::CONTROL
+fn quick_switch_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty()
+        || state
+            .keybinds
+            .quick_switch_command_modifiers()
+            .is_some_and(|quick_switch_modifiers| modifiers == quick_switch_modifiers)
 }
 
 pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
@@ -959,6 +975,53 @@ mod tests {
         std::env::temp_dir().join(unique).join("config.toml")
     }
 
+    fn config_with_quick_switch(
+        quick_switch_workspace: &str,
+        quick_switch_workspace_backward: Option<&str>,
+    ) -> crate::config::Config {
+        let backward = quick_switch_workspace_backward
+            .map(|binding| format!("quick_switch_workspace_backward = {binding:?}\n"))
+            .unwrap_or_default();
+        toml::from_str(&format!(
+            "[keys]\nquick_switch_workspace = {quick_switch_workspace:?}\n{backward}"
+        ))
+        .expect("quick switch config should parse")
+    }
+
+    fn state_with_quick_switch_binding(
+        quick_switch_workspace: &str,
+        quick_switch_workspace_backward: Option<&str>,
+    ) -> (
+        AppState,
+        crate::terminal::TerminalRuntimeRegistry,
+        KeyModifiers,
+    ) {
+        let config =
+            config_with_quick_switch(quick_switch_workspace, quick_switch_workspace_backward);
+        let quick_switch_modifiers = config
+            .keybinds()
+            .quick_switch_command_modifiers()
+            .expect("quick switch should have a direct binding");
+        let mut state = state_with_workspaces(&["main", "issue", "docs"]);
+        state.keybinds = config.keybinds();
+        state.workspaces[1].test_add_tab(Some("logs"));
+        state.workspaces[2].test_add_tab(Some("logs"));
+        state.switch_workspace(2);
+        state.switch_workspace(0);
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        (state, terminal_runtimes, quick_switch_modifiers)
+    }
+
+    fn selected_workspace_picker_ws_idx(
+        state: &AppState,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> usize {
+        let rows = state.workspace_picker_rows_from(terminal_runtimes);
+        rows[state.workspace_picker.selected].ws_idx
+    }
+
     #[test]
     fn custom_resize_key_exits_resize_mode() {
         let mut state = state_with_workspaces(&["test"]);
@@ -1129,6 +1192,179 @@ mod tests {
         assert_eq!(
             state.workspace_picker.mode,
             WorkspacePickerMode::QuickSwitchSearch
+        );
+    }
+
+    #[test]
+    fn quick_switch_cycle_and_commands_follow_configured_direct_binding() {
+        let cases = [
+            (
+                "ctrl+tab",
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyCode::Tab,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                "cmd+tab",
+                KeyCode::Tab,
+                KeyModifiers::SUPER,
+                KeyCode::Tab,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            ),
+            (
+                "alt+tab",
+                KeyCode::Tab,
+                KeyModifiers::ALT,
+                KeyCode::Tab,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ),
+            (
+                "super+tab",
+                KeyCode::Tab,
+                KeyModifiers::SUPER,
+                KeyCode::Tab,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            ),
+            (
+                "cmd+f13",
+                KeyCode::F(13),
+                KeyModifiers::SUPER,
+                KeyCode::F(13),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            ),
+            (
+                "ctrl+f13",
+                KeyCode::F(13),
+                KeyModifiers::CONTROL,
+                KeyCode::F(13),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ];
+
+        for (binding, forward_code, forward_modifiers, backward_code, backward_modifiers) in cases {
+            let (mut state, terminal_runtimes, command_modifiers) =
+                state_with_quick_switch_binding(binding, None);
+            let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(forward_code, forward_modifiers),
+            );
+            assert_ne!(
+                selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+                initial_ws,
+                "{binding} should cycle forward"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(backward_code, backward_modifiers),
+            );
+            assert_eq!(
+                selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+                initial_ws,
+                "{binding} should cycle backward"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char('l'), command_modifiers),
+            );
+            assert!(
+                state
+                    .workspace_picker_rows_from(&terminal_runtimes)
+                    .iter()
+                    .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
+                "{binding} should expand with the configured modifier"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char('j'), command_modifiers),
+            );
+            assert!(
+                state.workspace_picker_rows_from(&terminal_runtimes)
+                    [state.workspace_picker.selected]
+                    .is_tab,
+                "{binding} should move down with the configured modifier"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char('k'), command_modifiers),
+            );
+            assert!(
+                !state.workspace_picker_rows_from(&terminal_runtimes)
+                    [state.workspace_picker.selected]
+                    .is_tab,
+                "{binding} should move up with the configured modifier"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char('h'), command_modifiers),
+            );
+            assert!(
+                !state
+                    .workspace_picker_rows_from(&terminal_runtimes)
+                    .iter()
+                    .any(|row| row.ws_idx == initial_ws && row.is_tab),
+                "{binding} should collapse with the configured modifier"
+            );
+
+            handle_workspace_picker_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char('s'), command_modifiers),
+            );
+            assert_eq!(
+                state.workspace_picker.mode,
+                WorkspacePickerMode::QuickSwitchSearch,
+                "{binding} should enter search with the configured modifier"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_switch_backward_cycle_uses_explicit_override_when_set() {
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("cmd+f13", Some("cmd+f14"));
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::F(13), KeyModifiers::SUPER),
+        );
+        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        assert_ne!(after_forward, initial_ws);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::F(13), KeyModifiers::SUPER | KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            after_forward,
+            "derived backward shortcut should not apply when an override is set"
+        );
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::F(14), KeyModifiers::SUPER),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            initial_ws
         );
     }
 

@@ -139,6 +139,7 @@ The default keymap is prefix-first and avoids direct shortcuts that can steal in
 detach = "prefix+q"
 workspace_picker = "prefix+w"
 quick_switch_workspace = "ctrl+tab"
+quick_switch_workspace_backward = ""
 goto = "prefix+g"
 new_workspace = "prefix+shift+n"
 new_worktree = "prefix+shift+g"
@@ -173,7 +174,7 @@ toggle_sidebar = "prefix+b"
 ```
 
 `workspace_picker` opens a searchable workspace list with a preview of the selected workspace's focused pane.
-`quick_switch_workspace` opens an MRU-ordered workspace switcher. Hold the shortcut, press `tab` or `shift+tab` to cycle workspaces, and release the shortcut to switch; use `l`/`h` to expand or collapse tab rows, and `s` to search.
+`quick_switch_workspace` opens an MRU-ordered workspace switcher. Hold the shortcut, press the same key again to cycle forward, press it with Shift to cycle backward, and release the shortcut modifier to switch; use the same modifier with `l`/`h` to expand or collapse tab rows, and `s` to search. Set `quick_switch_workspace_backward` only when you want a different backward cycle key than the derived Shift shortcut.
 
 Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or with an explicit modified chord when you intentionally want a direct shortcut:
 
