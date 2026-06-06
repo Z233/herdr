@@ -3558,6 +3558,33 @@ last_pane = "prefix+tab"
             1
         );
 
+        // Releasing the cycle key while the modifier is held should NOT close the picker.
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release,
+            )],
+            true,
+        );
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+
+        // Press-side cycling continuity: pressing Tab again while Ctrl held still cycles.
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            true,
+        );
+        assert_eq!(
+            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_picker.selected]
+                .ws_idx,
+            0
+        );
+
         app.route_client_events(
             vec![raw_key(
                 KeyCode::Modifier(ModifierKeyCode::LeftControl),
@@ -3568,7 +3595,7 @@ last_pane = "prefix+tab"
         );
 
         assert_eq!(app.state.mode, Mode::Terminal);
-        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.active, Some(0));
     }
 
     #[test]
@@ -3602,6 +3629,20 @@ last_pane = "prefix+tab"
             );
             assert_eq!(app.state.mode, Mode::WorkspacePicker, "{binding}");
 
+            // Releasing the cycle key while the modifier is held should NOT close the picker.
+            app.route_client_events(
+                vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Release)],
+                true,
+            );
+            assert_eq!(app.state.mode, Mode::WorkspacePicker, "{binding}");
+
+            // Press-side cycling continuity: pressing Tab again while modifier held still cycles.
+            app.route_client_events(
+                vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Press)],
+                true,
+            );
+            assert_eq!(app.state.mode, Mode::WorkspacePicker, "{binding}");
+
             app.route_client_events(
                 vec![raw_key(
                     KeyCode::Modifier(release_code),
@@ -3612,7 +3653,7 @@ last_pane = "prefix+tab"
             );
 
             assert_eq!(app.state.mode, Mode::Terminal, "{binding}");
-            assert_eq!(app.state.active, Some(0), "{binding}");
+            assert_eq!(app.state.active, Some(1), "{binding}");
         }
     }
 
@@ -3655,6 +3696,34 @@ last_pane = "prefix+tab"
             0
         );
 
+        // Releasing the cycle key while the modifier is held should NOT close the picker.
+        let cycle_release_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release,
+            ))
+            .await;
+        assert!(!cycle_release_handled);
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+
+        // Press-side cycling continuity: pressing Tab again while Ctrl held still cycles.
+        let repress_handled = app
+            .handle_raw_input_event(raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ))
+            .await;
+        assert!(repress_handled);
+        assert_eq!(
+            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_picker.selected]
+                .ws_idx,
+            2
+        );
+        assert_eq!(app.state.mode, Mode::WorkspacePicker);
+
         let unrelated_release_handled = app
             .handle_raw_input_event(raw_key(
                 KeyCode::Modifier(ModifierKeyCode::LeftShift),
@@ -3675,7 +3744,7 @@ last_pane = "prefix+tab"
 
         assert!(release_handled);
         assert_eq!(app.state.mode, Mode::Terminal);
-        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.active, Some(2));
     }
 
     #[tokio::test]
