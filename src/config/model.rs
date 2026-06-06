@@ -313,6 +313,10 @@ pub struct KeysConfig {
     pub edit_scrollback: BindingConfig,
     /// Enter keyboard copy mode for the focused pane. Default: "prefix+[".
     pub copy_mode: BindingConfig,
+    /// Enter copy mode and immediately activate easymotion. Unset by default.
+    pub copy_mode_easymotion: BindingConfig,
+    /// Enter copy mode and immediately scroll up half a page. Unset by default.
+    pub copy_mode_scroll_up: BindingConfig,
     /// Focus the pane to the left. Default: "prefix+h".
     pub focus_pane_left: BindingConfig,
     /// Focus the pane below. Default: "prefix+j".
@@ -540,6 +544,8 @@ impl Default for KeysConfig {
             rename_pane: BindingConfig::one("prefix+shift+p"),
             edit_scrollback: BindingConfig::one("prefix+e"),
             copy_mode: BindingConfig::one("prefix+["),
+            copy_mode_easymotion: BindingConfig::empty(),
+            copy_mode_scroll_up: BindingConfig::empty(),
             focus_pane_left: BindingConfig::one("prefix+h"),
             focus_pane_down: BindingConfig::one("prefix+j"),
             focus_pane_up: BindingConfig::one("prefix+k"),

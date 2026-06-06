@@ -345,6 +345,8 @@ pub struct Keybinds {
     pub rename_pane: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
     pub copy_mode: ActionKeybinds,
+    pub copy_mode_easymotion: ActionKeybinds,
+    pub copy_mode_scroll_up: ActionKeybinds,
     pub focus_pane_left: ActionKeybinds,
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
@@ -587,6 +589,14 @@ impl Config {
             rename_pane: action!("keys.rename_pane", &self.keys.rename_pane),
             edit_scrollback: action!("keys.edit_scrollback", &self.keys.edit_scrollback),
             copy_mode: action!("keys.copy_mode", &self.keys.copy_mode),
+            copy_mode_easymotion: action!(
+                "keys.copy_mode_easymotion",
+                &self.keys.copy_mode_easymotion
+            ),
+            copy_mode_scroll_up: action!(
+                "keys.copy_mode_scroll_up",
+                &self.keys.copy_mode_scroll_up
+            ),
             focus_pane_left: action!("keys.focus_pane_left", &self.keys.focus_pane_left),
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),

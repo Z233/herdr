@@ -138,6 +138,14 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.rename_pane), "rename pane"),
         help_entry(keybind_label(&kb.edit_scrollback), "edit scrollback"),
         help_entry(keybind_label(&kb.copy_mode), "copy mode"),
+        help_entry(
+            keybind_label(&kb.copy_mode_easymotion),
+            "copy mode + easymotion",
+        ),
+        help_entry(
+            keybind_label(&kb.copy_mode_scroll_up),
+            "copy mode + scroll up",
+        ),
         help_entry(keybind_label(&kb.zoom), "zoom pane"),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),

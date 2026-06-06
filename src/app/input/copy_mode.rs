@@ -4,8 +4,8 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     app::{
         state::{
-            CopyModeSelection, CopyModeState, EasyMotionMatch, EasyMotionState, EASYMOTION_LABELS,
-            EASYMOTION_MAX_MATCHES,
+            CopyModeInitialAction, CopyModeSelection, CopyModeState, EasyMotionMatch,
+            EasyMotionState, EASYMOTION_LABELS, EASYMOTION_MAX_MATCHES,
         },
         App, AppState, Mode,
     },
@@ -35,7 +35,11 @@ impl App {
 }
 
 impl AppState {
-    pub(crate) fn enter_copy_mode(&mut self, terminal_runtimes: &TerminalRuntimeRegistry) {
+    pub(crate) fn enter_copy_mode(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        initial_action: Option<CopyModeInitialAction>,
+    ) {
         let Some(ws_idx) = self.active else {
             return;
         };
@@ -77,6 +81,17 @@ impl AppState {
             selection: None,
             easymotion: None,
         });
+
+        match initial_action {
+            Some(CopyModeInitialAction::EasyMotion) => {
+                self.begin_copy_mode_easymotion();
+            }
+            Some(CopyModeInitialAction::ScrollUp) => {
+                self.scroll_copy_mode_page(terminal_runtimes, -1, true);
+            }
+            None => {}
+        }
+
         self.mode = Mode::Copy;
     }
 
@@ -921,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn enter_copy_mode_tracks_focused_pane() {
         let (mut app, pane_id) = app_with_copy_screen(b"alpha\nbeta\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         assert_eq!(app.state.mode, Mode::Copy);
         assert_eq!(app.state.copy_mode.expect("copy mode").pane_id, pane_id);
     }
@@ -929,7 +944,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_ignores_prefix_key() {
         let (mut app, _) = app_with_copy_screen(b"foo bar\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 4;
@@ -945,7 +960,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_easymotion_labels_visible_matches_row_major() {
         let (mut app, _) = app_with_copy_screen(b"the thing\r\nother th\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
@@ -996,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_easymotion_label_jumps_to_match_and_exits_submode() {
         let (mut app, _) = app_with_copy_screen(b"xx th\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
@@ -1015,7 +1030,7 @@ mod tests {
         let (mut insensitive, _) = app_with_copy_screen(b"th TH Th\r\n");
         insensitive
             .state
-            .enter_copy_mode(&insensitive.terminal_runtimes);
+            .enter_copy_mode(&insensitive.terminal_runtimes, None);
         insensitive
             .handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
         insensitive
@@ -1034,7 +1049,7 @@ mod tests {
         let (mut sensitive, _) = app_with_copy_screen(b"th TH Th\r\n");
         sensitive
             .state
-            .enter_copy_mode(&sensitive.terminal_runtimes);
+            .enter_copy_mode(&sensitive.terminal_runtimes, None);
         sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
         sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::SHIFT));
         sensitive.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
@@ -1053,7 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_easymotion_q_cancels_without_moving_cursor() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 4;
@@ -1074,7 +1089,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_easymotion_preserves_character_selection_anchor() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 0;
@@ -1114,7 +1129,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_word_motions_use_visible_row_words() {
         let (mut app, _) = app_with_copy_screen(b"foo bar baz\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 0;
@@ -1133,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_shift_v_y_copies_visible_line() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
             copy_mode.cursor_col = 2;
@@ -1149,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_shift_v_extends_linewise_down() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 2;
@@ -1165,7 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_shift_v_extends_linewise_up() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
             copy_mode.cursor_col = 2;
@@ -1181,7 +1196,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_shift_v_reverses_without_character_tail() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
             copy_mode.cursor_col = 2;
@@ -1199,7 +1214,7 @@ mod tests {
     #[tokio::test]
     async fn copy_mode_shift_v_horizontal_motion_keeps_linewise_selection() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 1;
             copy_mode.cursor_col = 2;
@@ -1217,7 +1232,7 @@ mod tests {
     async fn copy_mode_shift_v_page_up_keeps_linewise_scrollback_selection() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 2;
@@ -1242,7 +1257,7 @@ mod tests {
     async fn copy_mode_page_up_uses_tmux_page_size() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         let height = app.state.copy_mode.expect("copy mode").cursor_row + 1;
         let expected_lines = copy_mode_page_lines(height, false);
 
@@ -1255,7 +1270,7 @@ mod tests {
     async fn copy_mode_ctrl_u_moves_cursor_when_history_top_clamps() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         let bottom = app.state.copy_mode.expect("copy mode").cursor_row;
         let lines = copy_mode_page_lines(bottom + 1, true);
         let metrics = copy_mode_scroll_metrics(&app, pane_id);
@@ -1287,7 +1302,7 @@ mod tests {
     async fn copy_mode_ctrl_d_moves_cursor_when_live_bottom_clamps() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         let bottom = app.state.copy_mode.expect("copy mode").cursor_row;
         let lines = copy_mode_page_lines(bottom + 1, true);
         assert!(lines > 1);
@@ -1308,7 +1323,7 @@ mod tests {
     async fn copy_mode_q_exits_and_returns_to_bottom_after_scrollback() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
         assert!(copy_mode_offset_from_bottom(&app, pane_id) > 0);
@@ -1329,7 +1344,7 @@ mod tests {
             .set_pane_scroll_offset(&app.terminal_runtimes, pane_id, entry_offset);
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), entry_offset);
 
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
         assert!(copy_mode_offset_from_bottom(&app, pane_id) > entry_offset);
 
@@ -1343,7 +1358,7 @@ mod tests {
     #[tokio::test]
     async fn shifted_punctuation_keys_work_with_enhanced_key_reporting() {
         let (mut app, _) = app_with_copy_screen(b"foo\r\n\r\nbar\r\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 2;
             copy_mode.cursor_col = 2;
@@ -1366,9 +1381,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enter_copy_mode_with_easymotion_initial_action_activates_easymotion() {
+        let (mut app, _) = app_with_copy_screen(b"the thing\r\nother th\r\n");
+        app.state.enter_copy_mode(
+            &app.terminal_runtimes,
+            Some(CopyModeInitialAction::EasyMotion),
+        );
+
+        let copy_mode = app.state.copy_mode.expect("copy mode");
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert!(copy_mode.easymotion.is_some());
+    }
+
+    #[tokio::test]
+    async fn enter_copy_mode_with_scroll_up_initial_action_scrolls_up() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(
+            &app.terminal_runtimes,
+            Some(CopyModeInitialAction::ScrollUp),
+        );
+
+        assert_eq!(app.state.mode, Mode::Copy);
+        let height = app.state.copy_mode.expect("copy mode").cursor_row + 1;
+        let expected_lines = copy_mode_page_lines(height, true);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), expected_lines);
+    }
+
+    #[tokio::test]
     async fn copy_mode_v_y_copies_selection_and_exits() {
         let (mut app, _) = app_with_copy_screen(b"alpha\nbeta\n");
-        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.enter_copy_mode(&app.terminal_runtimes, None);
         if let Some(copy_mode) = app.state.copy_mode.as_mut() {
             copy_mode.cursor_row = 0;
             copy_mode.cursor_col = 0;

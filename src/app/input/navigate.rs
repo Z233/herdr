@@ -11,7 +11,7 @@ use ratatui::layout::Direction;
 
 use crate::{
     app::{
-        state::{AppState, Mode, PendingChordState},
+        state::{AppState, CopyModeInitialAction, Mode, PendingChordState},
         App,
     },
     input::TerminalKey,
@@ -525,7 +525,15 @@ fn navigation_action_binding_match<T>(
         (&kb.close_tab, NavigateAction::CloseTab),
         (&kb.rename_pane, NavigateAction::RenamePane),
         (&kb.edit_scrollback, NavigateAction::EditScrollback),
-        (&kb.copy_mode, NavigateAction::CopyMode),
+        (&kb.copy_mode, NavigateAction::CopyMode(None)),
+        (
+            &kb.copy_mode_easymotion,
+            NavigateAction::CopyMode(Some(CopyModeInitialAction::EasyMotion)),
+        ),
+        (
+            &kb.copy_mode_scroll_up,
+            NavigateAction::CopyMode(Some(CopyModeInitialAction::ScrollUp)),
+        ),
         (&kb.focus_pane_left, NavigateAction::FocusPaneLeft),
         (&kb.focus_pane_down, NavigateAction::FocusPaneDown),
         (&kb.focus_pane_up, NavigateAction::FocusPaneUp),
@@ -706,7 +714,7 @@ pub(crate) enum NavigateAction {
     SplitHorizontal,
     ClosePane,
     EditScrollback,
-    CopyMode,
+    CopyMode(Option<CopyModeInitialAction>),
     Zoom,
     EnterResizeMode,
     ToggleSidebar,
@@ -968,7 +976,9 @@ pub(super) fn execute_navigate_action_in_context(
             }
         }
         NavigateAction::EditScrollback => {}
-        NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
+        NavigateAction::CopyMode(initial_action) => {
+            state.enter_copy_mode(terminal_runtimes, initial_action)
+        }
         NavigateAction::Zoom => {
             state.toggle_zoom();
             leave_navigate_mode(state);

@@ -941,6 +941,12 @@ pub(crate) enum CopyModeSelection {
     Linewise { anchor_row: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyModeInitialAction {
+    EasyMotion,
+    ScrollUp,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentPanelScope {
     CurrentWorkspace,
