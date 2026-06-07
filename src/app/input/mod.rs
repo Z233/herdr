@@ -421,7 +421,7 @@ impl App {
     }
 }
 
-fn quick_switch_modifier_release_matches(
+pub(crate) fn quick_switch_modifier_release_matches(
     bindings: &crate::config::ActionKeybinds,
     key: TerminalKey,
 ) -> bool {

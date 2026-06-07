@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
 use ratatui::layout::{Direction, Rect};
 
 use crate::{
@@ -384,6 +384,11 @@ fn handle_quick_switch_workspace_picker_key(
         _ if backward_cycle.is_some_and(|combo| key_event_matches_combo(&key, combo)) => {
             state.cycle_quick_switch_workspace_from(terminal_runtimes, -1);
         }
+        KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
+            if quick_switch_command_modifiers(state, key.modifiers) =>
+        {
+            state.cycle_quick_switch_workspace_from(terminal_runtimes, -1);
+        }
         KeyCode::Char('s') if quick_switch_command_modifiers(state, key.modifiers) => {
             state.enter_quick_switch_search_from(terminal_runtimes);
         }
@@ -425,7 +430,7 @@ fn quick_switch_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> 
         || state
             .keybinds
             .quick_switch_command_modifiers()
-            .is_some_and(|quick_switch_modifiers| modifiers == quick_switch_modifiers)
+            .is_some_and(|quick_switch_modifiers| modifiers.contains(quick_switch_modifiers))
 }
 
 pub(crate) fn handle_keybind_help_key(state: &mut AppState, key: KeyEvent) {
@@ -953,7 +958,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
     use ratatui::layout::Rect;
 
     use super::super::{capture_snapshot, state_with_workspaces};
@@ -1812,5 +1817,288 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn quick_switch_shift_press_cycles_backward() {
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        // Cycle forward first
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        assert_ne!(after_forward, initial_ws);
+
+        // Shift press while Ctrl held cycles backward
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            initial_ws,
+            "Shift press while modifier held should cycle backward"
+        );
+    }
+
+    #[test]
+    fn quick_shift_press_with_right_shift_cycles_backward() {
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::RightShift),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            initial_ws,
+            "Right Shift press should also cycle backward"
+        );
+    }
+
+    #[test]
+    fn quick_switch_command_chars_work_with_shift_held() {
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        // 'l' with CONTROL | SHIFT should still expand (using .contains())
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            state
+                .workspace_picker_rows_from(&terminal_runtimes)
+                .iter()
+                .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
+            "expand command should work when Shift is held alongside modifier"
+        );
+
+        // 'j' with CONTROL | SHIFT should still move down
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            state.workspace_picker_rows_from(&terminal_runtimes)
+                [state.workspace_picker.selected]
+                .is_tab,
+            "move down command should work when Shift is held alongside modifier"
+        );
+
+        // 'k' with CONTROL | SHIFT should still move up
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            !state.workspace_picker_rows_from(&terminal_runtimes)
+                [state.workspace_picker.selected]
+                .is_tab,
+            "move up command should work when Shift is held alongside modifier"
+        );
+
+        // 'h' with CONTROL | SHIFT should still collapse
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            !state
+                .workspace_picker_rows_from(&terminal_runtimes)
+                .iter()
+                .any(|row| row.ws_idx == initial_ws && row.is_tab),
+            "collapse command should work when Shift is held alongside modifier"
+        );
+
+        // 's' with CONTROL | SHIFT should still enter search
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            state.workspace_picker.mode,
+            WorkspacePickerMode::QuickSwitchSearch,
+            "search command should work when Shift is held alongside modifier"
+        );
+    }
+
+    #[test]
+    fn quick_switch_shift_press_with_backward_override_still_works() {
+        // Shift-press should cycle backward even when an explicit backward override is set
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", Some("ctrl+shift+tab"));
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        // Cycle forward first
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+        );
+        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        assert_ne!(after_forward, initial_ws);
+
+        // Shift press should still cycle backward (native overlay, not configurable)
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            initial_ws,
+            "Shift press should cycle backward even with explicit backward override"
+        );
+    }
+
+    #[test]
+    fn quick_switch_shift_press_without_modifier_is_noop() {
+        // Shift press without the quick-switch modifier held should not cycle
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::SHIFT,
+            ),
+        );
+        assert_eq!(
+            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            initial_ws,
+            "Shift press without quick-switch modifier should be a no-op"
+        );
+    }
+
+    #[test]
+    fn quick_switch_shift_press_wraps_from_first_workspace() {
+        // Picker starts at first non-active workspace in MRU order (workspace 2).
+        // Cycle backward once to reach workspace 0, then again to wrap around.
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        let start_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+
+        // First backward: from start_ws → workspace 0
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        let after_one = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        assert_eq!(after_one, 0, "first backward should land at workspace 0");
+
+        // Second backward: wrap from workspace 0 to last in MRU order
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        );
+        let after_wrap = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        assert_ne!(
+            after_wrap, start_ws,
+            "wrap-around should land on a different workspace"
+        );
+        assert_ne!(
+            after_wrap, after_one,
+            "wrap-around should move from workspace 0"
+        );
+    }
+
+    #[test]
+    fn quick_switch_arrow_keys_work_with_shift_held() {
+        let (mut state, terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+
+        // Expand workspace so tab rows are visible for arrow navigation
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+
+        // Down arrow with CONTROL | SHIFT should still move down
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            state.workspace_picker_rows_from(&terminal_runtimes)
+                [state.workspace_picker.selected]
+                .is_tab,
+            "Down arrow should work when Shift is held alongside modifier"
+        );
+
+        // Up arrow with CONTROL | SHIFT should still move up
+        handle_workspace_picker_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert!(
+            !state.workspace_picker_rows_from(&terminal_runtimes)
+                [state.workspace_picker.selected]
+                .is_tab,
+            "Up arrow should work when Shift is held alongside modifier"
+        );
+    }
+
+    #[test]
+    fn quick_switch_shift_release_does_not_accept() {
+        let (state, _terminal_runtimes, _) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+
+        // Releasing Shift while Ctrl is held should NOT trigger accept
+        let accepted = crate::app::input::quick_switch_modifier_release_matches(
+            &state.keybinds.quick_switch_workspace,
+            TerminalKey::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftShift),
+                KeyModifiers::empty(),
+            ),
+        );
+        assert!(
+            !accepted,
+            "Shift release should not trigger quick-switch accept"
+        );
     }
 }
