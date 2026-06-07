@@ -710,6 +710,7 @@ impl AppState {
             meta.push_str(" · ");
             meta.push_str(&activity);
         }
+        let (state, seen) = ws.aggregate_state(&self.terminals);
 
         WorkspacePickerRow {
             target: WorkspacePickerTarget::Workspace { ws_idx },
@@ -720,6 +721,8 @@ impl AppState {
             is_current: self.active == Some(ws_idx),
             expanded,
             is_tab: false,
+            state,
+            seen,
         }
     }
 
@@ -732,6 +735,7 @@ impl AppState {
             .enumerate()
             .map(|(tab_idx, tab)| {
                 let pane_count = tab.panes.len();
+                let (state, seen) = tab_aggregate_state(tab, &self.terminals);
                 WorkspacePickerRow {
                     target: WorkspacePickerTarget::Tab { ws_idx, tab_idx },
                     ws_idx,
@@ -745,6 +749,8 @@ impl AppState {
                     is_current: self.active == Some(ws_idx) && ws.active_tab_index() == tab_idx,
                     expanded: false,
                     is_tab: true,
+                    state,
+                    seen,
                 }
             })
             .collect()

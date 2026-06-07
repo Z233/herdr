@@ -844,6 +844,8 @@ pub(crate) struct WorkspacePickerRow {
     pub is_current: bool,
     pub expanded: bool,
     pub is_tab: bool,
+    pub state: crate::detect::AgentState,
+    pub seen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

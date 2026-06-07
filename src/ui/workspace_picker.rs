@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
+    status::state_dot,
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::{
@@ -152,8 +153,10 @@ fn render_row(
     };
 
     let marker = if selected { "→" } else { " " };
-    let current = if row.is_current { "◆" } else { " " };
-    let fixed = if app.workspace_picker.mode.is_quick_switch() {
+    let (dot, dot_style) = state_dot(row.state, row.seen, p);
+
+    let mut spans: Vec<Span> = Vec::new();
+    if app.workspace_picker.mode.is_quick_switch() {
         let caret = if row.is_tab {
             " "
         } else if row.expanded {
@@ -162,23 +165,27 @@ fn render_row(
             "▸"
         };
         let indent = "  ".repeat(row.depth as usize);
-        format!(" {indent}{caret} {marker} {current} ")
+        spans.push(Span::styled(format!(" {indent}{caret} "), dim_style));
     } else {
-        format!(" {marker} {current} ")
-    };
+        spans.push(Span::styled(" ", dim_style));
+    }
+    spans.push(Span::styled(marker, dim_style));
+    spans.push(Span::styled(" ", dim_style));
+    spans.push(Span::styled(dot, dot_style));
+    spans.push(Span::styled(" ", dim_style));
+
     let meta_width = row_meta_width(rect.width);
+    let fixed_width: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
     let title_budget = rect
         .width
         .saturating_sub(meta_width)
-        .saturating_sub(fixed.chars().count() as u16)
+        .saturating_sub(fixed_width)
         .saturating_sub(1) as usize;
     let title = truncate_text(&row.label, title_budget);
+    spans.push(Span::styled(title, text_style));
+
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(fixed, dim_style),
-            Span::styled(title, text_style),
-        ]))
-        .style(base_style),
+        Paragraph::new(Line::from(spans)).style(base_style),
         rect,
     );
 
@@ -569,6 +576,121 @@ fn color_cube_value(value: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::{WorkspacePickerMode, WorkspacePickerTarget};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn render_row_shows_state_dot_for_blocked_workspace() {
+        let app = AppState::test_new();
+        let row = WorkspacePickerRow {
+            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            ws_idx: 0,
+            depth: 0,
+            label: "test".to_string(),
+            meta: "".to_string(),
+            is_current: true,
+            expanded: false,
+            is_tab: false,
+            state: crate::detect::AgentState::Blocked,
+            seen: false,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Span layout: [" ", marker, " ", dot, " ", title]
+        // Non-quick-switch, not selected: "   ● test" → dot at position 3
+        assert_eq!(buf[(3, 0)].symbol(), "●");
+    }
+
+    #[test]
+    fn render_row_shows_state_dot_for_idle_seen_workspace() {
+        let app = AppState::test_new();
+        let row = WorkspacePickerRow {
+            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            ws_idx: 0,
+            depth: 0,
+            label: "test".to_string(),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            state: crate::detect::AgentState::Idle,
+            seen: true,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Span layout: [" ", marker, " ", dot, " ", title]
+        // Non-quick-switch, not selected: "   ○ test" → dot at position 3
+        assert_eq!(buf[(3, 0)].symbol(), "○");
+    }
+
+    #[test]
+    fn render_row_shows_selection_marker() {
+        let app = AppState::test_new();
+        let row = WorkspacePickerRow {
+            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            ws_idx: 0,
+            depth: 0,
+            label: "test".to_string(),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            state: crate::detect::AgentState::Unknown,
+            seen: true,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, true))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Span layout: [" ", marker, " ", dot, " ", title]
+        // Non-quick-switch, selected: " → · test" → marker at position 1
+        assert_eq!(buf[(1, 0)].symbol(), "→");
+    }
+
+    #[test]
+    fn render_row_shows_quick_switch_indent() {
+        let mut app = AppState::test_new();
+        app.workspace_picker.mode = WorkspacePickerMode::QuickSwitch;
+        let row = WorkspacePickerRow {
+            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            ws_idx: 0,
+            depth: 1,
+            label: "ws".to_string(),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            state: crate::detect::AgentState::Working,
+            seen: false,
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Quick-switch workspace row, depth=1: "   ▸  ● ws"
+        // Position 3 is caret "▸" (after leading space + 2-char indent)
+        assert_eq!(buf[(3, 0)].symbol(), "▸");
+    }
 
     #[test]
     fn ansi_to_text_preserves_sgr_styles() {
