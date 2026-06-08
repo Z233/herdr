@@ -152,7 +152,6 @@ fn render_row(
         Style::default().fg(p.subtext0).bg(p.panel_bg)
     };
 
-    let marker = if selected { "→" } else { " " };
     let (dot, dot_style) = state_dot(row.state, row.seen, p);
 
     let mut spans: Vec<Span> = Vec::new();
@@ -169,8 +168,6 @@ fn render_row(
     } else {
         spans.push(Span::styled(" ", dim_style));
     }
-    spans.push(Span::styled(marker, dim_style));
-    spans.push(Span::styled(" ", dim_style));
     spans.push(Span::styled(dot, dot_style));
     spans.push(Span::styled(" ", dim_style));
 
@@ -602,9 +599,9 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Span layout: [" ", marker, " ", dot, " ", title]
-        // Non-quick-switch, not selected: "   ● test" → dot at position 3
-        assert_eq!(buf[(3, 0)].symbol(), "●");
+        // Span layout: [" ", dot, " ", title]
+        // Non-quick-switch, not selected: " ● test" → dot at position 1
+        assert_eq!(buf[(1, 0)].symbol(), "●");
     }
 
     #[test]
@@ -630,37 +627,9 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Span layout: [" ", marker, " ", dot, " ", title]
-        // Non-quick-switch, not selected: "   ○ test" → dot at position 3
-        assert_eq!(buf[(3, 0)].symbol(), "○");
-    }
-
-    #[test]
-    fn render_row_shows_selection_marker() {
-        let app = AppState::test_new();
-        let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
-            ws_idx: 0,
-            depth: 0,
-            label: "test".to_string(),
-            meta: "".to_string(),
-            is_current: false,
-            expanded: false,
-            is_tab: false,
-            state: crate::detect::AgentState::Unknown,
-            seen: true,
-        };
-        let area = Rect::new(0, 0, 20, 1);
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
-
-        terminal
-            .draw(|frame| render_row(&app, frame, area, &row, true))
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-        // Span layout: [" ", marker, " ", dot, " ", title]
-        // Non-quick-switch, selected: " → · test" → marker at position 1
-        assert_eq!(buf[(1, 0)].symbol(), "→");
+        // Span layout: [" ", dot, " ", title]
+        // Non-quick-switch, not selected: " ○ test" → dot at position 1
+        assert_eq!(buf[(1, 0)].symbol(), "○");
     }
 
     #[test]
@@ -687,7 +656,7 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Quick-switch workspace row, depth=1: "   ▸  ● ws"
+        // Quick-switch workspace row, depth=1: "   ▸ ● ws"
         // Position 3 is caret "▸" (after leading space + 2-char indent)
         assert_eq!(buf[(3, 0)].symbol(), "▸");
     }
