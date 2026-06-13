@@ -19,6 +19,12 @@ pub struct NewPane {
     pub runtime: TerminalRuntime,
 }
 
+enum SplitMode {
+    Default,
+    WithRatio(f32),
+    WithPlacement(SplitPlacement),
+}
+
 enum SplitCommand<'a> {
     Shell {
         command: &'a str,
@@ -198,7 +204,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
-            SplitPlacement::After,
+            SplitMode::Default,
             rows,
             cols,
             cwd,
@@ -222,7 +228,31 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
-            placement,
+            SplitMode::WithPlacement(placement),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            None,
+        )
+    }
+
+    pub fn split_focused_with_ratio(
+        &mut self,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            SplitMode::WithRatio(ratio),
             rows,
             cols,
             cwd,
@@ -246,7 +276,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
-            SplitPlacement::After,
+            SplitMode::Default,
             rows,
             cols,
             cwd,
@@ -269,7 +299,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
-            SplitPlacement::After,
+            SplitMode::Default,
             rows,
             cols,
             cwd,
@@ -283,7 +313,7 @@ impl Tab {
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,
-        placement: SplitPlacement,
+        split_mode: SplitMode,
         rows: u16,
         cols: u16,
         cwd: Option<PathBuf>,
@@ -293,11 +323,12 @@ impl Tab {
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
         let previous_focus = self.layout.focused();
-        let new_id = match placement {
-            SplitPlacement::After => self.layout.split_focused(direction),
-            SplitPlacement::Before => self
-                .layout
-                .split_focused_with_placement(direction, placement),
+        let new_id = match split_mode {
+            SplitMode::Default => self.layout.split_focused(direction),
+            SplitMode::WithRatio(ratio) => self.layout.split_focused_with_ratio(direction, ratio),
+            SplitMode::WithPlacement(placement) => {
+                self.layout.split_focused_with_placement(direction, placement)
+            }
         };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));

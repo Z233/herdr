@@ -1287,6 +1287,7 @@ mod tests {
         assert_eq!(entries[1].agent_label.as_deref(), Some("claude"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn all_workspaces_agent_panel_entries_use_live_root_runtime_cwd_for_workspace_label() {
         let unique = format!(

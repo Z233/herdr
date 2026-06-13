@@ -355,6 +355,10 @@ pub struct Keybinds {
     pub open_pane_down: ActionKeybinds,
     pub open_pane_up: ActionKeybinds,
     pub open_pane_right: ActionKeybinds,
+    pub swap_pane_left: ActionKeybinds,
+    pub swap_pane_down: ActionKeybinds,
+    pub swap_pane_up: ActionKeybinds,
+    pub swap_pane_right: ActionKeybinds,
     pub cycle_pane_next: ActionKeybinds,
     pub cycle_pane_previous: ActionKeybinds,
     pub last_pane: ActionKeybinds,
@@ -605,6 +609,10 @@ impl Config {
             open_pane_down: action!("keys.open_pane_down", &self.keys.open_pane_down),
             open_pane_up: action!("keys.open_pane_up", &self.keys.open_pane_up),
             open_pane_right: action!("keys.open_pane_right", &self.keys.open_pane_right),
+            swap_pane_left: action!("keys.swap_pane_left", &self.keys.swap_pane_left),
+            swap_pane_down: action!("keys.swap_pane_down", &self.keys.swap_pane_down),
+            swap_pane_up: action!("keys.swap_pane_up", &self.keys.swap_pane_up),
+            swap_pane_right: action!("keys.swap_pane_right", &self.keys.swap_pane_right),
             last_pane: action!("keys.last_pane", &self.keys.last_pane),
             cycle_pane_next: action!("keys.cycle_pane_next", &self.keys.cycle_pane_next),
             cycle_pane_previous: action!(
@@ -2136,6 +2144,34 @@ switch_workspace = "prefix+shift+1..9"
         assert_eq!(
             kb.quick_switch_backward_combo(),
             Some((KeyCode::BackTab, KeyModifiers::CONTROL))
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_left),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('h'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_down),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('j'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_up),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('k'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_right),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('l'),
+                KeyModifiers::SHIFT
+            ))]
         );
     }
 
