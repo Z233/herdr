@@ -65,12 +65,17 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
         .fg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(app.palette.overlay0);
+    let easymotion = app.copy_mode.and_then(|copy_mode| copy_mode.easymotion);
+    let mode_bg = if easymotion.is_some() {
+        app.palette.yellow
+    } else {
+        app.palette.accent
+    };
     let mode_style = Style::default()
         .fg(panel_contrast_fg(&app.palette))
-        .bg(app.palette.accent)
+        .bg(mode_bg)
         .add_modifier(Modifier::BOLD);
 
-    let easymotion = app.copy_mode.and_then(|copy_mode| copy_mode.easymotion);
     let line = if let Some(easymotion) = easymotion {
         let query = easymotion.query_text();
         let stage = match easymotion.query_len() {
@@ -304,4 +309,57 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
         .highlight_symbol(" ");
     let mut state = ListState::default().with_selected(Some(menu.list.highlighted));
     frame.render_stateful_widget(list, inner, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{CopyModeState, EasyMotionState};
+    use crate::app::Mode;
+    use crate::layout::PaneId;
+
+    fn copy_mode_state(easymotion: Option<EasyMotionState>) -> CopyModeState {
+        CopyModeState {
+            pane_id: PaneId::from_raw(1),
+            cursor_row: 0,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+            easymotion,
+        }
+    }
+
+    #[test]
+    fn copy_mode_overlay_uses_yellow_for_easymotion_label() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Copy;
+        app.copy_mode = Some(copy_mode_state(Some(EasyMotionState::new())));
+        let backend = ratatui::backend::TestBackend::new(40, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_copy_mode_overlay(&app, frame, Rect::new(0, 0, 40, 1)))
+            .unwrap();
+
+        let label_cell = &terminal.backend().buffer()[(1, 0)];
+        assert_eq!(label_cell.symbol(), "E");
+        assert_eq!(label_cell.style().bg, Some(app.palette.yellow));
+    }
+
+    #[test]
+    fn copy_mode_overlay_keeps_accent_for_copy_label() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Copy;
+        app.copy_mode = Some(copy_mode_state(None));
+        let backend = ratatui::backend::TestBackend::new(40, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_copy_mode_overlay(&app, frame, Rect::new(0, 0, 40, 1)))
+            .unwrap();
+
+        let label_cell = &terminal.backend().buffer()[(1, 0)];
+        assert_eq!(label_cell.symbol(), "C");
+        assert_eq!(label_cell.style().bg, Some(app.palette.accent));
+    }
 }

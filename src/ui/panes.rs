@@ -296,7 +296,12 @@ pub(super) fn render_panes(
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = !info.is_focused && multi_pane && !terminal_active;
+            let should_dim = (!info.is_focused && multi_pane && !terminal_active)
+                || (info.is_focused
+                    && app.mode == Mode::Copy
+                    && app.copy_mode.as_ref().is_some_and(|copy_mode| {
+                        copy_mode.pane_id == info.id && copy_mode.easymotion.is_some()
+                    }));
             if should_dim {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();
@@ -340,7 +345,8 @@ fn render_copy_mode_easymotion_labels(app: &AppState, frame: &mut Frame, info: &
     let style = Style::default()
         .fg(panel_contrast_fg(&app.palette))
         .bg(app.palette.accent)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .remove_modifier(Modifier::DIM);
     let buf = frame.buffer_mut();
 
     for target in easymotion
@@ -383,7 +389,8 @@ fn render_copy_mode_cursor(app: &AppState, frame: &mut Frame, info: &PaneInfo) {
         Style::default()
             .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
-            .add_modifier(Modifier::BOLD),
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM),
     );
 }
 
@@ -818,6 +825,132 @@ mod tests {
             terminal.backend().buffer()[(2, 0)].style().bg,
             Some(app.palette.accent)
         );
+    }
+
+    #[tokio::test]
+    async fn easymotion_dims_focused_pane_body_but_not_label() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        let focused_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"root\n"),
+        );
+        workspace.tabs[0].runtimes.insert(
+            focused_pane,
+            TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"focus\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.mode = Mode::Copy;
+
+        let mut easymotion = EasyMotionState::new();
+        easymotion.query = [Some('f'), Some('o')];
+        easymotion.labels[0] = Some(EasyMotionMatch {
+            label: 'f',
+            row: 0,
+            col: 1,
+        });
+        easymotion.label_count = 1;
+        app.copy_mode = Some(CopyModeState {
+            pane_id: focused_pane,
+            cursor_row: 1,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+            easymotion: Some(easymotion),
+        });
+
+        let area = Rect::new(0, 0, 30, 5);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        app.view.pane_infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let focused_info = app
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == focused_pane)
+            .expect("focused pane info")
+            .clone();
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let body_cell = &buffer[(focused_info.inner_rect.x, focused_info.inner_rect.y)];
+        assert!(body_cell.style().add_modifier.contains(Modifier::DIM));
+
+        let label_cell = &buffer[(focused_info.inner_rect.x + 1, focused_info.inner_rect.y)];
+        assert_eq!(label_cell.symbol(), "f");
+        assert_eq!(label_cell.style().bg, Some(app.palette.accent));
+        assert!(!label_cell.style().add_modifier.contains(Modifier::DIM));
+
+        let cursor_cell = &buffer[(focused_info.inner_rect.x, focused_info.inner_rect.y + 1)];
+        assert_eq!(cursor_cell.style().bg, Some(app.palette.accent));
+        assert!(!cursor_cell.style().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[tokio::test]
+    async fn copy_mode_without_easymotion_does_not_dim_focused_pane() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        let focused_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"root\n"),
+        );
+        workspace.tabs[0].runtimes.insert(
+            focused_pane,
+            TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"focus\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.mode = Mode::Copy;
+        app.copy_mode = Some(CopyModeState {
+            pane_id: focused_pane,
+            cursor_row: 1,
+            cursor_col: 0,
+            entry_offset_from_bottom: 0,
+            selection: None,
+            easymotion: None,
+        });
+
+        let area = Rect::new(0, 0, 30, 5);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        app.view.pane_infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let focused_info = app
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == focused_pane)
+            .expect("focused pane info")
+            .clone();
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_panes(&app, &terminal_runtimes, frame, area))
+            .unwrap();
+
+        let body_cell =
+            &terminal.backend().buffer()[(focused_info.inner_rect.x, focused_info.inner_rect.y)];
+        assert!(!body_cell.style().add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
