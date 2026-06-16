@@ -148,7 +148,14 @@ impl TileLayout {
         let new_id = PaneId::alloc();
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
-        self.root = split_at(old, self.focus, direction, new_id, SplitPlacement::After, valid_split_ratio(ratio));
+        self.root = split_at(
+            old,
+            self.focus,
+            direction,
+            new_id,
+            SplitPlacement::After,
+            valid_split_ratio(ratio),
+        );
         self.focus = new_id;
         new_id
     }
@@ -518,8 +525,22 @@ fn split_at(
         } => Node::Split {
             direction: d,
             ratio,
-            first: Box::new(split_at(*first, target, direction, new_id, placement, split_ratio)),
-            second: Box::new(split_at(*second, target, direction, new_id, placement, split_ratio)),
+            first: Box::new(split_at(
+                *first,
+                target,
+                direction,
+                new_id,
+                placement,
+                split_ratio,
+            )),
+            second: Box::new(split_at(
+                *second,
+                target,
+                direction,
+                new_id,
+                placement,
+                split_ratio,
+            )),
         },
     }
 }
