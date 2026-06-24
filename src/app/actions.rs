@@ -801,7 +801,18 @@ impl AppState {
             let Some(ws) = self.workspaces.get(ws_idx) else {
                 continue;
             };
-            let label = ws.display_name_from(&self.terminals, terminal_runtimes);
+            let label = {
+                let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
+                if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
+                    crate::ui::sidebar::grouped_child_display_label(
+                        &raw,
+                        ws.branch().as_deref(),
+                        ws.custom_name.is_some(),
+                    )
+                } else {
+                    raw
+                }
+            };
             let rank = if search_visible && !query.is_empty() {
                 match workspace_picker_match_rank(query, &label) {
                     Some(rank) => rank,
@@ -4043,6 +4054,90 @@ mod tests {
             state.workspace_picker.preview,
             WorkspacePickerPreview::Empty { ref message } if message == "no pane content"
         ));
+    }
+
+    #[test]
+    fn workspace_picker_shows_branch_name_for_grouped_child() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        // Clear custom name so the workspace is auto-named — this is the case
+        // where grouped_child_display_label substitutes the branch name.
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/issue-137".into());
+
+        state.open_workspace_picker();
+        let rows = state.workspace_picker_rows();
+
+        // The grouped child should display the branch name (without "worktree/" prefix),
+        // matching the sidebar's grouped_child_display_label behavior.
+        let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child_row.label, "issue-137");
+    }
+
+    #[test]
+    fn workspace_picker_shows_cwd_name_for_standalone_workspace() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        // No worktree_space set — standalone workspace.
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/issue-137".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let raw_label = state.workspaces[1]
+            .display_name_from(&state.terminals, &terminal_runtimes);
+
+        state.open_workspace_picker();
+        let rows = state.workspace_picker_rows();
+
+        // Standalone workspace — no branch substitution, label is CWD-derived.
+        let row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(row.label, raw_label);
+        assert_ne!(row.label, "issue-137");
+    }
+
+    #[test]
+    fn workspace_picker_keeps_custom_name_for_grouped_child() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.workspaces[1].cached_git_branch = Some("worktree/issue-137".into());
+        state.workspaces[1].custom_name = Some("my-custom-name".into());
+
+        state.open_workspace_picker();
+        let rows = state.workspace_picker_rows();
+
+        let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child_row.label, "my-custom-name");
+    }
+
+    #[test]
+    fn workspace_picker_shows_cwd_name_for_linked_only_group() {
+        // Two linked worktrees with no parent — should NOT form a parentless group.
+        let mut state = app_with_workspaces(&["issue", "review"]);
+        mark_linked_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+        state.workspaces[0].custom_name = None;
+        state.workspaces[1].custom_name = None;
+        state.workspaces[0].cached_git_branch = Some("worktree/issue-137".into());
+        state.workspaces[1].cached_git_branch = Some("worktree/review-42".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let raw0 = state.workspaces[0]
+            .display_name_from(&state.terminals, &terminal_runtimes);
+        let raw1 = state.workspaces[1]
+            .display_name_from(&state.terminals, &terminal_runtimes);
+
+        state.open_workspace_picker();
+        let rows = state.workspace_picker_rows();
+
+        // Without a parent worktree, these are not grouped children —
+        // the CWD-derived name should be used unchanged.
+        let row0 = rows.iter().find(|r| r.ws_idx == 0).unwrap();
+        assert_eq!(row0.label, raw0);
+        assert_ne!(row0.label, "issue-137");
+        let row1 = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(row1.label, raw1);
+        assert_ne!(row1.label, "review-42");
     }
 
     #[test]

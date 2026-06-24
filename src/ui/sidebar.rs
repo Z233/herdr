@@ -305,7 +305,7 @@ pub(crate) fn workspace_parent_group_state(
     })
 }
 
-fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
+pub(crate) fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_name: bool) -> String {
     if has_custom_name {
         return label.to_string();
     }
@@ -316,6 +316,36 @@ fn grouped_child_display_label(label: &str, branch: Option<&str>, has_custom_nam
         .strip_prefix("worktree/")
         .unwrap_or(branch)
         .to_string()
+}
+
+/// Returns `true` if the workspace at `ws_idx` is a grouped child — a linked
+/// worktree whose `worktree_space()` key has ≥2 members with at least one
+/// non-linked (parent) worktree. This mirrors the `indented` condition in
+/// [`workspace_list_entries`] so the workspace picker can apply the same
+/// [`grouped_child_display_label`] substitution as the sidebar.
+pub(crate) fn is_grouped_child_worktree(app: &AppState, ws_idx: usize) -> bool {
+    let Some(ws) = app.workspaces.get(ws_idx) else {
+        return false;
+    };
+    let Some(space) = ws.worktree_space() else {
+        return false;
+    };
+    if !space.is_linked_worktree {
+        return false;
+    }
+    let mut member_count = 0usize;
+    let mut has_parent = false;
+    for w in &app.workspaces {
+        if let Some(m) = w.worktree_space() {
+            if m.key == space.key {
+                member_count += 1;
+                if !m.is_linked_worktree {
+                    has_parent = true;
+                }
+            }
+        }
+    }
+    member_count >= 2 && has_parent
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1433,6 +1463,42 @@ mod tests {
             grouped_child_display_label("herdr-issue", Some("worktree/issue-137"), false),
             "issue-137"
         );
+    }
+
+    #[test]
+    fn is_grouped_child_worktree_detects_linked_child_in_group() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+        ];
+
+        assert!(!is_grouped_child_worktree(&app, 0)); // parent — not a child
+        assert!(is_grouped_child_worktree(&app, 1)); // linked child in ≥2-member group
+    }
+
+    #[test]
+    fn is_grouped_child_worktree_false_for_standalone_workspace() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", None, "/repo/herdr-issue"),
+        ];
+
+        assert!(!is_grouped_child_worktree(&app, 0));
+        assert!(!is_grouped_child_worktree(&app, 1));
+    }
+
+    #[test]
+    fn is_grouped_child_worktree_false_for_parentless_group() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            workspace_with_worktree_space("review", Some("repo-key"), "/repo/herdr-review"),
+        ];
+        // Both are linked worktrees with no parent — not a grouped child.
+        assert!(!is_grouped_child_worktree(&app, 0));
+        assert!(!is_grouped_child_worktree(&app, 1));
     }
 
     fn workspace_with_worktree_space(
