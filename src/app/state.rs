@@ -7,6 +7,7 @@ use crate::detect::AgentState;
 use crate::input::TerminalKey;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
+use crate::ui::workspace_picker::WorkspacePickerState;
 
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
@@ -816,69 +817,6 @@ pub(crate) struct NavigatorState {
     pub scroll: usize,
     pub search_focused: bool,
     pub state_filter: Option<NavigatorStateFilter>,
-    pub expanded_workspaces: std::collections::HashSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerTarget {
-    Workspace { ws_idx: usize },
-    Tab { ws_idx: usize, tab_idx: usize },
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerMode {
-    #[default]
-    Search,
-    QuickSwitch,
-    QuickSwitchSearch,
-}
-
-impl WorkspacePickerMode {
-    pub(crate) fn search_visible(self) -> bool {
-        matches!(self, Self::Search | Self::QuickSwitchSearch)
-    }
-
-    pub(crate) fn is_quick_switch(self) -> bool {
-        matches!(self, Self::QuickSwitch | Self::QuickSwitchSearch)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspacePickerRow {
-    pub target: WorkspacePickerTarget,
-    pub ws_idx: usize,
-    pub depth: u8,
-    pub label: String,
-    pub meta: String,
-    pub is_current: bool,
-    pub expanded: bool,
-    pub is_tab: bool,
-    pub state: crate::detect::AgentState,
-    pub seen: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerPreview {
-    Empty { message: String },
-    Content { pane_id: PaneId, text: String },
-}
-
-impl Default for WorkspacePickerPreview {
-    fn default() -> Self {
-        Self::Empty {
-            message: "select a workspace".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct WorkspacePickerState {
-    pub mode: WorkspacePickerMode,
-    pub query: String,
-    pub selected: usize,
-    pub scroll: usize,
-    pub preview: WorkspacePickerPreview,
-    pub preview_ws_idx: Option<usize>,
     pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
@@ -1776,7 +1714,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             navigator: NavigatorState::default(),
-            workspace_picker: WorkspacePickerState::default(),
+            workspace_picker: Default::default(),
             workspace_mru: Vec::new(),
             copy_mode: None,
             workspace_scroll: 0,

@@ -19,7 +19,7 @@ pub(crate) mod sidebar;
 mod status;
 mod tabs;
 mod widgets;
-mod workspace_picker;
+pub(crate) mod workspace_picker;
 
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,

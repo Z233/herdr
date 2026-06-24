@@ -473,7 +473,7 @@ impl App {
             }),
             keybind_help: state::KeybindHelpState { scroll: 0 },
             navigator: state::NavigatorState::default(),
-            workspace_picker: state::WorkspacePickerState::default(),
+            workspace_picker: Default::default(),
             workspace_mru: Vec::new(),
             copy_mode: None,
             workspace_scroll: 0,
@@ -1532,7 +1532,7 @@ impl App {
                 input::handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event);
             }
             Mode::WorkspacePicker => {
-                input::handle_workspace_picker_key(
+                crate::ui::workspace_picker::handle_workspace_picker_key(
                     &mut self.state,
                     &self.terminal_runtimes,
                     key_event,

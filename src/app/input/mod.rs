@@ -1,8 +1,6 @@
 //! Input handling — translates crossterm key/mouse events into state mutations.
 
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::PaneClickState;
 use crate::input::TerminalKey;
@@ -50,7 +48,7 @@ pub(crate) use self::{
     modal::{
         handle_confirm_close_key, handle_context_menu_key, handle_global_menu_key,
         handle_keybind_help_key, handle_navigator_key, handle_rename_key, handle_resize_key,
-        handle_workspace_picker_key, insert_navigator_search_text, insert_rename_input_text,
+        insert_navigator_search_text, insert_rename_input_text,
     },
     navigate::terminal_direct_navigation_action,
     settings::open_settings_at,
@@ -61,8 +59,9 @@ use self::{
     },
     settings::SettingsAction,
 };
-use super::state::{AppState, Mode, WorkspacePickerMode};
+use super::state::{AppState, Mode};
 use super::App;
+use crate::ui::workspace_picker::handle_workspace_picker_key;
 
 // ---------------------------------------------------------------------------
 // Key handling
@@ -70,35 +69,11 @@ use super::App;
 
 impl App {
     pub(crate) fn handle_key_release(&mut self, key: TerminalKey) -> bool {
-        if self.state.mode != Mode::WorkspacePicker
-            || self.state.workspace_picker.mode != WorkspacePickerMode::QuickSwitch
-        {
-            return false;
-        }
-
-        // Defensive: bare bindings have no modifier to release-accept.
-        // This is intentionally redundant — `quick_switch_modifier_release_matches`
-        // would already return `false` for bare bindings, but the explicit guard
-        // makes the limitation visible via `tracing::trace!`.
-        if self
-            .state
-            .keybinds
-            .quick_switch_workspace
-            .bindings
-            .iter()
-            .all(|b| b.trigger.is_direct() && b.trigger.combo().1.is_empty())
-        {
-            tracing::trace!("quick_switch_workspace has no modifiers; release-accept unavailable");
-            return false;
-        }
-
-        if !quick_switch_modifier_release_matches(&self.state.keybinds.quick_switch_workspace, key)
-        {
-            return false;
-        }
-
-        self.state
-            .accept_workspace_picker_selection_from(&self.terminal_runtimes)
+        crate::ui::workspace_picker::handle_quick_switch_key_release(
+            &mut self.state,
+            &self.terminal_runtimes,
+            key,
+        )
     }
 
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
@@ -473,44 +448,6 @@ impl App {
                 Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
         }
         copied
-    }
-}
-
-pub(crate) fn quick_switch_modifier_release_matches(
-    bindings: &crate::config::ActionKeybinds,
-    key: TerminalKey,
-) -> bool {
-    let Some(modifier) = released_modifier(key.code) else {
-        return false;
-    };
-
-    bindings
-        .bindings
-        .iter()
-        .any(|binding| binding.trigger.is_direct() && binding.trigger.combo().1.contains(modifier))
-}
-
-fn released_modifier(code: KeyCode) -> Option<KeyModifiers> {
-    match code {
-        KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift) => {
-            Some(KeyModifiers::SHIFT)
-        }
-        KeyCode::Modifier(ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl) => {
-            Some(KeyModifiers::CONTROL)
-        }
-        KeyCode::Modifier(ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt) => {
-            Some(KeyModifiers::ALT)
-        }
-        KeyCode::Modifier(ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper) => {
-            Some(KeyModifiers::SUPER)
-        }
-        KeyCode::Modifier(ModifierKeyCode::LeftHyper | ModifierKeyCode::RightHyper) => {
-            Some(KeyModifiers::HYPER)
-        }
-        KeyCode::Modifier(ModifierKeyCode::LeftMeta | ModifierKeyCode::RightMeta) => {
-            Some(KeyModifiers::META)
-        }
-        _ => None,
     }
 }
 
