@@ -695,6 +695,27 @@ mod tests {
             .to_string()
     }
 
+    /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
+    /// before the command writes, so waiting on existence alone can read EOF.
+    /// `pump` advances any event loop the command depends on.
+    fn read_capture_when_ready(path: &std::path::Path, mut pump: impl FnMut()) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            pump();
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if !contents.is_empty() {
+                    return contents;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plugin command did not write {} within deadline",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn write_manifest(root: &std::path::Path) -> std::path::PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let manifest = root.join("herdr-plugin.toml");
@@ -1207,11 +1228,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_
         };
         assert!(app.state.plugin_panes.contains_key(&opened_pane_id));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
+        let text = read_capture_when_ready(&capture, || {});
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(lines.next(), Some("example.pane"));
@@ -1306,11 +1323,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
             panic!("expected plugin pane opened response: {open}");
         };
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let text = std::fs::read_to_string(&capture).expect("plugin pane command should write env");
+        let text = read_capture_when_ready(&capture, || {});
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(canonical_path_string(&root).as_str()));
         assert_eq!(
@@ -1792,13 +1805,11 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
             },
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !capture.exists() && std::time::Instant::now() < deadline {
-            app.drain_all_internal_events();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         let context: PluginInvocationContext =
-            serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+            serde_json::from_str(&read_capture_when_ready(&capture, || {
+                app.drain_all_internal_events();
+            }))
+            .unwrap();
         assert_eq!(
             context.workspace_id.as_deref(),
             Some(target_workspace.workspace_id.as_str())
@@ -1894,6 +1905,76 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
         assert_ne!(
             pane_context.focused_pane_id.as_deref(),
             Some(active_public_pane_id.as_str())
+        );
+
+        app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-issue".into(),
+            is_linked_worktree: true,
+        });
+        let workspace = app.workspace_info(0);
+        let worktree = crate::api::schema::WorktreeInfo {
+            path: "/repo/herdr-issue".into(),
+            branch: Some("worktree/issue".into()),
+            is_bare: false,
+            is_detached: false,
+            is_prunable: false,
+            is_linked_worktree: true,
+            open_workspace_id: None,
+            label: "herdr".into(),
+        };
+        app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-other".into(),
+            is_linked_worktree: true,
+        });
+        let changed_context = app.plugin_context_for_event(
+            &crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::WorktreeRemoved,
+                data: crate::api::schema::EventData::WorktreeRemoved {
+                    workspace_id: workspace_id.clone(),
+                    workspace: Some(workspace.clone()),
+                    worktree: worktree.clone(),
+                    forced: true,
+                },
+            },
+            "worktree.removed",
+        );
+        assert_eq!(
+            changed_context
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.checkout_path.as_str()),
+            Some("/repo/herdr-issue")
+        );
+
+        app.state.workspaces.clear();
+        let removed_context = app.plugin_context_for_event(
+            &crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::WorktreeRemoved,
+                data: crate::api::schema::EventData::WorktreeRemoved {
+                    workspace_id: workspace_id.clone(),
+                    workspace: Some(workspace),
+                    worktree,
+                    forced: true,
+                },
+            },
+            "worktree.removed",
+        );
+        assert_eq!(
+            removed_context.workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        assert_eq!(
+            removed_context
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.checkout_path.as_str()),
+            Some("/repo/herdr-issue")
         );
     }
 

@@ -378,9 +378,9 @@ impl Tab {
         let new_id = match split_mode {
             SplitMode::Default => self.layout.split_focused(direction),
             SplitMode::WithRatio(ratio) => self.layout.split_focused_with_ratio(direction, ratio),
-            SplitMode::WithPlacement(placement) => {
-                self.layout.split_focused_with_placement(direction, placement)
-            }
+            SplitMode::WithPlacement(placement) => self
+                .layout
+                .split_focused_with_placement(direction, placement),
         };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));

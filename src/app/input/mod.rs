@@ -37,6 +37,20 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 mod copy_mode;
 mod modal;
 mod mouse;
+
+#[cfg(test)]
+fn mouse(
+    kind: crossterm::event::MouseEventKind,
+    col: u16,
+    row: u16,
+) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    }
+}
 mod navigate;
 mod overlays;
 mod selection;
@@ -269,7 +283,7 @@ impl App {
 
         let handled_pane_double_click = self.handle_pane_double_click(mouse);
 
-        let previous_agent_panel_scope = self.state.agent_panel_scope;
+        let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
@@ -299,8 +313,8 @@ impl App {
         {
             self.refresh_integration_recommendations();
         }
-        if self.state.agent_panel_scope != previous_agent_panel_scope {
-            self.save_agent_panel_scope(self.state.agent_panel_scope);
+        if self.state.agent_panel_sort != previous_agent_panel_sort {
+            self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
 
         if let Some(content) = self.state.request_clipboard_write.take() {
@@ -610,20 +624,6 @@ fn app_for_mouse_test() -> App {
 }
 
 #[cfg(test)]
-fn mouse(
-    kind: crossterm::event::MouseEventKind,
-    col: u16,
-    row: u16,
-) -> crossterm::event::MouseEvent {
-    crossterm::event::MouseEvent {
-        kind,
-        column: col,
-        row,
-        modifiers: crossterm::event::KeyModifiers::empty(),
-    }
-}
-
-#[cfg(test)]
 fn numbered_lines_bytes(count: usize) -> Vec<u8> {
     (0..count)
         .map(|i| format!("{i:06}\r\n"))
@@ -640,7 +640,6 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         &terminal_runtimes,
         state.active,
         state.selected,
-        state.agent_panel_scope,
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
