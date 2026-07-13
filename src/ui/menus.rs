@@ -65,7 +65,7 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
         .fg(app.palette.accent)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(app.palette.overlay0);
-    let easymotion = app.copy_mode.and_then(|copy_mode| copy_mode.easymotion);
+    let easymotion = app.fork_features.easymotion;
     let mode_bg = if easymotion.is_some() {
         app.palette.yellow
     } else {
@@ -318,14 +318,13 @@ mod tests {
     use crate::app::Mode;
     use crate::layout::PaneId;
 
-    fn copy_mode_state(easymotion: Option<EasyMotionState>) -> CopyModeState {
+    fn copy_mode_state() -> CopyModeState {
         CopyModeState {
             pane_id: PaneId::from_raw(1),
             cursor_row: 0,
             cursor_col: 0,
             entry_offset_from_bottom: 0,
             selection: None,
-            easymotion,
         }
     }
 
@@ -333,7 +332,8 @@ mod tests {
     fn copy_mode_overlay_uses_yellow_for_easymotion_label() {
         let mut app = AppState::test_new();
         app.mode = Mode::Copy;
-        app.copy_mode = Some(copy_mode_state(Some(EasyMotionState::new())));
+        app.copy_mode = Some(copy_mode_state());
+        app.fork_features.easymotion = Some(EasyMotionState::new());
         let backend = ratatui::backend::TestBackend::new(40, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
@@ -350,7 +350,7 @@ mod tests {
     fn copy_mode_overlay_keeps_accent_for_copy_label() {
         let mut app = AppState::test_new();
         app.mode = Mode::Copy;
-        app.copy_mode = Some(copy_mode_state(None));
+        app.copy_mode = Some(copy_mode_state());
         let backend = ratatui::backend::TestBackend::new(40, 1);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 

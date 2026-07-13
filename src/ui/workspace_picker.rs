@@ -27,8 +27,8 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspacePickerTarget {
-    Workspace { ws_idx: usize },
-    Tab { ws_idx: usize, tab_idx: usize },
+    Workspace { workspace_id: String },
+    Tab { tab_id: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -79,9 +79,11 @@ impl Default for WorkspacePickerPreview {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WorkspacePickerState {
+    pub active: bool,
     pub mode: WorkspacePickerMode,
     pub query: String,
     pub selected: usize,
+    pub selected_target: Option<WorkspacePickerTarget>,
     pub scroll: usize,
     pub preview: WorkspacePickerPreview,
     pub preview_ws_idx: Option<usize>,
@@ -107,7 +109,7 @@ impl AppState {
         self.workspace_picker.query.clear();
         self.workspace_picker.scroll = 0;
         self.workspace_picker.expanded_workspaces.clear();
-        self.mode = Mode::WorkspacePicker;
+        self.workspace_picker.active = true;
 
         let target = self.active.unwrap_or(self.selected);
         self.workspace_picker.selected = self
@@ -117,6 +119,7 @@ impl AppState {
             .unwrap_or(0);
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     pub(crate) fn open_quick_switch_workspace_from(
@@ -127,7 +130,7 @@ impl AppState {
         self.workspace_picker.query.clear();
         self.workspace_picker.scroll = 0;
         self.workspace_picker.expanded_workspaces.clear();
-        self.mode = Mode::WorkspacePicker;
+        self.workspace_picker.active = true;
 
         let rows = self.workspace_picker_rows_from(terminal_runtimes);
         self.workspace_picker.selected = self
@@ -139,6 +142,7 @@ impl AppState {
             .unwrap_or(0);
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     #[cfg(test)]
@@ -230,7 +234,9 @@ impl AppState {
         let (state, seen) = ws.aggregate_state(&self.terminals);
 
         WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace { ws_idx },
+            target: WorkspacePickerTarget::Workspace {
+                workspace_id: ws.id.clone(),
+            },
             ws_idx,
             depth: 0,
             label,
@@ -254,7 +260,9 @@ impl AppState {
                 let pane_count = tab.panes.len();
                 let (state, seen) = tab_aggregate_state(tab, &self.terminals);
                 WorkspacePickerRow {
-                    target: WorkspacePickerTarget::Tab { ws_idx, tab_idx },
+                    target: WorkspacePickerTarget::Tab {
+                        tab_id: crate::workspace::public_tab_id_for_number(&ws.id, tab.number),
+                    },
                     ws_idx,
                     depth: 1,
                     label: tab.display_name(),
@@ -317,6 +325,7 @@ impl AppState {
             self.workspace_picker.selected.min(count.saturating_sub(1));
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     pub(crate) fn move_workspace_picker_selection_from(
@@ -336,6 +345,7 @@ impl AppState {
         self.workspace_picker.selected = (current + delta).clamp(0, count as isize - 1) as usize;
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     pub(crate) fn cycle_quick_switch_workspace_from(
@@ -369,6 +379,7 @@ impl AppState {
         self.workspace_picker.selected = workspace_positions[next_pos];
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     pub(crate) fn expand_selected_workspace_picker_workspace_from(
@@ -409,6 +420,7 @@ impl AppState {
             .unwrap_or(0);
         self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_picker_preview_from(terminal_runtimes);
+        self.capture_workspace_picker_target_from(terminal_runtimes);
     }
 
     pub(crate) fn enter_quick_switch_search_from(
@@ -434,28 +446,64 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        let Some(target) = self
-            .workspace_picker_rows_from(terminal_runtimes)
-            .get(self.workspace_picker.selected)
-            .map(|row| row.target.clone())
-        else {
+        let Some(target) = self.workspace_picker.selected_target.clone().or_else(|| {
+            self.workspace_picker_rows_from(terminal_runtimes)
+                .get(self.workspace_picker.selected)
+                .map(|row| row.target.clone())
+        }) else {
             return false;
         };
         self.focus_workspace_picker_target(target)
     }
 
+    fn capture_workspace_picker_target_from(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) {
+        self.workspace_picker.selected_target = self
+            .workspace_picker_rows_from(terminal_runtimes)
+            .get(self.workspace_picker.selected)
+            .map(|row| row.target.clone());
+    }
+
     fn focus_workspace_picker_target(&mut self, target: WorkspacePickerTarget) -> bool {
         match target {
-            WorkspacePickerTarget::Workspace { ws_idx } => {
-                if ws_idx >= self.workspaces.len() {
+            WorkspacePickerTarget::Workspace { workspace_id } => {
+                let Some(ws_idx) = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+                else {
                     return false;
-                }
+                };
                 self.switch_workspace(ws_idx);
+                self.workspace_picker.active = false;
                 self.mode = Mode::Terminal;
                 true
             }
-            WorkspacePickerTarget::Tab { ws_idx, tab_idx } => {
+            WorkspacePickerTarget::Tab { tab_id } => {
+                let Some((ws_idx, tab_idx)) =
+                    self.workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(ws_idx, workspace)| {
+                            workspace
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .find_map(|(tab_idx, tab)| {
+                                    (crate::workspace::public_tab_id_for_number(
+                                        &workspace.id,
+                                        tab.number,
+                                    ) == tab_id)
+                                        .then_some((ws_idx, tab_idx))
+                                })
+                        })
+                else {
+                    return false;
+                };
                 if self.switch_workspace_tab(ws_idx, tab_idx) {
+                    self.workspace_picker.active = false;
                     self.mode = Mode::Terminal;
                     true
                 } else {
@@ -486,7 +534,9 @@ impl AppState {
             .workspace_picker_rows_from(terminal_runtimes)
             .get(self.workspace_picker.selected)
             .map(|row| row.target.clone())
-            .unwrap_or(WorkspacePickerTarget::Workspace { ws_idx });
+            .unwrap_or_else(|| WorkspacePickerTarget::Workspace {
+                workspace_id: self.workspaces[ws_idx].id.clone(),
+            });
         self.workspace_picker.preview =
             self.workspace_picker_preview_for_target_from(terminal_runtimes, target);
     }
@@ -506,7 +556,16 @@ impl AppState {
         target: WorkspacePickerTarget,
     ) -> WorkspacePickerPreview {
         let (ws_idx, pane_id) = match target {
-            WorkspacePickerTarget::Workspace { ws_idx } => {
+            WorkspacePickerTarget::Workspace { workspace_id } => {
+                let Some(ws_idx) = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+                else {
+                    return WorkspacePickerPreview::Empty {
+                        message: "workspace unavailable".to_string(),
+                    };
+                };
                 let Some(ws) = self.workspaces.get(ws_idx) else {
                     return WorkspacePickerPreview::Empty {
                         message: "workspace unavailable".to_string(),
@@ -519,7 +578,29 @@ impl AppState {
                 };
                 (ws_idx, pane_id)
             }
-            WorkspacePickerTarget::Tab { ws_idx, tab_idx } => {
+            WorkspacePickerTarget::Tab { tab_id } => {
+                let Some((ws_idx, tab_idx)) =
+                    self.workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(ws_idx, workspace)| {
+                            workspace
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .find_map(|(tab_idx, tab)| {
+                                    (crate::workspace::public_tab_id_for_number(
+                                        &workspace.id,
+                                        tab.number,
+                                    ) == tab_id)
+                                        .then_some((ws_idx, tab_idx))
+                                })
+                        })
+                else {
+                    return WorkspacePickerPreview::Empty {
+                        message: "tab unavailable".to_string(),
+                    };
+                };
                 let Some(tab) = self
                     .workspaces
                     .get(ws_idx)
@@ -716,6 +797,9 @@ pub(crate) fn handle_workspace_picker_key(
         }
         _ => {}
     }
+    if state.workspace_picker.active {
+        state.capture_workspace_picker_target_from(terminal_runtimes);
+    }
 }
 
 fn handle_quick_switch_workspace_picker_key(
@@ -779,6 +863,9 @@ fn handle_quick_switch_workspace_picker_key(
         }
         _ => {}
     }
+    if state.workspace_picker.active {
+        state.capture_workspace_picker_target_from(terminal_runtimes);
+    }
 }
 
 fn quick_switch_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
@@ -794,7 +881,7 @@ pub(crate) fn handle_quick_switch_key_release(
     terminal_runtimes: &TerminalRuntimeRegistry,
     key: TerminalKey,
 ) -> bool {
-    if state.mode != Mode::WorkspacePicker
+    if !state.workspace_picker.active
         || state.workspace_picker.mode != WorkspacePickerMode::QuickSwitch
     {
         return false;
@@ -805,7 +892,11 @@ pub(crate) fn handle_quick_switch_key_release(
         .quick_switch_workspace
         .bindings
         .iter()
-        .all(|b| b.trigger.is_direct() && b.trigger.combo().1.is_empty())
+        .filter_map(|binding| match binding.trigger {
+            crate::config::BindingTrigger::Direct(combo) => Some(combo),
+            _ => None,
+        })
+        .all(|combo| combo.1.is_empty())
     {
         tracing::trace!("quick_switch_workspace has no modifiers; release-accept unavailable");
         return false;
@@ -829,7 +920,11 @@ fn quick_switch_modifier_release_matches(
     bindings
         .bindings
         .iter()
-        .any(|binding| binding.trigger.is_direct() && binding.trigger.combo().1.contains(modifier))
+        .filter_map(|binding| match binding.trigger {
+            crate::config::BindingTrigger::Direct(combo) => Some(combo),
+            _ => None,
+        })
+        .any(|combo| combo.1.contains(modifier))
 }
 
 fn released_modifier(code: KeyCode) -> Option<KeyModifiers> {
@@ -878,6 +973,7 @@ pub(crate) fn handle_workspace_picker_mouse(
                 state.workspace_picker_row_index_at_from(terminal_runtimes, mouse.column, mouse.row)
             {
                 state.workspace_picker.selected = idx;
+                state.capture_workspace_picker_target_from(terminal_runtimes);
                 state.accept_workspace_picker_selection_from(terminal_runtimes);
             } else if !state.workspace_picker_popup_contains(mouse.column, mouse.row) {
                 close_workspace_picker(state);
@@ -898,14 +994,43 @@ pub(crate) fn handle_workspace_picker_mouse(
         }
         _ => {}
     }
+    if state.workspace_picker.active {
+        state.capture_workspace_picker_target_from(terminal_runtimes);
+    }
 }
 
 fn close_workspace_picker(state: &mut AppState) {
+    state.workspace_picker.active = false;
+    state.workspace_picker.selected_target = None;
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     } else {
         state.mode = Mode::Navigate;
     }
+}
+
+pub(crate) fn paste_workspace_picker_query(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    text: &str,
+) -> bool {
+    if !state.workspace_picker.active
+        || !matches!(
+            state.workspace_picker.mode,
+            WorkspacePickerMode::Search | WorkspacePickerMode::QuickSwitchSearch
+        )
+    {
+        return false;
+    }
+    state
+        .workspace_picker
+        .query
+        .extend(text.chars().filter(|ch| !ch.is_control()));
+    state.workspace_picker.selected = 0;
+    state.workspace_picker.scroll = 0;
+    state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
+    state.refresh_workspace_picker_preview_from(terminal_runtimes);
+    true
 }
 
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
@@ -1685,11 +1810,25 @@ mod tests {
 
         state.open_workspace_picker();
 
-        assert_eq!(state.mode, Mode::WorkspacePicker);
+        assert!(state.workspace_picker.active);
         assert_eq!(
             state.workspace_picker_rows()[state.workspace_picker.selected].ws_idx,
             1
         );
+    }
+
+    #[test]
+    fn picker_accept_resolves_stable_target_after_workspace_reorder() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let selected_id = state.workspaces[0].id.clone();
+        state.open_workspace_picker_from(&terminal_runtimes);
+
+        state.workspaces.swap(0, 1);
+        assert!(state.accept_workspace_picker_selection_from(&terminal_runtimes));
+
+        assert_eq!(state.active, Some(1));
+        assert_eq!(state.workspaces[1].id, selected_id);
     }
     #[test]
     fn workspace_picker_filters_workspace_names_only() {
@@ -1717,7 +1856,7 @@ mod tests {
 
         state.open_workspace_picker();
 
-        assert_eq!(state.mode, Mode::WorkspacePicker);
+        assert!(state.workspace_picker.active);
         assert!(matches!(
             state.workspace_picker.preview,
             WorkspacePickerPreview::Empty { ref message } if message == "no workspaces"
@@ -1812,10 +1951,14 @@ mod tests {
         assert_ne!(row1.label, "review-42");
     }
     #[test]
-    fn quick_switch_uses_mru_order_and_preselects_previous_workspace() {
+    fn quick_switch_uses_observed_mru_order_and_preselects_previous_workspace() {
         let mut state = app_with_workspaces(&["one", "two", "three"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.switch_workspace(1);
+        state.workspace_mru = vec![
+            state.workspaces[2].id.clone(),
+            state.workspaces[1].id.clone(),
+            state.workspaces[0].id.clone(),
+        ];
         state.switch_workspace(2);
 
         state.open_quick_switch_workspace_from(&terminal_runtimes);
@@ -1836,6 +1979,11 @@ mod tests {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         state.switch_workspace(1);
         state.switch_workspace(2);
+        state.workspace_mru = vec![
+            state.workspaces[2].id.clone(),
+            state.workspaces[1].id.clone(),
+            state.workspaces[0].id.clone(),
+        ];
         state.open_quick_switch_workspace_from(&terminal_runtimes);
 
         state.cycle_quick_switch_workspace_from(&terminal_runtimes, 1);
@@ -1860,8 +2008,10 @@ mod tests {
         assert_eq!(
             selected.target,
             WorkspacePickerTarget::Tab {
-                ws_idx: 1,
-                tab_idx: second_tab
+                tab_id: crate::workspace::public_tab_id_for_number(
+                    &state.workspaces[1].id,
+                    state.workspaces[1].tabs[second_tab].number,
+                )
             }
         );
         assert!(state.accept_workspace_picker_selection_from(&terminal_runtimes));
@@ -1930,7 +2080,7 @@ mod tests {
             state.workspace_picker.mode,
             WorkspacePickerMode::QuickSwitch
         );
-        assert_eq!(state.mode, Mode::WorkspacePicker);
+        assert!(state.workspace_picker.active);
     }
     #[test]
     fn quick_switch_accepts_control_modified_commands_while_shortcut_is_held() {
@@ -2449,7 +2599,9 @@ mod tests {
     fn render_row_shows_state_dot_for_blocked_workspace() {
         let app = AppState::test_new();
         let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            target: WorkspacePickerTarget::Workspace {
+                workspace_id: String::new(),
+            },
             ws_idx: 0,
             depth: 0,
             label: "test".to_string(),
@@ -2477,7 +2629,9 @@ mod tests {
     fn render_row_shows_state_dot_for_idle_seen_workspace() {
         let app = AppState::test_new();
         let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            target: WorkspacePickerTarget::Workspace {
+                workspace_id: String::new(),
+            },
             ws_idx: 0,
             depth: 0,
             label: "test".to_string(),
@@ -2506,7 +2660,9 @@ mod tests {
         let mut app = AppState::test_new();
         app.workspace_picker.mode = WorkspacePickerMode::QuickSwitch;
         let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace { ws_idx: 0 },
+            target: WorkspacePickerTarget::Workspace {
+                workspace_id: String::new(),
+            },
             ws_idx: 0,
             depth: 1,
             label: "ws".to_string(),

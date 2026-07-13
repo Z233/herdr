@@ -28,6 +28,7 @@ enum SplitMode {
     Default,
     WithRatio(f32),
     WithPlacement(SplitPlacement),
+    WithPlacementAndRatio(SplitPlacement, f32),
 }
 
 enum SplitCommand<'a> {
@@ -282,6 +283,33 @@ impl Tab {
         )
     }
 
+    pub fn split_focused_with_placement_and_ratio(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            SplitMode::WithPlacementAndRatio(placement, ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            launch_env,
+            None,
+        )
+    }
+
     pub fn split_focused_command(
         &mut self,
         direction: Direction,
@@ -361,6 +389,33 @@ impl Tab {
         )
     }
 
+    pub fn split_focused_argv_command_with_placement_and_ratio(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        argv: &[String],
+        launch_env: &PaneLaunchEnv,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            SplitMode::WithPlacementAndRatio(placement, ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            launch_env,
+            Some(SplitCommand::Argv { argv, launch_env }),
+        )
+    }
+
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,
@@ -381,6 +436,9 @@ impl Tab {
             SplitMode::WithPlacement(placement) => self
                 .layout
                 .split_focused_with_placement(direction, placement),
+            SplitMode::WithPlacementAndRatio(placement, ratio) => self
+                .layout
+                .split_focused_with_placement_and_ratio(direction, placement, ratio),
         };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -457,6 +515,7 @@ impl Tab {
         })
     }
 
+    #[cfg(test)]
     pub fn close_focused(&mut self) -> Option<DetachedPane> {
         let pane_id = self.layout.focused();
         self.detach_pane(pane_id)

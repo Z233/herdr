@@ -1,6 +1,19 @@
 # Herdr Fork (z233) — 新增功能与冲突解决记录
 
-z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 基础上新增 6 项自定义功能。上游 remote 为 `origin`，fork remote 为 `z233`，工作分支 `z233`。每次上游发布新 tag 时执行 `git merge tag 'vX.Y.Z'`，手动解决冲突。
+z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 基础上新增 6 项自定义功能。本文既记录功能，也定义 fork 与上游的架构边界；后续实现不得再次把 feature-specific 状态或 mutation 直接铺进上游 hot files。
+
+## v0.7.3 后的架构边界
+
+| 能力 | 所属层 | 当前边界 |
+|------|--------|----------|
+| Prefix chord | 中立 input primitive | Prefix target 统一解析/执行；短绑定与长 chord 重叠时，超时执行短绑定，完成 chord 与超时走同一 gateway。 |
+| 四向 split | runtime/API | TUI 只发 `pane.split`；公开请求使用四向 `PaneDirection`，结构树的 `SplitDirection` 仍只表示 canonical right/down。 |
+| Workspace Picker / Quick Switch | TUI fork overlay | 不再新增 `Mode` 变体；overlay 先于 core mode 接收 key/paste/mouse，最后单独渲染。选择目标保存 workspace/tab public ID，row index 只用于一次 projection。 |
+| MRU | TUI presentation state | 观察既有 `workspace.focused` / `workspace.closed` 事件更新，不修改 `switch_workspace()`。 |
+| EasyMotion | fork feature adapter | 状态位于 `ForkFeatureState`，controller 位于 `src/fork_features/easymotion.rs`；`CopyModeState` 不再携带 fork 字段。 |
+| IME associated text | raw input primitive | 在 raw framer 中展开为普通字符 key press；下游无 `RawInputEvent::Text`，也绝不转成 Paste。 |
+
+稳定 hook 只有 overlay input/paste/mouse/render、prefix timer expiry 和 runtime mutation adapter。新增 fork 行为时应扩展这些边界，而不是新增 core `Mode`、修改 copy-mode struct，或从 TUI 直接 spawn/focus runtime。
 
 ## 功能一览
 
@@ -17,7 +30,7 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 
 ### Prefix Chord 序列键绑定
 
-上游仅支持单步 prefix 键（如 `prefix+h`）。Fork 扩展为最多 3 步的 chord 序列，支持重叠绑定的更长匹配优先。
+上游仅支持单步 prefix 键（如 `prefix+h`）。Fork 扩展为最多 3 步的 chord 序列，支持重叠绑定的更长匹配优先。若短绑定同时是长绑定的前缀，等待 `chord_timeout_ms` 后执行短绑定；`0` 禁用多步等待并立即执行短绑定。
 
 引入的类型（后续合并冲突高频点）：
 - `BindingTrigger::PrefixSequence` — 新增枚举变体
@@ -28,13 +41,13 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 
 利用 chord 序列实现 `prefix+w+h/j/k/l` 一步打开新面板到指定方向。
 
-引入 **placement** 概念，贯穿 layout 和 workspace 两层：
+placement 现在由 `pane.split` 请求统一承载：Left/Up 映射为新 child 在前，Right/Down 映射为新 child 在后；ratio 始终描述 left/top（first child）的份额。
 
 - `SplitPlacement` 枚举（`After` / `Before`）— 控制分割位置
-- `TileLayout::split_focused_with_placement()` — 布局层
-- `Tab` 的 `split_focused` 重构为 `SplitMode` 枚举（`Default` / `WithRatio` / `WithPlacement`）— 面板层
+- `TileLayout::split_focused_with_placement_and_ratio()` — 布局层唯一的组合 primitive
+- `Tab` / `Workspace` 通过 `WithPlacementAndRatio` 传递同一组 placement + ratio 语义
 
-> **placement** 是后续合并冲突的高频根因：上游每次修改 `split_at()` 或 `split_focused()` 签名时，fork 的 `SplitPlacement` 参数和 `SplitMode` 枚举都需要同步适配。四次合并中有三次涉及此模式。
+> 历史上的 parallel `SplitMode`/placement 方法是高频冲突根因。v0.7.3 后，方向性 TUI action 不再直接调用 `AppState` split helper，而统一经 runtime API；结构层仅保留一个可组合的 placement+ratio 路径。
 
 ### Workspace Picker 工作区选择器
 
@@ -45,7 +58,7 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 - Agent 状态点：工作区名称旁显示 agent 运行状态
 - 名称显示与侧边栏对齐：分组子工作树使用 git 分支名，共享 `grouped_child_display_label()` 逻辑（fork 将其改为 `pub(crate)` 供 picker 模块调用）
 
-独立模块 `src/ui/workspace_picker.rs`（~1900 行）。
+实现仍集中在 `src/ui/workspace_picker.rs`，但它是独立 overlay session，不再是 core `Mode`。目标使用稳定 public ID，避免 workspace/tab reorder 后误选。
 
 ### Quick Switch 快速工作区切换
 
@@ -60,11 +73,11 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 
 Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签跳转。小写查询不区分大小写，大写区分。跳转保持选择锚点。
 
-新增 `CopyModeInitialAction` 枚举（`EasyMotion` / `ScrollUp`），支持进入复制模式后立即执行初始动作，通过可选键绑定 `copy_mode_easymotion` / `copy_mode_scroll_up` 触发。EasyMotion 模式有独立视觉样式。
+新增 `CopyModeInitialAction` 枚举（`EasyMotion` / `ScrollUp`），支持进入复制模式后立即执行初始动作，通过可选键绑定 `copy_mode_easymotion` / `copy_mode_scroll_up` 触发。EasyMotion controller/state 已从 `copy_mode.rs` / `CopyModeState` 移到 fork feature adapter，只通过窄 copy-mode helper 读取可见行和同步 cursor/selection。
 
 ### IME 输入法支持增强
 
-解析和转发 kitty keyboard protocol 的 associated text 字段，使 IME 组合文本正确输入到面板。
+解析 kitty keyboard protocol 的 associated text 字段，并在 raw framing 边界展开为无修饰符的 Unicode character key press，使 monolithic、headless 和 Windows client 共用同一语义。Release associated text 被忽略；控制码/非法 codepoint 被丢弃；IME 文本不走 bracketed-paste 路径。
 
 扩展 `KeyboardEnhancementFlags`：使用 `from_bits_retain()` 保留 crossterm 0.29 未暴露的 associated-text 位（`0b0001_0000`），同时启用 `REPORT_EVENT_TYPES`、`REPORT_ALTERNATE_KEYS`、`REPORT_ALL_KEYS_AS_ESCAPE_CODES`，在启用 IME 文本报告的同时保留仅修饰键的 press/release 事件。
 
@@ -120,23 +133,25 @@ Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签�
 
 | 文件 | Fork 变更 |
 |------|----------|
-| `src/ui/workspace_picker.rs` | Workspace picker 完整模块（~1900 行） |
-| `src/app/input/copy_mode.rs` | EasyMotion 子模式 |
-| `src/app/input/modal.rs` | Picker 键盘/鼠标输入 |
-| `src/app/input/navigate.rs` | 方向性面板打开导航 |
-| `src/app/input/overlays.rs` | Picker overlay 渲染 |
-| `src/app/input/mod.rs` | Chord 处理、模式分发 |
-| `src/app/actions.rs` | Picker action 分发 |
-| `src/app/state.rs` | `WorkspacePickerState`、`CopyModeInitialAction`、`pending_chord` |
-| `src/app/mod.rs` | Chord 清理、runtime 集成 |
+| `src/fork_features.rs` | fork aggregate state 与边界说明 |
+| `src/fork_features/easymotion.rs` | EasyMotion controller/matching adapter |
+| `src/ui/workspace_picker.rs` | Picker/Quick Switch overlay model、input 与 render；使用 stable IDs |
+| `src/app/input/copy_mode.rs` | 仅保留启动/转发 EasyMotion 的窄 hook 与中立 copy helpers |
+| `src/app/input/navigate.rs` | Prefix target gateway 与 runtime mutation dispatch |
+| `src/app/input/overlays.rs` | Picker mouse pre-dispatch hook |
+| `src/app/input/mod.rs` | Picker key/paste pre-dispatch hook |
+| `src/app/api.rs` | 观察 workspace focus/close event 更新 TUI MRU |
+| `src/app/state.rs` | `CopyModeInitialAction`、`pending_chord` 与 `ForkFeatureState` field |
+| `src/app/runtime.rs` | Prefix chord deadline 触发统一 expiry gateway |
 | `src/config/keybinds.rs` | `BindingTrigger::PrefixSequence`、`BindingRegistry` 扩展 |
 | `src/config/model.rs` | 新增配置字段 |
 | `src/config.rs` | 新增导出 |
-| `src/layout.rs` | `SplitPlacement`、`split_focused_with_placement()` |
-| `src/workspace/tab.rs` | `SplitMode` 枚举 |
+| `src/api/schema/panes.rs` | `pane.split` 使用四向 `PaneDirection` |
+| `src/layout.rs` | placement+ratio 单一 split primitive |
+| `src/workspace/tab.rs` | 统一 placement+ratio runtime path |
 | `src/input/parse.rs` | `parse_kitty_associated_text()` |
 | `src/input/model.rs` | `KeyboardEnhancementFlags` 扩展 |
-| `src/raw_input.rs` | Associated text 集成 |
+| `src/raw_input.rs` | Associated text 在 raw boundary 展开；无 downstream Text variant |
 | `src/ui/panes.rs` | EasyMotion 标签渲染 |
 | `src/ui/menus.rs` | EasyMotion 视觉区分 |
 | `src/ui/sidebar.rs` | `grouped_child_display_label` 共享 |

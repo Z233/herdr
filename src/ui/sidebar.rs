@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
+use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
@@ -82,7 +83,7 @@ pub(crate) fn agent_panel_toggle_rect(area: Rect, sort: AgentPanelSort) -> Rect 
     }
 
     let label = agent_panel_sort_label(sort);
-    let width = label.chars().count() as u16;
+    let width = display_width_u16(label);
     Rect::new(
         area.x + area.width.saturating_sub(width),
         area.y + 1,
@@ -162,30 +163,15 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
     }
 }
 
-fn truncate_text(text: &str, max_width: usize) -> String {
-    let len = text.chars().count();
-    if len <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width == 1 {
-        return "…".to_string();
-    }
-    let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
-    format!("{prefix}…")
-}
-
 fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -> String {
     let Some(tab_label) = entry.primary_tab_label.as_deref() else {
-        return truncate_text(&entry.primary_label, max_width);
+        return truncate_end(&entry.primary_label, max_width);
     };
 
     let separator = " · ";
-    let separator_width = separator.chars().count();
+    let separator_width = display_width(separator);
     if max_width <= separator_width + 2 {
-        return truncate_text(
+        return truncate_end(
             &format!("{}{}{}", entry.primary_label, separator, tab_label),
             max_width,
         );
@@ -199,8 +185,8 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
         .max(1);
     let mut tab_budget = available.saturating_sub(workspace_budget);
 
-    let workspace_len = entry.primary_label.chars().count();
-    let tab_len = tab_label.chars().count();
+    let workspace_len = display_width(&entry.primary_label);
+    let tab_len = display_width(tab_label);
 
     if workspace_len < workspace_budget {
         let spare = workspace_budget - workspace_len;
@@ -215,9 +201,9 @@ fn format_agent_panel_primary_label(entry: &AgentPanelEntry, max_width: usize) -
 
     format!(
         "{}{}{}",
-        truncate_text(&entry.primary_label, workspace_budget),
+        truncate_end(&entry.primary_label, workspace_budget),
         separator,
-        truncate_text(tab_label, tab_budget)
+        truncate_end(tab_label, tab_budget)
     )
 }
 
@@ -324,7 +310,7 @@ pub(crate) enum WorkspaceListEntry {
     Workspace { ws_idx: usize, indented: bool },
 }
 
-fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
+pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
     matches!(
         entries.get(idx.saturating_add(1)),
         Some(WorkspaceListEntry::Workspace { indented: true, .. })
@@ -347,6 +333,17 @@ pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested:
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, false)
+}
+
+/// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
+/// `collapsed_space_keys`. The mobile switcher has no collapse affordance and
+/// always shows the full worktree tree.
+pub(crate) fn workspace_list_entries_expanded(app: &AppState) -> Vec<WorkspaceListEntry> {
+    workspace_list_entries_inner(app, true)
+}
+
+fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         if let Some(space) = ws.worktree_space() {
@@ -415,7 +412,7 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
             });
             continue;
         };
-        let collapsed = app.collapsed_space_keys.contains(&space.key);
+        let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
@@ -669,6 +666,10 @@ pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect
 
 /// Collapsed sidebar: workspace glance on top, compact agent list below.
 pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let is_navigating = matches!(app.mode, Mode::Navigate);
 
     let p = &app.palette;
@@ -975,7 +976,7 @@ fn render_workspace_list(
                     })
                     .unwrap_or(0);
                 let max_branch_len = (card.rect.width as usize).saturating_sub(5 + reserved);
-                let branch_display = truncate_text(&branch, max_branch_len);
+                let branch_display = truncate_end(&branch, max_branch_len);
                 let branch_color = if selected || is_active {
                     p.mauve
                 } else {

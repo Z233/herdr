@@ -593,42 +593,9 @@ impl Workspace {
         true
     }
 
+    #[cfg(test)]
     pub fn close_active_tab(&mut self) -> bool {
         self.close_tab(self.active_tab)
-    }
-
-    pub fn split_focused(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
-    ) -> std::io::Result<crate::workspace::tab::NewPane> {
-        let pane_number = self.next_public_pane_number;
-        let tab_number = self
-            .active_tab()
-            .map(|tab| tab.number)
-            .expect("workspace must always have at least one tab");
-        let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);
-        let new_pane = self
-            .active_tab_mut()
-            .expect("workspace must always have at least one tab")
-            .split_focused(
-                direction,
-                rows,
-                cols,
-                cwd,
-                scrollback_limit_bytes,
-                host_terminal_theme,
-                shell_config,
-                &launch_env,
-            )?;
-        self.register_new_pane_with_number(new_pane.pane_id, pane_number);
-        Ok(new_pane)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -666,6 +633,7 @@ impl Workspace {
         Ok(new_pane)
     }
 
+    #[cfg(test)]
     pub fn split_focused_with_placement(
         &mut self,
         direction: Direction,
@@ -702,35 +670,6 @@ impl Workspace {
         Ok(new_pane)
     }
 
-    pub fn split_pane(
-        &mut self,
-        pane_id: PaneId,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
-        focus_new_pane: bool,
-    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
-        self.split_pane_with_runtime(
-            pane_id,
-            direction,
-            None,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            shell_config,
-            extra_env,
-            focus_new_pane,
-            None,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_with_ratio(
         &mut self,
@@ -749,7 +688,41 @@ impl Workspace {
         self.split_pane_with_runtime(
             pane_id,
             direction,
+            SplitPlacement::After,
             Some(ratio),
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            extra_env,
+            focus_new_pane,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_pane_with_placement_and_ratio(
+        &mut self,
+        pane_id: PaneId,
+        direction: Direction,
+        placement: SplitPlacement,
+        ratio: Option<f32>,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+        extra_env: Vec<(String, String)>,
+        focus_new_pane: bool,
+    ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
+        self.split_pane_with_runtime(
+            pane_id,
+            direction,
+            placement,
+            ratio,
             rows,
             cols,
             cwd,
@@ -779,6 +752,7 @@ impl Workspace {
         self.split_pane_with_runtime(
             pane_id,
             direction,
+            SplitPlacement::After,
             None,
             rows,
             cols,
@@ -810,6 +784,7 @@ impl Workspace {
         self.split_pane_with_runtime(
             pane_id,
             direction,
+            SplitPlacement::After,
             Some(ratio),
             rows,
             cols,
@@ -828,6 +803,7 @@ impl Workspace {
         &mut self,
         pane_id: PaneId,
         direction: Direction,
+        placement: SplitPlacement,
         ratio: Option<f32>,
         rows: u16,
         cols: u16,
@@ -847,8 +823,21 @@ impl Workspace {
         let previous_focus = tab.layout.focused();
         tab.layout.focus_pane(pane_id);
         let new_pane = match if let Some(argv) = argv {
-            match ratio {
-                Some(ratio) => tab.split_focused_argv_command_with_ratio(
+            match (placement, ratio) {
+                (SplitPlacement::Before, Some(ratio)) => tab
+                    .split_focused_argv_command_with_placement_and_ratio(
+                        direction,
+                        placement,
+                        ratio,
+                        rows,
+                        cols,
+                        cwd,
+                        argv,
+                        &launch_env,
+                        scrollback_limit_bytes,
+                        host_terminal_theme,
+                    ),
+                (_, Some(ratio)) => tab.split_focused_argv_command_with_ratio(
                     direction,
                     ratio,
                     rows,
@@ -859,7 +848,7 @@ impl Workspace {
                     scrollback_limit_bytes,
                     host_terminal_theme,
                 ),
-                None => tab.split_focused_argv_command(
+                (_, None) => tab.split_focused_argv_command(
                     direction,
                     rows,
                     cols,
@@ -871,8 +860,32 @@ impl Workspace {
                 ),
             }
         } else {
-            match ratio {
-                Some(ratio) => tab.split_focused_with_ratio(
+            match (placement, ratio) {
+                (SplitPlacement::Before, Some(ratio)) => tab
+                    .split_focused_with_placement_and_ratio(
+                        direction,
+                        placement,
+                        ratio,
+                        rows,
+                        cols,
+                        cwd,
+                        scrollback_limit_bytes,
+                        host_terminal_theme,
+                        shell_config,
+                        &launch_env,
+                    ),
+                (SplitPlacement::Before, None) => tab.split_focused_with_placement(
+                    direction,
+                    placement,
+                    rows,
+                    cols,
+                    cwd,
+                    scrollback_limit_bytes,
+                    host_terminal_theme,
+                    shell_config,
+                    &launch_env,
+                ),
+                (_, Some(ratio)) => tab.split_focused_with_ratio(
                     direction,
                     ratio,
                     rows,
@@ -883,7 +896,7 @@ impl Workspace {
                     shell_config,
                     &launch_env,
                 ),
-                None => tab.split_focused(
+                (_, None) => tab.split_focused(
                     direction,
                     rows,
                     cols,
@@ -909,6 +922,7 @@ impl Workspace {
     }
 
     /// Close the focused pane. Returns true if the workspace should close.
+    #[cfg(test)]
     pub fn close_focused(&mut self) -> bool {
         let pane_count = self
             .active_tab()
@@ -1192,6 +1206,7 @@ impl Workspace {
         self.public_pane_numbers.remove(&pane_id);
     }
 
+    #[cfg(test)]
     fn close_active_tab_and_report(&mut self) -> bool {
         if self.tabs.len() <= 1 {
             return true;

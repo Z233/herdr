@@ -768,7 +768,33 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
-    WorkspacePicker,
+}
+
+impl Mode {
+    /// Whether keys in this mode are commands/navigation (an ASCII input source is wanted) rather
+    /// than free text. This is an explicit **allowlist** of the prefix command/navigation realm:
+    /// any mode NOT listed defaults to leaving the user's IME alone (the safe default), so adding a
+    /// new text-entry or overlay mode can never silently force ASCII. Used by
+    /// `sync_prefix_input_source` (gated by `switch_ascii_input_source_in_prefix`) so multi-level
+    /// prefix commands keep ASCII until they return to the terminal.
+    ///
+    /// Known limitation: `Navigator`'s search box is also held on ASCII, since this `Mode`-level
+    /// predicate can't see `search_focused` (non-ASCII filtering there would need a runtime check).
+    pub(crate) fn wants_ascii_input(self) -> bool {
+        matches!(
+            self,
+            Mode::Prefix
+                | Mode::Navigate
+                | Mode::Navigator
+                | Mode::Copy
+                | Mode::Resize
+                | Mode::ConfirmClose
+                | Mode::ConfirmRemoveWorktree
+                | Mode::ContextMenu
+                | Mode::GlobalMenu
+                | Mode::KeybindHelp
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -881,7 +907,6 @@ pub(crate) struct CopyModeState {
     pub cursor_col: u16,
     pub entry_offset_from_bottom: usize,
     pub selection: Option<CopyModeSelection>,
-    pub easymotion: Option<EasyMotionState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1384,6 +1409,7 @@ pub struct AppState {
     pub navigator: NavigatorState,
     pub workspace_picker: WorkspacePickerState,
     pub workspace_mru: Vec<String>,
+    pub fork_features: crate::fork_features::ForkFeatureState,
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
@@ -1421,6 +1447,7 @@ pub struct AppState {
     pub sidebar_width_source: SidebarWidthSource,
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
+    pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
@@ -1437,6 +1464,7 @@ pub struct AppState {
     pub pane_borders: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
@@ -1736,6 +1764,7 @@ impl AppState {
             navigator: NavigatorState::default(),
             workspace_picker: Default::default(),
             workspace_mru: Vec::new(),
+            fork_features: Default::default(),
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
@@ -1783,6 +1812,7 @@ impl AppState {
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
             sidebar_collapsed: false,
+            sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
             next_agent_state_change_seq: 0,
@@ -1796,6 +1826,7 @@ impl AppState {
             pane_borders: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
+            hide_tab_bar_when_single_tab: false,
             pane_history_persistence: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,

@@ -14,14 +14,14 @@ pub use self::{
     },
     keybinds::{
         format_key_combo, key_event_matches_combo, normalize_key_combo, terminal_key_matches_combo,
-        ActionKeybinds, BindingConfig, CommandKeybindConfig, CustomCommandAction,
+        ActionKeybinds, BindingConfig, BindingTrigger, CommandKeybindConfig, CustomCommandAction,
         CustomCommandKeybind, IndexedKeybind, Keybinds, LiveKeybindConfig, MAX_PREFIX_SEQUENCE_LEN,
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, NewTerminalCwdConfig, ShellModeConfig, ToastClipboardPosition,
-        ToastConfig, ToastDelivery, ToastHerdrPosition, UpdateChannelConfig,
-        MAX_TOAST_DELAY_SECONDS,
+        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, ShellModeConfig,
+        SidebarCollapsedModeConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sound::SoundConfig,
     theme::{parse_color, CustomThemeColors, ThemeConfig},
@@ -291,5 +291,17 @@ command = "echo one"
     fn remote_image_paste_key_can_be_disabled() {
         let config: Config = toml::from_str("[keys]\nremote_image_paste = ''\n").unwrap();
         assert_eq!(config.remote_image_paste_key().unwrap(), None);
+    }
+
+    #[test]
+    fn ui_host_cursor_defaults_to_auto_and_parses_overrides() {
+        let default_config = Config::default();
+        assert_eq!(default_config.ui.host_cursor, HostCursorModeConfig::Auto);
+
+        let native: Config = toml::from_str("[ui]\nhost_cursor = 'native'\n").unwrap();
+        assert_eq!(native.ui.host_cursor, HostCursorModeConfig::Native);
+
+        let drawn: Config = toml::from_str("[ui]\nhost_cursor = 'drawn'\n").unwrap();
+        assert_eq!(drawn.ui.host_cursor, HostCursorModeConfig::Drawn);
     }
 }

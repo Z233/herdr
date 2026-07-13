@@ -118,16 +118,6 @@ impl App {
         let previous_mode = self.state.mode;
         let changed = match event {
             crate::raw_input::RawInputEvent::Key(key) => self.handle_raw_key_event(key).await,
-            crate::raw_input::RawInputEvent::Text(text) => {
-                let mut changed = false;
-                for event in crate::raw_input::text_input_events(&text) {
-                    let crate::raw_input::RawInputEvent::Key(key) = event else {
-                        continue;
-                    };
-                    changed |= self.handle_raw_key_event(key).await;
-                }
-                changed
-            }
             crate::raw_input::RawInputEvent::Paste(text) => {
                 self.handle_paste(text).await;
                 true
@@ -259,17 +249,7 @@ impl App {
         }
 
         if self.chord_deadline.is_some_and(|deadline| now >= deadline) {
-            let previous_mode = self.state.mode;
-            self.chord_deadline = None;
-            self.state.pending_chord = None;
-            if previous_mode == Mode::Prefix {
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
-            self.sync_prefix_input_source(previous_mode);
+            self.expire_prefix_chord();
             changed = true;
         }
 
@@ -312,7 +292,7 @@ impl App {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.save_session_now();
+            self.start_background_session_save();
         }
 
         if let Some(deadline) = self

@@ -133,13 +133,6 @@ pub enum BindingTrigger {
 }
 
 impl BindingTrigger {
-    pub fn combo(self) -> KeyCombo {
-        match self {
-            Self::Direct(combo) | Self::Prefix(combo) => combo,
-            Self::PrefixSequence { keys, .. } => keys[0],
-        }
-    }
-
     pub fn is_direct(self) -> bool {
         matches!(self, Self::Direct(_))
     }

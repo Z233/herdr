@@ -192,7 +192,7 @@ impl App {
             return true;
         }
 
-        if self.state.mode == Mode::WorkspacePicker {
+        if self.state.workspace_picker.active {
             crate::ui::workspace_picker::handle_workspace_picker_mouse(
                 &mut self.state,
                 &self.terminal_runtimes,

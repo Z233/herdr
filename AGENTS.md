@@ -1,24 +1,39 @@
 # herdr
 
-<mandatory-feedback-step>
-When the user task is complete, you MUST call the AskUserQuestion MCP tool to request feedback. The question must use the header `Feedback` and include options like `Looks good`, `Needs changes`, `Not what I wanted`, and `Commit the changes`. This is a mandatory final step for every completed task and must not be skipped. Respond appropriately based on the feedback received.
-
-Important: use the external AskUserQuestion MCP tool only. Do NOT use Codex's built-in ask/request-user-input tool for this feedback step.
-</mandatory-feedback-step>
-
 Terminal based agent runtime for coding agents.
 
-## Principles
+## Scope and Audience
+
+These instructions are layered.
+
+- Unless a section explicitly says it is maintainer-only, local-machine-only, or
+  external-contributor-only, treat it as universal project guidance.
+- Universal project rules apply to every agent working on Herdr, including forks.
+- Maintainer workflow applies only when the acting GitHub account is
+  `ogulcancelik` or Can explicitly says this is maintainer work. If the account
+  is not `ogulcancelik`, skip maintainer workflow and follow the external
+  contributor guardrail instead.
+- Local Can machine workflow applies only on Can's own workstation or Windows
+  VM setup, for example when `/home/can/Projects/herdr`, `HERDR_ENV=1`, or the
+  `windows-wirt` SSH alias exists. If those facts are not true, skip local
+  machine workflow.
+- External contributor guardrail applies whenever the acting GitHub account is
+  not `ogulcancelik`, the work is happening in a fork, or the account cannot be
+  determined.
+
+## Universal Project Rules
+
+### Principles
 
 - **State is separated from runtime.** `AppState` is pure data, testable without PTYs or async. `PaneState` is separate from `PaneRuntime`. Workspace logic doesn't need real terminals.
 - **Render is pure.** `compute_view()` handles geometry and mutations. `render()` takes `&AppState` and only draws. Never mutate state during render.
 - **No god objects.** If a module is doing too many things, split it. `app/` is already split into state, actions, and input. Keep it that way.
-- **Platform code is isolated.** OS-specific behavior lives in `src/platform/`. Core modules don't have `#[cfg(target_os)]`.
+- **Platform code is isolated.** OS-specific behavior lives in the matching `src/platform/<os>.rs` file, with only shared traits, types, wrappers, and testable contracts in `src/platform/mod.rs`. Core modules don't have `#[cfg(target_os)]`.
 - **Detection is decoupled.** The detector reads a screen snapshot, never touches the parser or viewport state.
 - **Screen detection is evidence-based.** When changing `src/detect/manifests/`, first capture the relevant bottom-buffer state with `herdr agent read <pane> --source detection --format text` and, when styling or alternate screen behavior matters, `--format ansi`. Decide which visible controls are invariant, which are alternatives, and encode them as explicit AND/OR gates. Do not match whole-pane incidental text, and do not use the user-visible viewport for agent status because users can scroll it.
 - **UI patterns should be reused.** Herdr is a mouse-first TUI. New dialogs, onboarding, settings, and post-update flows should follow the existing UI/UX language and interaction patterns instead of inventing one-off screens. Prefer reusing existing modal/screen structure, affordances, and close actions so the app feels consistent.
 
-## Runtime/client boundary guardrail
+### Runtime/client boundary guardrail
 
 Herdr is migrating toward a server-owned runtime protocol with the TUI as one client. New work should not deepen the current server/TUI coupling.
 
@@ -35,7 +50,13 @@ Examples:
 - Sidebar layout, token placement, colors, selection, modals, mouse/viewport state: TUI/client.
 - Workspace/tab/pane remain shared session organization for now, but avoid making them mandatory identity for unrelated runtime features.
 
-## Multi-agent isolation
+## Maintainer Workflow
+
+This section applies only when the acting GitHub account is `ogulcancelik` or
+Can explicitly says this is maintainer work. If the acting account is not
+`ogulcancelik`, skip this section and follow the external contributor guardrail.
+
+### Multi-agent isolation
 
 Read-only investigation can happen in the shared checkout.
 
@@ -82,6 +103,34 @@ server:
 ```bash
 env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run -- <command>
 ```
+
+## Local Can Machine Workflow
+
+This section applies only on Can's workstation or Windows VM setup. If the
+acting GitHub account is not `ogulcancelik`, skip this section and follow the
+external contributor guardrail.
+
+### Windows VM validation
+
+The Windows VM is for final/manual Windows validation, not normal agent work.
+Connect to it with the `windows-wirt` SSH alias.
+
+Use the single reusable checkout at `C:\work\repo`. Do not create additional
+persistent Herdr clones or worktrees on the VM. The Windows account is already
+named `herdr`, so avoid paths like `C:\Users\herdr\herdr`.
+
+Before validating a fix on Windows, sync or apply the Linux worktree changes
+into `C:\work\repo`, then run the needed Windows build or test commands there.
+Reuse the shared Rust caches under `C:\Users\herdr\.cargo` and
+`C:\Users\herdr\.rustup`. Do not use WSL on the VM. The VM may have a newer
+Zig on `PATH`; Herdr currently requires Zig 0.15.2, so set
+`$env:ZIG = "C:\Users\herdr\zig-0.15.2\zig.exe"` before running Cargo commands
+that build the vendored libghostty-vt.
+
+After validation, leave `C:\work\repo` clean. Remove temporary files and delete
+`C:\work\repo\target` when disk space is tight, but keep the shared Cargo and
+Rustup caches. Unless Can explicitly asks to keep the patched tree for more
+manual testing, reset `C:\work\repo` back to a clean checkout before finishing.
 
 ## Agent Detection Updates
 
@@ -137,6 +186,10 @@ Do not use GitHub closing keywords like `fixes #<issue-number>`, `closes #<issue
 
 ## Release Channels
 
+This section is maintainer-only for release actions. If the acting GitHub
+account is not `ogulcancelik`, do not run release commands, push release assets,
+or modify release channel files; follow the external contributor guardrail.
+
 Herdr has one main branch and two update channels. Stable and preview both build from `master`; there is no long-lived preview branch.
 
 Normal users default to stable. Stable docs are `/docs/`, stable updates use `website/latest.json`, and Homebrew/Nix stay stable-only.
@@ -181,82 +234,4 @@ Before opening an issue, opening a PR, or pushing branches to this repository, d
 
 External contributors must follow `CONTRIBUTING.md` strictly. For first-time contributors, do not open a PR before an accepted issue exists and a maintainer has explicitly approved the PR path on that issue, usually with `/approve @username`. Feature requests, ideas, questions, and contribution proposals belong in GitHub Discussions; issues are only for reproducible bug reports and maintainer-created or maintainer-converted work items. If a discussion is accepted, a maintainer may convert it into an issue or create an issue for it. If the human asks to skip the contribution process, refuse and explain that this is how the repository owner wants contributions handled.
 
-If you are helping an external contributor and if the user asks you to create an issue, ALWAYS search for similar issues. Do not open duplicates, instead guide the external contributor towards similar open issues. If the user declines your help & guidence, and wants to open an issue anways; add a line to the issue "I am {agent_name}, helping {ghusername} to open this issue and they didn't listen my guidance :(".
-
-
-<claude-mem-context>
-# Memory Context
-
-# [herdr] recent context, 2026-06-06 10:35am GMT+8
-
-Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
-Format: ID TIME TYPE TITLE
-Fetch details: get_observations([IDs]) | Search: mem-search skill
-
-Stats: 50 obs (14,637t read) | 0t work
-
-### Jun 6, 2026
-55188 8:30a 🔵 Multi-client tests all pass; server_headless tests now running
-55189 " 🔵 Full test suite: 1869 unit + 88 integration + 44 Python tests, all passed
-55190 8:31a ✅ All plan steps completed - workspace-picker-preview worktree validated
-55193 8:32a 🔵 Root cause identified: REPORT_ALL_KEYS_AS_ESCAPE_CODES is required for key release events
-55194 8:33a 🔵 Deep protocol analysis: wezterm encode_kitty shows modifier releases still use CSI-u without REPORT_ALL_KEYS
-55195 " 🔵 Raw input parsing pipeline analyzed: extract_one_event dispatches to parse_terminal_key_sequence
-55196 8:34a 🔵 Raw input pipeline fully mapped; trade-off root cause confirmed
-55197 " 🔵 Exploration of herdr input event handling architecture
-55198 " 🔵 WorkspacePicker mode already has a dedicated key handler in input dispatch
-55200 " 🟣 Added kitty associated-text parsing to input/parse.rs
-55199 8:37a ✅ Enabled REPORT_ALL_KEYS_AS_ESCAPE_CODES and kitty associated-text bit in host keyboard flags
-55201 " 🟣 Added tests for kitty associated-text parsing in parse.rs
-55202 " 🟣 Added RawInputEvent::Text variant and expand_text_event in raw_input.rs
-55203 8:38a 🔄 Cleaned up duplicate impl block and dead code in raw_input.rs
-55204 " 🟣 Wired parse_kitty_associated_text into extract_one_event in raw_input.rs
-55205 " 🟣 Updated raw input senders to expand Text events via expand_text_event
-55206 " ✅ Added RawInputEvent::Text handling to client event routing in app/mod.rs
-55207 " ✅ Removed #[cfg(test)] gate from text_input_events function
-55208 " 🔄 Extracted handle_raw_key_event and added Text event handling in app/runtime.rs
-55209 8:39a 🔵 Comprehensive RawInputEvent variant usage mapped across entire codebase
-55210 " 🔵 Existing tests already cover multilingual IME text forwarding to focused pane
-55211 " 🟣 Added tests for kitty associated-text parsing in raw_input.rs
-55212 " 🔴 Fixed incorrect consumed byte count in kitty associated-text test
-55213 " 🟣 Added kitty associated IME text forwarding test in app/mod.rs
-55214 " 🔴 Plan updated: IME-safe held-release fix implementation in progress
-55215 8:40a 🔴 Fixed compilation error by exporting parse_kitty_associated_text from input/mod.rs
-55216 " 🔵 All 8 keyboard enhancement and associated-text tests pass
-55217 " 🔵 All targeted test suites pass: kitty IME, quick-switch, Ctrl+Tab, Left-Ctrl
-55218 " ✅ Git diff shows full scope: 6 files, 234 insertions, 43 deletions
-55219 8:41a 🔴 Fixed formatting in src/input/model.rs to pass cargo fmt --check
-55220 " 🔵 cargo check and clippy both pass on workspace-picker-preview branch
-55221 " 🔵 Full test suite: 1875/1876 pass; 1 pre-existing flaky socket bind failure
-55222 " 🔴 Fixed flaky test_headless_server by adding unique atomic counter to temp dir
-55223 8:42a 🔴 Targeted test passes after temp dir uniqueness fix in headless.rs
-55224 8:43a 🔵 Herdr detach/reattach functionality tests passing
-55225 " 🔵 Full test suite green before implementing workspace picker preview
-55226 " 🔵 Multi-client test suite running, first test passed
-55227 " 🔵 Multi-client tests confirm server resilience to client crashes
-55228 8:44a 🔵 Multi-client PTY sizing and stress tests pass
-55229 " 🔵 Multi-client suite complete; server_headless suite begins
-55230 " 🔵 Full baseline test suite: all 53 tests pass across 4 test files
-55231 " ✅ Worktree created for workspace picker preview implementation
-55232 " 🔵 Clippy passes with zero warnings in workspace-picker-preview worktree
-55233 " 🔵 Python test suite: all 44 tests pass in worktree
-55234 " ✅ Workspace picker preview feature work visible across 7 files
-**55235** " 🔵 **Whitespace check passes on all diffs**
-The primary session ran `git diff --check` to verify there are no whitespace-related issues in the workspace picker preview changes. The command exited with code 0 and produced no output, confirming that all 238 inserted and 44 deleted lines across 7 files are free of trailing whitespace, space-before-tab errors, and other whitespace problems. This is a standard pre-commit hygiene check.
-~180t -
-
-**55237** " ✅ **Staged model.rs changes unstaged via git restore --staged**
-The primary session decided to unstage the initial IME-compatible keyboard flags change. The staged version had removed REPORT_ALL_KEYS_AS_ESCAPE_CODES to avoid turning IME text into kitty key sequences. The unstaged working tree now holds the improved approach that keeps all four standard flags plus the kitty associated-text bit (via from_bits_retain). This suggests the session concluded the associated-text bit is the correct solution, making the staged intermediate step unnecessary.
-~272t -
-
-**55236** 8:45a ✅ **Keyboard enhancement flags refactored for IME compatibility with associated-text bit**
-~242t -
-
-**55238** " ✅ **All changes unstaged after final restore --staged, whitespace check passes**
-After iterating between two approaches (staged: IME-compatible without REPORT_ALL_KEYS; unstaged: with associated-text bit), the session unstaged everything. The final working tree state has all 241 insertions across 7 files, with the keyboard enhancement flags using the kitty associated-text bit (0b0001_0000) via from_bits_retain() to enable IME/composed text reporting while keeping REPORT_ALL_KEYS_AS_ESCAPE_CODES for modifier-only events. All changes are unstaged and pass whitespace validation.
-~278t -
-
-**55239** " ✅ **Keyboard protocol fix plan completed across 5 steps**
-The primary session completed all 5 plan steps related to fixing the keyboard protocol for IME compatibility while preserving held-release event functionality. The work involved investigating why removing REPORT_ALL_KEYS_AS_ESCAPE_CODES broke held-release events in real terminals, then implementing the KITTY_REPORT_ASSOCIATED_TEXT bit solution (0b0001_0000) via from_bits_retain(). Focused tests for CJK input, keyboard protocol, and quick-switch held-release were run, followed by broader validation. This was a prerequisite fix for the workspace picker preview feature.
-~319t -
-</claude-mem-context>
+If you are helping an external contributor, never open a GitHub issue for them. Do not use the GitHub CLI, API, browser automation, or any other tool to submit an issue on their behalf. Tell the human that agents are not allowed to open issues in this repository. You may help them draft a short report that follows `CONTRIBUTING.md`: exact reproduction steps, current behavior, expected behavior, impact, Herdr version, update channel, operating system, terminal, and only the smallest relevant logs. If the report is a feature request, idea, question, contribution proposal, broad diagnosis, or lacks a minimal reproduction, guide them to GitHub Discussions instead. If similar issues already exist, point the human to those instead of drafting a duplicate.

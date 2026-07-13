@@ -150,6 +150,16 @@ impl TileLayout {
 
     /// Split the focused pane with a custom first-child ratio.
     pub fn split_focused_with_ratio(&mut self, direction: Direction, ratio: f32) -> PaneId {
+        self.split_focused_with_placement_and_ratio(direction, SplitPlacement::After, ratio)
+    }
+
+    /// Split the focused pane with explicit child placement and first-child ratio.
+    pub fn split_focused_with_placement_and_ratio(
+        &mut self,
+        direction: Direction,
+        placement: SplitPlacement,
+        ratio: f32,
+    ) -> PaneId {
         let new_id = PaneId::alloc();
         let placeholder = PaneId::from_raw(0);
         let old = std::mem::replace(&mut self.root, Node::Pane(placeholder));
@@ -158,7 +168,7 @@ impl TileLayout {
             self.focus,
             direction,
             new_id,
-            SplitPlacement::After,
+            placement,
             valid_split_ratio(ratio),
         );
         self.focus = new_id;
@@ -241,8 +251,8 @@ impl TileLayout {
     }
 
     /// Set the ratio of a split node at the given path.
-    pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) {
-        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9));
+    pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
+        set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
     }
 
     /// Adjust the nearest split in the given direction for the focused pane.
@@ -633,7 +643,7 @@ fn remove_pane(node: Node, target: PaneId) -> Option<Node> {
     }
 }
 
-fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) {
+fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) -> bool {
     if let Node::Split {
         ratio,
         first,
@@ -643,11 +653,14 @@ fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) {
     {
         if path.is_empty() {
             *ratio = new_ratio;
+            true
         } else if path[0] {
-            set_ratio_at(second, &path[1..], new_ratio);
+            set_ratio_at(second, &path[1..], new_ratio)
         } else {
-            set_ratio_at(first, &path[1..], new_ratio);
+            set_ratio_at(first, &path[1..], new_ratio)
         }
+    } else {
+        false
     }
 }
 
@@ -821,6 +834,29 @@ mod tests {
         assert_eq!(splits.len(), 1);
         assert_eq!(splits[0].0, Direction::Horizontal);
         assert!((splits[0].1 - 0.333).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn split_focused_with_placement_and_ratio_keeps_first_child_semantics() {
+        let (mut left_layout, original) = TileLayout::new();
+        let new_left = left_layout.split_focused_with_placement_and_ratio(
+            Direction::Horizontal,
+            SplitPlacement::Before,
+            0.25,
+        );
+        assert_eq!(left_layout.pane_ids(), vec![new_left, original]);
+        assert_eq!(pane_rect(&left_layout, new_left), Rect::new(0, 0, 25, 40));
+        assert_eq!(pane_rect(&left_layout, original), Rect::new(25, 0, 75, 40));
+
+        let (mut up_layout, original) = TileLayout::new();
+        let new_up = up_layout.split_focused_with_placement_and_ratio(
+            Direction::Vertical,
+            SplitPlacement::Before,
+            0.25,
+        );
+        assert_eq!(up_layout.pane_ids(), vec![new_up, original]);
+        assert_eq!(pane_rect(&up_layout, new_up), Rect::new(0, 0, 100, 10));
+        assert_eq!(pane_rect(&up_layout, original), Rect::new(0, 10, 100, 30));
     }
 
     #[test]
