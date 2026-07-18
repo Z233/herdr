@@ -3,6 +3,7 @@ use crossterm::event::KeyboardEnhancementFlags;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(windows))]
 const KITTY_REPORT_ASSOCIATED_TEXT: u8 = 0b0001_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

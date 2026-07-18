@@ -141,6 +141,7 @@ impl Tab {
                 initial_cwd.clone(),
                 argv,
                 launch_env,
+                crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 events.clone(),
@@ -458,6 +459,7 @@ impl Tab {
                 actual_cwd.clone(),
                 command,
                 launch_env,
+                crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 self.events.clone(),
@@ -471,6 +473,7 @@ impl Tab {
                 actual_cwd.clone(),
                 argv,
                 launch_env,
+                crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
                 self.events.clone(),
@@ -666,5 +669,15 @@ impl Tab {
         terminal_runtimes
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
+    }
+
+    pub fn follow_cwd_for_pane(
+        &self,
+        pane_id: PaneId,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.foreground_cwd_for_pane(pane_id, terminal_runtimes)
+            .or_else(|| self.cwd_for_pane(pane_id, terminals, terminal_runtimes))
     }
 }

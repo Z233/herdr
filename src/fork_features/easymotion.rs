@@ -10,9 +10,9 @@ use crate::{
 
 impl AppState {
     pub(crate) fn begin_copy_mode_easymotion(&mut self) {
-        let Some(_copy_mode) = self.copy_mode else {
+        if self.copy_mode.is_none() {
             return;
-        };
+        }
         self.fork_features.easymotion = Some(EasyMotionState::new());
     }
 
@@ -38,7 +38,7 @@ impl AppState {
             return;
         }
 
-        let Some(mut copy_mode) = self.copy_mode else {
+        let Some(mut copy_mode) = self.copy_mode.clone() else {
             return;
         };
         let Some(mut easymotion) = self.fork_features.easymotion else {
@@ -77,7 +77,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) {
-        let Some(copy_mode) = self.copy_mode else {
+        let Some(pane_id) = self.copy_mode.as_ref().map(|copy_mode| copy_mode.pane_id) else {
             return;
         };
         let Some(mut easymotion) = self.fork_features.easymotion else {
@@ -86,7 +86,7 @@ impl AppState {
         let Some((first, second)) = easymotion.target() else {
             return;
         };
-        let Some(info) = self.pane_info_by_id(copy_mode.pane_id).cloned() else {
+        let Some(info) = self.pane_info_by_id(pane_id).cloned() else {
             self.cancel_copy_mode(terminal_runtimes);
             return;
         };
@@ -106,7 +106,6 @@ impl AppState {
         }
 
         self.fork_features.easymotion = Some(easymotion);
-        self.copy_mode = Some(copy_mode);
     }
 }
 

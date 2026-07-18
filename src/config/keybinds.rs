@@ -5,6 +5,7 @@ use tracing::warn;
 
 use super::Config;
 use crate::input::TerminalKey;
+use crate::popup_size::PopupSize;
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
 pub const MAX_PREFIX_SEQUENCE_LEN: usize = 3;
@@ -87,6 +88,7 @@ pub enum CommandKeybindType {
     #[default]
     Shell,
     Pane,
+    Popup,
     PluginAction,
 }
 
@@ -102,6 +104,10 @@ pub struct CommandKeybindConfig {
     pub action_type: CommandKeybindType,
     /// Optional user-defined description for this custom command.
     pub description: Option<String>,
+    /// Optional popup width as cells or a percentage string when type = "popup".
+    pub width: Option<PopupSize>,
+    /// Optional popup height as cells or a percentage string when type = "popup".
+    pub height: Option<PopupSize>,
 }
 
 impl Default for CommandKeybindConfig {
@@ -111,6 +117,8 @@ impl Default for CommandKeybindConfig {
             command: String::new(),
             action_type: CommandKeybindType::Shell,
             description: None,
+            width: None,
+            height: None,
         }
     }
 }
@@ -119,6 +127,7 @@ impl Default for CommandKeybindConfig {
 pub enum CustomCommandAction {
     Shell,
     Pane,
+    Popup,
     PluginAction,
 }
 
@@ -306,15 +315,22 @@ pub struct IndexedKeybind {
 
 impl IndexedKeybind {
     pub fn matched_index(&self, key: TerminalKey) -> Option<usize> {
-        let KeyCode::Char(c @ '1'..='9') = key.code else {
-            return None;
+        let combo = self.trigger.single_combo()?;
+        let key_number = match key.code {
+            KeyCode::Char(c @ '1'..='9') => c,
+            KeyCode::Char(c) => {
+                let number = shifted_number_symbol(c)?;
+                if !indexed_shifted_number_matches(key, combo, number) {
+                    return None;
+                }
+                number
+            }
+            _ => return None,
         };
-        if self
-            .trigger
-            .single_combo()
-            .is_some_and(|combo| terminal_key_matches_combo(key, combo))
-        {
-            Some((c as usize) - ('1' as usize))
+        let legacy_shifted_number =
+            matches!(key.code, KeyCode::Char(c) if shifted_number_symbol(c) == Some(key_number));
+        if terminal_key_matches_combo(key, combo) || legacy_shifted_number {
+            Some((key_number as usize) - ('1' as usize))
         } else {
             None
         }
@@ -328,6 +344,8 @@ pub struct CustomCommandKeybind {
     pub command: String,
     pub action: CustomCommandAction,
     pub description: Option<String>,
+    pub width: Option<PopupSize>,
+    pub height: Option<PopupSize>,
 }
 
 /// Parsed keybinds for Herdr actions.
@@ -869,7 +887,20 @@ fn append_custom_command_bindings(
         let action = match command.action_type {
             CommandKeybindType::Shell => CustomCommandAction::Shell,
             CommandKeybindType::Pane => CustomCommandAction::Pane,
+            CommandKeybindType::Popup => CustomCommandAction::Popup,
             CommandKeybindType::PluginAction => CustomCommandAction::PluginAction,
+        };
+        let (width, height) = if action == CustomCommandAction::Popup {
+            (command.width, command.height)
+        } else {
+            if command.width.is_some() || command.height.is_some() {
+                let diag = format!(
+                    "popup size on non-popup custom command: keys.command[{index}]; ignoring width and height"
+                );
+                warn!(message = %diag, "config diagnostic");
+                diagnostics.push(diag);
+            }
+            (None, None)
         };
         let label = bindings.label().unwrap_or_else(|| "unset".to_string());
         keybinds.custom_commands.push(CustomCommandKeybind {
@@ -878,6 +909,8 @@ fn append_custom_command_bindings(
             command: command.command.clone(),
             action,
             description: command.description.clone(),
+            width,
+            height,
         });
     }
 }
@@ -1589,6 +1622,31 @@ fn legacy_shifted_ascii_letter_matches(
         && expected.is_ascii_lowercase()
         && actual.to_ascii_lowercase() == expected
         && actual_modifiers | KeyModifiers::SHIFT == expected_modifiers
+}
+
+const SHIFTED_NUMBER_SYMBOLS: [(char, char); 9] = [
+    ('1', '!'),
+    ('2', '@'),
+    ('3', '#'),
+    ('4', '$'),
+    ('5', '%'),
+    ('6', '^'),
+    ('7', '&'),
+    ('8', '*'),
+    ('9', '('),
+];
+
+fn shifted_number_symbol(ch: char) -> Option<char> {
+    SHIFTED_NUMBER_SYMBOLS
+        .iter()
+        .find_map(|(number, symbol)| (*symbol == ch).then_some(*number))
+}
+
+fn indexed_shifted_number_matches(key: TerminalKey, combo: KeyCombo, number: char) -> bool {
+    let (expected_code, expected_modifiers) = normalize_key_combo(combo);
+    matches!(expected_code, KeyCode::Char(expected) if expected == number)
+        && expected_modifiers.contains(KeyModifiers::SHIFT)
+        && key.modifiers == expected_modifiers.difference(KeyModifiers::SHIFT)
 }
 
 fn shifted_char_matches_expected(
@@ -2553,5 +2611,55 @@ description = "say hello"
             keybinds.custom_commands[0].description,
             Some("say hello".to_string())
         );
+    }
+
+    #[test]
+    fn custom_popup_command_parses() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+type = "popup"
+width = 90
+height = "80%"
+"#,
+        )
+        .unwrap();
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.custom_commands.len(), 1);
+        assert_eq!(
+            keybinds.custom_commands[0].action,
+            CustomCommandAction::Popup
+        );
+        assert_eq!(
+            keybinds.custom_commands[0].width,
+            Some(PopupSize::Cells(90))
+        );
+        assert_eq!(
+            keybinds.custom_commands[0].height,
+            Some(PopupSize::Percent(80))
+        );
+    }
+
+    #[test]
+    fn non_popup_custom_command_ignores_popup_size_with_diagnostic() {
+        let config: Config = toml::from_str(
+            r#"
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+type = "pane"
+width = "80%"
+"#,
+        )
+        .unwrap();
+
+        let keybinds = config.keybinds();
+        assert_eq!(keybinds.custom_commands[0].width, None);
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("popup size on non-popup custom command")));
     }
 }
