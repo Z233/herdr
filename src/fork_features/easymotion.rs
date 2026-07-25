@@ -141,9 +141,7 @@ pub(crate) fn append_easymotion_row_matches(
 }
 
 fn char_cell_width(ch: char) -> u16 {
-    unicode_width::UnicodeWidthChar::width(ch)
-        .unwrap_or(1)
-        .max(1) as u16
+    u16::from(crate::ghostty::unicode_codepoint_width(ch as u32)).max(1)
 }
 
 fn easymotion_label_at(index: usize) -> Option<char> {
@@ -162,5 +160,26 @@ fn easymotion_chars_equal(actual: char, target: char, case_sensitive: bool) -> b
         actual == target
     } else {
         actual.to_lowercase().eq(target.to_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn easymotion_match_columns_follow_copy_mode_widths() {
+        let prefix = "界\u{301}\u{fe0f}";
+        let mut easymotion = EasyMotionState::new();
+
+        append_easymotion_row_matches(&format!("{prefix}th"), 0, 't', 'h', &mut easymotion);
+
+        let expected_col = prefix.chars().fold(0u16, |col, ch| {
+            col.saturating_add(u16::from(crate::ghostty::unicode_codepoint_width(ch as u32)).max(1))
+        });
+        assert_eq!(
+            easymotion.labels[0].expect("matching label").col,
+            expected_col
+        );
     }
 }
