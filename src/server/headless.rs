@@ -3479,14 +3479,7 @@ impl HeadlessServer {
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
-        self.app.state.mode == app::Mode::Terminal
-            && self.app.state.popup_pane.is_none()
-            && self.app.state.selection.is_none()
-            && self.app.state.copy_mode.is_none()
-            && self.app.state.context_menu.is_none()
-            && self.app.state.toast.is_none()
-            && self.app.state.copy_feedback.is_none()
-            && !self.app.full_redraw_pending
+        crate::ui::retained_terminal_patch_safe(&self.app.state) && !self.app.full_redraw_pending
     }
 
     fn send_retained_frame_to_client(
@@ -4524,6 +4517,34 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StreamedFrameDecoder {
+        terminal: Option<crate::terminal::TerminalRuntime>,
+    }
+
+    impl StreamedFrameDecoder {
+        fn decode(&mut self, bytes: Vec<u8>) -> FrameData {
+            match read_server_message(bytes) {
+                ServerMessage::Frame(frame) => frame,
+                ServerMessage::Terminal(frame) => {
+                    let runtime = self.terminal.get_or_insert_with(|| {
+                        crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                            frame.width,
+                            frame.height,
+                            &[],
+                        )
+                    });
+                    runtime.test_process_pty_bytes(&frame.bytes);
+                    let area = Rect::new(0, 0, frame.width, frame.height);
+                    let (buffer, cursor) =
+                        crate::server::render_stream::render_terminal_virtual(runtime, area);
+                    FrameData::from_ratatui_buffer(&buffer, cursor)
+                }
+                other => panic!("expected streamed frame, got {other:?}"),
+            }
+        }
+    }
+
     fn frame_text(frame: &FrameData) -> String {
         frame
             .cells
@@ -4535,6 +4556,20 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn frame_rect_text(frame: &FrameData, rect: Rect) -> String {
+        let mut text = String::new();
+        let max_x = rect.x.saturating_add(rect.width).min(frame.width);
+        let max_y = rect.y.saturating_add(rect.height).min(frame.height);
+        for y in rect.y..max_y {
+            for x in rect.x..max_x {
+                let idx = usize::from(y) * usize::from(frame.width) + usize::from(x);
+                text.push_str(&frame.cells[idx].symbol);
+            }
+            text.push('\n');
+        }
+        text
     }
 
     fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {
@@ -4754,6 +4789,17 @@ mod tests {
         std::sync::mpsc::Receiver<Vec<u8>>,
         crate::layout::PaneId,
     ) {
+        retained_test_server_with_encoding(initial_screen, RenderEncoding::SemanticFrame)
+    }
+
+    fn retained_test_server_with_encoding(
+        initial_screen: &[u8],
+        render_encoding: RenderEncoding,
+    ) -> (
+        HeadlessServer,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        crate::layout::PaneId,
+    ) {
         let mut server = test_headless_server();
         let mut workspace = crate::workspace::Workspace::test_new("test");
         let pane_id = workspace.focused_pane_id().expect("focused pane");
@@ -4775,7 +4821,7 @@ mod tests {
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
-                RenderEncoding::SemanticFrame,
+                render_encoding,
                 Some(client_tx),
             ),
         );
@@ -7902,6 +7948,153 @@ next_tab = ""
                 .expect("full popup fallback frame"),
         );
         assert!(frame_text(&updated).contains("Zopup-aaaa"));
+    }
+
+    #[derive(Clone, Copy)]
+    enum PickerTestMode {
+        Search,
+        QuickSwitch,
+    }
+
+    fn assert_workspace_picker_isolates_live_terminal_updates(
+        render_encoding: RenderEncoding,
+        picker_mode: PickerTestMode,
+    ) {
+        let (mut server, client_rx, pane_id) =
+            retained_test_server_with_encoding(b"ACTIVE_SNAPSHOT", render_encoding);
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let preview_pane_id = preview_workspace
+            .focused_pane_id()
+            .expect("preview focused pane");
+        preview_workspace.insert_test_runtime(
+            preview_pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"SELECTED_PREVIEW"),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+
+        match picker_mode {
+            PickerTestMode::Search => server
+                .app
+                .state
+                .open_workspace_picker_from(&server.app.terminal_runtimes),
+            PickerTestMode::QuickSwitch => server
+                .app
+                .state
+                .open_quick_switch_workspace_from(&server.app.terminal_runtimes),
+        }
+
+        let expected_preview = match picker_mode {
+            PickerTestMode::Search => "ACTIVE_SNAPSHOT",
+            PickerTestMode::QuickSwitch => "SELECTED_PREVIEW",
+        };
+        let mut decoder = StreamedFrameDecoder::default();
+        server.render_and_stream();
+        let initial = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial picker frame"),
+        );
+        let preview = server.app.state.workspace_picker_preview_rect();
+        assert!(frame_rect_text(&initial, preview).contains(expected_preview));
+
+        let popup = server.app.state.workspace_picker_popup_rect();
+        let pane = server.app.state.view.pane_infos[0].inner_rect;
+        let panel_marker = "PANEL_UPDATE";
+        let panel_x = pane.x.max(popup.x.saturating_add(2));
+        let panel_y = pane.y.max(popup.y.saturating_add(2));
+        assert!(
+            panel_x.saturating_add(panel_marker.len() as u16)
+                < pane
+                    .x
+                    .saturating_add(pane.width)
+                    .min(popup.x.saturating_add(popup.width))
+        );
+        assert!(
+            panel_y
+                < pane
+                    .y
+                    .saturating_add(pane.height)
+                    .min(popup.y.saturating_add(popup.height))
+        );
+
+        let outside_marker = "OUTSIDE_UPDATE";
+        let outside_x = pane.x.saturating_add(1);
+        let outside_y = pane.y.saturating_add(pane.height).saturating_sub(1);
+        assert!(outside_y >= popup.y.saturating_add(popup.height));
+        assert!(outside_x.saturating_add(outside_marker.len() as u16) < pane.x + pane.width);
+
+        let update = format!(
+            "\x1b[{};{}H{outside_marker}\x1b[{};{}H{panel_marker}",
+            outside_y.saturating_sub(pane.y).saturating_add(1),
+            outside_x.saturating_sub(pane.x).saturating_add(1),
+            panel_y.saturating_sub(pane.y).saturating_add(1),
+            panel_x.saturating_sub(pane.x).saturating_add(1),
+        );
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(update.as_bytes());
+
+        if !server.render_retained_pty_update_and_stream() {
+            server.render_and_stream();
+        }
+        let updated = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("updated picker frame"),
+        );
+        assert!(!frame_text(&updated).contains(panel_marker));
+        assert!(frame_text(&updated).contains(outside_marker));
+        assert!(frame_rect_text(&updated, preview).contains(expected_preview));
+        assert!(!updated.cursor.as_ref().is_some_and(|cursor| cursor.visible));
+
+        crate::ui::workspace_picker::handle_workspace_picker_key(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),
+        );
+        server.render_and_stream();
+        let closed = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("closed picker frame"),
+        );
+        assert!(frame_text(&closed).contains(panel_marker));
+        assert!(frame_text(&closed).contains(outside_marker));
+    }
+
+    #[tokio::test]
+    async fn semantic_search_picker_isolates_live_terminal_updates() {
+        assert_workspace_picker_isolates_live_terminal_updates(
+            RenderEncoding::SemanticFrame,
+            PickerTestMode::Search,
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_ansi_search_picker_isolates_live_terminal_updates() {
+        assert_workspace_picker_isolates_live_terminal_updates(
+            RenderEncoding::TerminalAnsi,
+            PickerTestMode::Search,
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_quick_switch_picker_isolates_live_terminal_updates() {
+        assert_workspace_picker_isolates_live_terminal_updates(
+            RenderEncoding::SemanticFrame,
+            PickerTestMode::QuickSwitch,
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_ansi_quick_switch_picker_isolates_live_terminal_updates() {
+        assert_workspace_picker_isolates_live_terminal_updates(
+            RenderEncoding::TerminalAnsi,
+            PickerTestMode::QuickSwitch,
+        );
     }
 
     #[tokio::test]

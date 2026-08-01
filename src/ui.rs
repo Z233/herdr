@@ -384,6 +384,17 @@ fn compute_mobile_view(
     app.sync_copy_mode_search_geometry();
 }
 
+pub(crate) fn retained_terminal_patch_safe(app: &AppState) -> bool {
+    app.mode == Mode::Terminal
+        && !app.workspace_picker.active
+        && app.popup_pane.is_none()
+        && app.selection.is_none()
+        && app.copy_mode.is_none()
+        && app.context_menu.is_none()
+        && app.toast.is_none()
+        && app.copy_feedback.is_none()
+}
+
 /// Render the UI — reads AppState but does not mutate it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn render(app: &AppState, frame: &mut Frame) {

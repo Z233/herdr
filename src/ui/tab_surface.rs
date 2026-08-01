@@ -130,13 +130,13 @@ pub(crate) fn tab_surface_cursor(
             detected.is_some_and(|agent| app.cjk_ime_agents.contains(&agent))
         });
 
-    if let Some(cursor) = runtime.cursor_state(info.inner_rect, true) {
+    let cursor = if let Some(cursor) = runtime.cursor_state(info.inner_rect, true) {
         let visible = if reveal {
             !scrolled_back
         } else {
             cursor.visible && !scrolled_back
         };
-        Some(CursorState {
+        CursorState {
             x: cursor.x,
             y: cursor.y,
             visible,
@@ -145,17 +145,20 @@ pub(crate) fn tab_surface_cursor(
             } else {
                 cursor.shape
             },
-        })
+        }
     } else if reveal && !scrolled_back {
-        Some(CursorState {
+        CursorState {
             x: info.inner_rect.x,
             y: info.inner_rect.y,
             visible: true,
             shape: app.cjk_ime_cursor_shape,
-        })
+        }
     } else {
-        None
-    }
+        return None;
+    };
+
+    (!app.workspace_picker.active || !app.workspace_picker_popup_contains(cursor.x, cursor.y))
+        .then_some(cursor)
 }
 
 #[cfg(test)]
