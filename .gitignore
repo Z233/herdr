@@ -16,6 +16,7 @@ __pycache__/
 /.pi/todos
 /.pi/issues
 /.pi/cache
+/.rpiv/
 /result
 /result-*
 
