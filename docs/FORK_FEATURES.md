@@ -11,9 +11,11 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 | Workspace Picker / Quick Switch | TUI fork overlay | 不再新增 `Mode` 变体；overlay 先于 core mode 接收 key/paste/mouse，最后单独渲染。选择目标保存 workspace/tab public ID，row index 只用于一次 projection。 |
 | MRU | TUI presentation state | 观察既有 `workspace.focused` / `workspace.closed` 事件更新，不修改 `switch_workspace()`。 |
 | EasyMotion | fork feature adapter | 状态位于 `ForkFeatureState`，controller 位于 `src/fork_features/easymotion.rs`；`CopyModeState` 不再携带 fork 字段。 |
-| IME associated text | raw input primitive | 在 raw framer 中展开为普通字符 key press；下游无 `RawInputEvent::Text`，也绝不转成 Paste。 |
+| IME associated text | raw input primitive | host 侧 associated text 在 raw framer 中展开为普通字符 key press，绝不转成 Paste，fork framer 不产生 `Text`。v0.8.0 起上游为 client wire 路径引入 `RawInputEvent::Text`/`TextCommit`（Windows VTI IME 等），与 fork 的 host 展开并存；Text commit 不经 picker overlay，而 fork 展开的 key event 会自然流入 picker 搜索。 |
 
 稳定 hook 只有 overlay input/paste/mouse/render、prefix timer expiry 和 runtime mutation adapter。新增 fork 行为时应扩展这些边界，而不是新增 core `Mode`、修改 copy-mode struct，或从 TUI 直接 spawn/focus runtime。
+
+v0.8.0 后，键路由基于上游 `InputLeaseTable`（`suppressed_repeat_keys` 已删除）：picker 激活时 `terminal_input_context()` 不返回 Pane context，headless 键因此流入 picker pre-dispatch；quick-switch 的 release-accept 挂在 monolithic 与 headless 两条 Release 分支的 lease 转发之前。host 键盘增强标志保持 fork superset（`REPORT_ALL_KEYS_AS_ESCAPE_CODES` + associated-text bit，`from_bits_retain`），上游 terminal_modes 的动态 report-all 开关在此 superset 下退化为无害的重复 push。
 
 ## 功能一览
 
@@ -83,6 +85,22 @@ Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签�
 
 ## 合并冲突记录
 
+### Merge v0.8.0 (346411f, 2026-08-03)
+
+冲突文件 (11)：`src/app/api/panes.rs`、`src/app/input/copy_mode.rs`、`src/app/input/mod.rs`、`src/app/input/navigate.rs`、`src/app/mod.rs`、`src/app/runtime.rs`、`src/config/keybinds.rs`、`src/input/model.rs`、`src/input/parse.rs`、`src/raw_input.rs`、`src/workspace.rs`
+
+非平凡解决：
+- **input/model.rs** — 两侧同名函数 `ime_compatible_keyboard_enhancement_flags`：上游保持标志子集并新增 `KITTY_FLAG_REPORT_ALL_KEYS` 常量；fork 保留 superset（`REPORT_ALL_KEYS_AS_ESCAPE_CODES` + associated-text bit）与 fork 侧测试，同时采纳上游常量。`TerminalKey` 因上游新增 `generated_text`/`source` 字段不再 `Copy`。
+- **input/parse.rs** — 按上游将 0x1f 解码为 Ctrl+_，fork legacy 矩阵断言同步为 `'_'`；fork associated-text 测试与上游 non-US shifted 测试并集保留。
+- **raw_input.rs** — 上游 `RawInputEvent::Text(TextCommit)`（仅 wire TextCommit 构造，framer 不产生）与 fork framer associated-text 展开并存；`events_from_chunks` 保留 fork 的 flat_map 多事件结构，Esc 与常规键按上游携带 `vt_bytes`/`text_commit`。
+- **config/keybinds.rs** — `combo()` → `single_combo()` 适配（`matched_index` 采用上游 normalized-expected 实现 #1876，PrefixSequence 触发经 `single_combo()` 自然失配）；`matches_terminal_key`/`matches_prefix_key`/`matched_index` 统一为上游 by-ref 签名。
+- **app/input/navigate.rs** — fork 保留 `pending_chord.is_none()` 门控（chord 未决时 prefix 键不直通）；modifier-only guard 采用上游 `matches!(key.code, KeyCode::Modifier(_))` 形式；`TerminalKey` 非 Copy 后 chord 调用点改为 clone。
+- **app/input/mod.rs / app/runtime.rs / app/mod.rs** — 上游 `InputLeaseTable` 键生命周期路由取代 `suppressed_repeat_keys`；fork 删除 `handle_raw_key_event`，picker key/paste pre-dispatch 重置在上游 `handle_key -> Option<TerminalInputTarget>` 之上，release-accept 挂在两条 Release 分支的 lease 转发之前；`terminal_input_context()` 增加 picker 感知；fork deadline 测试适配删除的 `next_animation_tick`。
+- **app/api/panes.rs** — 保留四向 `PaneDirection`→`(Direction, SplitPlacement)` 映射与 `split_pane_with_placement_and_ratio` 单一调用；采纳上游 `launch_cwd_*` 重命名并接入 `host_terminal_appearance`。
+- **workspace.rs / workspace/tab.rs** — placement 适配（第四次）：fork 的 placement split 方法全部接入上游 `host_terminal_appearance` 参数；上游保留的无调用方 `Workspace::split_focused`（test-only）与纯 `split_pane` 按 fork 设计移除。
+- **terminal_modes.rs** — 上游 `host_keyboard_report_all_only_changes_the_current_herdr_stack_entry` 期望子集标志（`\x1b[=15u\x1b[=7u`）；fork superset 下两次 push 均为 `\x1b[=31u`（动态开关幂等），按 fork 语义适配期望。
+- **新增测试** — `src/app/api.rs::workspace_reordered_event_does_not_churn_client_mru`：上游新增 `workspace.reordered` 事件不改变 MRU recency，close 仍移除条目。
+
 ### Merge master (e8c23ef, 2026-06-13)
 
 冲突文件 (11)：`docs/next/CHANGELOG.md`、`src/app/actions.rs`、`src/app/input/mod.rs`、`src/app/input/modal.rs`、`src/app/input/navigate.rs`、`src/config/keybinds.rs`、`src/config/model.rs`、`src/input/mod.rs`、`src/input/model.rs`、`src/layout.rs`、`src/workspace/tab.rs`
@@ -140,7 +158,9 @@ Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签�
 | `src/app/input/navigate.rs` | Prefix target gateway 与 runtime mutation dispatch |
 | `src/app/input/overlays.rs` | Picker mouse pre-dispatch hook |
 | `src/app/input/mod.rs` | Picker key/paste pre-dispatch hook |
-| `src/app/api.rs` | 观察 workspace focus/close event 更新 TUI MRU |
+| `src/app/api.rs` | 观察 workspace focus/close event 更新 TUI MRU（忽略 reordered） |
+| `src/app/mod.rs` | `chord_deadline` 字段与初始化、headless picker-aware 键/粘贴路由、quick-switch release 路由 |
+| `src/app/api/panes.rs` | `pane.split` handler 四向 `PaneDirection`→placement 映射 |
 | `src/app/state.rs` | `CopyModeInitialAction`、`pending_chord` 与 `ForkFeatureState` field |
 | `src/app/runtime.rs` | Prefix chord deadline 触发统一 expiry gateway |
 | `src/config/keybinds.rs` | `BindingTrigger::PrefixSequence`、`BindingRegistry` 扩展 |
@@ -148,6 +168,8 @@ Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签�
 | `src/config.rs` | 新增导出 |
 | `src/api/schema/panes.rs` | `pane.split` 使用四向 `PaneDirection` |
 | `src/layout.rs` | placement+ratio 单一 split primitive |
+| `src/terminal_modes.rs` | host 键盘 report-all 动态开关在 fork superset 下幂等（测试期望按 fork 语义适配） |
+| `src/workspace.rs` | split entry points（`split_focused_command`、`split_pane_with_placement_and_ratio`、`split_pane_with_runtime` placement+appearance） |
 | `src/workspace/tab.rs` | 统一 placement+ratio runtime path |
 | `src/input/parse.rs` | `parse_kitty_associated_text()` |
 | `src/input/model.rs` | `KeyboardEnhancementFlags` 扩展 |

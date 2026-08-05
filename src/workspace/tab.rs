@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use ratatui::layout::Direction;
@@ -9,6 +8,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::events::AppEvent;
 use crate::layout::{Node, PaneId, SplitPlacement, TileLayout};
 use crate::pane::{PaneLaunchEnv, PaneState};
+use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 pub(crate) type DetachedPane = (PaneId, TerminalId);
@@ -55,10 +55,12 @@ pub struct Tab {
     pub zoomed: bool,
     pub events: mpsc::Sender<AppEvent>,
     pub(crate) render_notify: Arc<Notify>,
-    pub(crate) render_dirty: Arc<AtomicBool>,
+    pub(crate) render_dirty: Arc<RenderSignal>,
 }
 
 impl Tab {
+    // Tab construction threads pane runtime geometry, host context, and render hooks.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         number: usize,
         initial_cwd: PathBuf,
@@ -66,11 +68,12 @@ impl Tab {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
+        render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
@@ -79,6 +82,7 @@ impl Tab {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             events,
@@ -88,6 +92,8 @@ impl Tab {
         )
     }
 
+    // Command tab construction mirrors the shell tab runtime arguments.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_argv_command(
         number: usize,
         initial_cwd: PathBuf,
@@ -96,10 +102,11 @@ impl Tab {
         argv: &[String],
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
+        render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
             number,
@@ -108,6 +115,7 @@ impl Tab {
             cols,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             events,
@@ -125,11 +133,12 @@ impl Tab {
         cols: u16,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
+        render_dirty: Arc<RenderSignal>,
         argv: Option<&[String]>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let (layout, root_id) = TileLayout::new();
@@ -144,6 +153,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 events.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -156,6 +166,7 @@ impl Tab {
                 initial_cwd.clone(),
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 launch_env,
                 events.clone(),
@@ -215,6 +226,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
@@ -226,6 +238,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
@@ -241,6 +254,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
@@ -252,6 +266,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
@@ -267,6 +282,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
@@ -278,12 +294,15 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
         )
     }
 
+    // Placement splits carry the same geometry, host context, and launch policy as the other split entry points.
+    #[allow(clippy::too_many_arguments)]
     pub fn split_focused_with_placement_and_ratio(
         &mut self,
         direction: Direction,
@@ -294,6 +313,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
     ) -> std::io::Result<NewPane> {
@@ -305,6 +325,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             shell_config,
             launch_env,
             None,
@@ -321,6 +342,7 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -330,6 +352,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             Some(SplitCommand::Shell {
@@ -349,6 +372,7 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -358,6 +382,7 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             Some(SplitCommand::Argv { argv, launch_env }),
@@ -375,6 +400,7 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -384,12 +410,15 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             Some(SplitCommand::Argv { argv, launch_env }),
         )
     }
 
+    // Placement argv splits carry the same geometry, host context, and launch policy as the other split entry points.
+    #[allow(clippy::too_many_arguments)]
     pub fn split_focused_argv_command_with_placement_and_ratio(
         &mut self,
         direction: Direction,
@@ -402,6 +431,7 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
@@ -411,12 +441,15 @@ impl Tab {
             cwd,
             scrollback_limit_bytes,
             host_terminal_theme,
+            host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
             launch_env,
             Some(SplitCommand::Argv { argv, launch_env }),
         )
     }
 
+    // Split construction threads geometry, host context, launch policy, and command state.
+    #[allow(clippy::too_many_arguments)]
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,
@@ -426,6 +459,7 @@ impl Tab {
         cwd: Option<PathBuf>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
@@ -462,6 +496,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
@@ -476,6 +511,7 @@ impl Tab {
                 crate::pane::AgentDetection::Enabled,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 self.events.clone(),
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
@@ -487,6 +523,7 @@ impl Tab {
                 actual_cwd.clone(),
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 launch_env,
                 self.events.clone(),
@@ -538,7 +575,7 @@ impl Tab {
         moved: MovedPane,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
+        render_dirty: Arc<RenderSignal>,
     ) -> Self {
         let mut panes = HashMap::new();
         let pane_id = moved.pane_id;
@@ -669,22 +706,5 @@ impl Tab {
         terminal_runtimes
             .get(terminal_id)
             .and_then(|rt| rt.foreground_cwd())
-    }
-
-    pub fn follow_cwd_for_pane(
-        &self,
-        pane_id: PaneId,
-        terminals: &HashMap<TerminalId, TerminalState>,
-        terminal_runtimes: &TerminalRuntimeRegistry,
-    ) -> Option<PathBuf> {
-        let terminal_id = self.terminal_id(pane_id)?;
-        terminal_runtimes
-            .get(terminal_id)
-            .and_then(|runtime| runtime.follow_cwd())
-            .or_else(|| {
-                terminals
-                    .get(terminal_id)
-                    .map(|terminal| terminal.cwd.clone())
-            })
     }
 }

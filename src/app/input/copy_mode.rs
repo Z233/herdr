@@ -19,21 +19,13 @@ impl App {
             return;
         }
         self.state.update_dismissed = true;
-        if self.state.is_prefix_key(key) {
+        if self.state.is_prefix_key(&key) {
             self.state.mode = Mode::Prefix;
             return;
         }
         self.state
             .handle_copy_mode_key(&self.terminal_runtimes, key);
-        if let Some(content) = self.state.request_clipboard_write.take() {
-            if self
-                .event_tx
-                .try_send(crate::events::AppEvent::ClipboardWrite { content })
-                .is_err()
-            {
-                tracing::warn!("failed to queue clipboard write event");
-            }
-        }
+        self.dispatch_pending_clipboard_write();
     }
 }
 
@@ -116,7 +108,7 @@ impl AppState {
             return;
         }
 
-        if self.handle_copy_mode_search_prompt_key(terminal_runtimes, key) {
+        if self.handle_copy_mode_search_prompt_key(terminal_runtimes, key.clone()) {
             return;
         }
         match key.code {
