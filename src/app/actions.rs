@@ -2932,6 +2932,17 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::ZoxideQueryStarted { generation } => {
+                if self.workspace_switcher.active
+                    && self.workspace_switcher.mode
+                        == crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search
+                    && self.workspace_switcher.search_generation == generation
+                {
+                    self.workspace_switcher.provider_status =
+                        crate::app::workspace_search_provider::SearchProviderStatus::Loading;
+                }
+                Vec::new()
+            }
             AppEvent::ZoxideQueryCompleted {
                 generation,
                 available,
@@ -2951,6 +2962,9 @@ impl AppState {
                             crate::app::workspace_search_provider::SearchProviderStatus::Unavailable;
                         self.workspace_switcher.provider_candidates.clear();
                     }
+                    // Signal the App controller to clamp selection and refresh
+                    // preview with terminal runtimes.
+                    self.workspace_switcher.needs_provider_refresh = true;
                 }
                 Vec::new()
             }
@@ -2976,7 +2990,10 @@ impl AppState {
                     };
                     self.workspace_switcher
                         .directory_preview_cache
-                        .insert(shown_path, state);
+                        .insert(shown_path.clone(), state);
+                    // Signal the App controller to refresh the preview if
+                    // this path is currently selected.
+                    self.workspace_switcher.needs_preview_refresh = Some(shown_path);
                 }
                 Vec::new()
             }

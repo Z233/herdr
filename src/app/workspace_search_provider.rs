@@ -1,9 +1,18 @@
-//! Pure data for Workspace Switcher search providers.
+//! Search provider data, process execution, and directory preview I/O for
+//! the Workspace Switcher.
 //!
-//! A search provider turns external directory knowledge (for example the
-//! zoxide database) into candidates that the Workspace Switcher merges with
-//! open workspaces. This module only parses and shapes data; spawning
-//! provider processes and rendering rows happen in the app and ui layers.
+//! This module provides:
+//! - Pure data types (`SearchProviderCandidate`, `ZoxideDirectory`,
+//!   `DirectoryPreview`, lifecycle enums) consumed by the UI layer.
+//! - Matching helpers on `SearchProviderCandidate` so the UI never
+//!   re-implements basename extraction or ranking logic.
+//! - `run_zoxide_query` — spawns `zoxide query --list --score` with a
+//!   timeout, draining stdout concurrently to avoid pipe deadlock.
+//! - `read_directory_preview` — reads one level of a directory for the
+//!   preview pane.
+//!
+//! The App/HeadlessServer controller layers own *when* to call these
+//! functions; the UI layer owns only pure projection/render.
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,6 +20,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Candidate data and matching helpers
+// ---------------------------------------------------------------------------
 
 /// One directory suggested by a search provider.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +49,79 @@ impl SearchProviderCandidate {
             score,
         }
     }
+
+    /// Basename of the shown path, or the full display string if there is
+    /// no file name component.
+    pub(crate) fn basename(&self) -> String {
+        self.shown_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.shown_path.display().to_string())
+    }
+
+    /// Full display string of the shown path.
+    pub(crate) fn display_path(&self) -> String {
+        self.shown_path.display().to_string()
+    }
+
+    /// Abbreviated display path for row metadata. The home directory is
+    /// replaced with `~` on Unix or `%USERPROFILE%` on Windows.
+    /// Abbreviation is display-only; the shown_path is preserved for create.
+    pub(crate) fn abbreviated_path(&self) -> String {
+        abbreviate_home(&self.shown_path)
+    }
+
+    /// Compute the match rank for a query against this candidate.
+    ///
+    /// Returns `Some((quality, position_sum))` when the query matches.
+    /// Basename match quality always wins over full-path match quality:
+    /// if the basename matches, the basename rank is returned even when a
+    /// full-path match would have a numerically better rank.
+    pub(crate) fn match_rank(&self, query: &str) -> Option<(u8, usize)> {
+        let basename = self.basename();
+        if let Some(basename_rank) =
+            crate::ui::workspace_switcher::workspace_switcher_match_rank(query, &basename)
+        {
+            return Some(basename_rank);
+        }
+        let path_str = self.display_path();
+        crate::ui::workspace_switcher::workspace_switcher_match_rank(query, &path_str)
+    }
 }
+
+/// Abbreviate a path by replacing the home directory prefix with `~` (Unix)
+/// or `%USERPROFILE%` (Windows). Falls back to the full display string when
+/// the home directory cannot be determined or the path is not under it.
+pub(crate) fn abbreviate_home(path: &Path) -> String {
+    if let Some(home) = home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            let tilde = if cfg!(windows) { "%USERPROFILE%" } else { "~" };
+            return format!("{tilde}{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// Best-effort home directory resolution. Uses the `HOME` environment
+/// variable on Unix and `USERPROFILE` (falling back to `HOMEDRIVE` +
+/// `HOMEPATH`) on Windows.
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile));
+        }
+        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            return Some(PathBuf::from(format!("{drive}{path}")));
+        }
+        None
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// zoxide output parsing
+// ---------------------------------------------------------------------------
 
 /// One parsed line of `zoxide query --list --score` output.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +184,10 @@ pub(crate) fn dedup_by_canonical_identity(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Directory preview
+// ---------------------------------------------------------------------------
+
 /// Maximum number of unified result rows the search list shows.
 pub(crate) const SEARCH_RESULTS_LIMIT: usize = 100;
 
@@ -150,7 +239,7 @@ pub(crate) enum SearchProviderStatus {
     /// No provider activity yet (Search not entered or not applicable).
     #[default]
     Idle,
-    /// A provider query is in flight.
+    /// A provider query is in flight and the process spawned successfully.
     Loading,
     /// The provider query completed (results may be empty).
     Ready,
@@ -172,27 +261,10 @@ pub(crate) enum DirectoryPreviewState {
 /// Outcome of a background zoxide query, reported back to the main loop.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ZoxideQueryResult {
-    /// Whether the zoxide binary was found and the query executed.
+    /// Whether the zoxide binary was found and spawned successfully.
     pub(crate) available: bool,
     /// Parsed and deduplicated candidates. Empty when unavailable or failed.
     pub(crate) candidates: Vec<SearchProviderCandidate>,
-}
-
-/// Check whether a `zoxide` binary is reachable on PATH.
-///
-/// This is a best-effort filesystem check that does not spawn a process.
-/// It looks for an executable file named `zoxide` (or `zoxide.exe` on
-/// Windows) in any PATH directory.
-pub(crate) fn zoxide_available() -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    let binary = if cfg!(windows) {
-        "zoxide.exe"
-    } else {
-        "zoxide"
-    };
-    std::env::split_paths(&path_var).any(|dir| dir.join(binary).is_file())
 }
 
 /// Run `zoxide query --list --score` with a timeout and return parsed
@@ -205,6 +277,10 @@ pub(crate) fn zoxide_available() -> bool {
 /// Returns `available: false` when the binary cannot be spawned. Returns
 /// `available: true` with an empty candidate list on timeout, non-zero
 /// exit, or malformed output — contributing no rows and no error.
+///
+/// Stdout is drained concurrently while waiting for the process to exit,
+/// preventing a pipe-buffer deadlock when the provider emits more data than
+/// the OS pipe capacity.
 pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryResult {
     let mut child = match crate::noninteractive_process::command(program)
         .args(["query", "--list", "--score"])
@@ -222,6 +298,18 @@ pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryR
         }
     };
 
+    // Drain stdout in a separate thread so the child cannot block on a
+    // full pipe buffer while we are polling for exit.
+    let stdout_handle = child.stdout.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut handle) = stdout_handle {
+            use std::io::Read;
+            let _ = handle.read_to_end(&mut buf);
+        }
+        buf
+    });
+
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -230,6 +318,8 @@ pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryR
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Join the stdout thread to avoid a leak.
+                    let _ = stdout_thread.join();
                     return ZoxideQueryResult {
                         available: true,
                         candidates: Vec::new(),
@@ -239,6 +329,8 @@ pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryR
             }
             Err(_) => {
                 let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
                 return ZoxideQueryResult {
                     available: true,
                     candidates: Vec::new(),
@@ -247,17 +339,15 @@ pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryR
         }
     };
 
+    // Join the stdout reader and parse output.
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+
     if !status.success() {
         return ZoxideQueryResult {
             available: true,
             candidates: Vec::new(),
         };
-    }
-
-    let mut stdout = String::new();
-    if let Some(mut stdout_handle) = child.stdout.take() {
-        use std::io::Read;
-        let _ = stdout_handle.read_to_string(&mut stdout);
     }
 
     let candidates: Vec<_> = parse_zoxide_list(&stdout)
@@ -459,6 +549,49 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn basename_match_wins_over_better_path_rank() {
+        // "foo" matches basename of "/a/b/foo" with quality 0 (exact).
+        // "foo" also matches path "/a/b/foo" but with a worse (higher) rank
+        // because it's not at the start. Basename should win.
+        let c = candidate("/a/b/foo", "/a/b/foo", 10.0);
+        let rank = c.match_rank("foo").expect("should match");
+        // quality 0 = exact match on basename
+        assert_eq!(rank.0, 0);
+    }
+
+    #[test]
+    fn path_match_used_when_basename_does_not_match() {
+        // "a/b" matches the path but not the basename "foo".
+        let c = candidate("/a/b/foo", "/a/b/foo", 10.0);
+        let rank = c.match_rank("a/b").expect("should match via path");
+        // Should be a fuzzy/partial match, not exact.
+        assert!(rank.0 > 0);
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let c = candidate("/a/b/foo", "/a/b/foo", 10.0);
+        assert!(c.match_rank("xyz").is_none());
+    }
+
+    #[test]
+    fn abbreviated_path_replaces_home_with_tilde() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = home {
+            let path = home.join("projects/myapp");
+            let abbrev = abbreviate_home(&path);
+            assert!(abbrev.starts_with('~'));
+            assert!(abbrev.ends_with("projects/myapp"));
+        }
+    }
+
+    #[test]
+    fn abbreviated_path_keeps_non_home_paths() {
+        let abbrev = abbreviate_home(Path::new("/tmp/some/dir"));
+        assert_eq!(abbrev, "/tmp/some/dir");
+    }
+
     // -----------------------------------------------------------------------
     // Provider process tests (controlled executable, no developer database)
     // -----------------------------------------------------------------------
@@ -515,6 +648,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_zoxide_query_reports_unavailable_for_non_executable() {
+        // A file that exists but is not executable should fail to spawn.
+        let dir = TestDir::new("non-exec");
+        let fake = dir.path().join("not-zoxide");
+        fs::write(&fake, "#!/bin/sh\necho should-not-run\n").expect("write fake");
+        // Leave permissions as 0o644 (not executable).
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        assert!(!result.available);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_zoxide_query_times_out() {
         // A script that sleeps longer than the timeout.
         let fake = write_fake_zoxide("slow", "sleep 10");
@@ -552,7 +698,6 @@ mod tests {
         let real = dir.path().join("real");
         let alias = dir.path().join("alias");
         fs::create_dir(&real).expect("mkdir real");
-        #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
             let _ = symlink(&real, &alias);
@@ -573,5 +718,34 @@ mod tests {
         assert_eq!(result.candidates[0].canonical_path, canonical);
         assert_eq!(result.candidates[0].score, 200.0);
         assert_eq!(result.candidates[0].shown_path, real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_zoxide_query_handles_large_output_without_deadlock() {
+        // Emit more data than a typical pipe buffer (64 KiB on Linux).
+        // Each line is ~30 bytes; 10000 lines ≈ 300 KiB.
+        let dir = TestDir::new("zoxide-large");
+        let real = dir.path().join("real");
+        fs::create_dir(&real).expect("mkdir real");
+        let canonical = fs::canonicalize(&real).expect("canonicalize");
+
+        let script = format!(
+            "i=0; while [ $i -lt 10000 ]; do printf '%07.1f {}\n' \"$i\"; i=$((i + 1)); done",
+            real.display()
+        );
+        let fake = write_fake_zoxide("large", &script);
+
+        let start = Instant::now();
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(10));
+        let elapsed = start.elapsed();
+
+        assert!(result.available);
+        // All 10000 lines resolve to the same canonical path, so after
+        // dedup there is exactly one candidate.
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].canonical_path, canonical);
+        // Must finish well before the timeout — no deadlock.
+        assert!(elapsed < Duration::from_secs(5));
     }
 }

@@ -156,6 +156,10 @@ pub enum AppEvent {
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
+    /// Background zoxide process spawned successfully for a Search session.
+    /// Emitted only after the process has started, so a missing or
+    /// non-executable binary never causes a loading flash.
+    ZoxideQueryStarted { generation: u64 },
     /// Background zoxide directory query completed for a Search session.
     ZoxideQueryCompleted {
         generation: u64,

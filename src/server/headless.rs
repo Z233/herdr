@@ -901,9 +901,48 @@ impl HeadlessServer {
 
         // -- Workspace Switcher Search provider controller (headless) --
 
+        // Shared with TUI: refresh snapshot on search start.
         if self.app.state.workspace_switcher.search_started {
             self.app.state.workspace_switcher.search_started = false;
+            self.app.refresh_workspace_canonical_snapshot();
             self.app.start_zoxide_query();
+            needs_render = true;
+        }
+
+        // Handle async provider/preview refresh signals (item 2).
+        if self.app.state.workspace_switcher.needs_provider_refresh {
+            self.app.state.workspace_switcher.needs_provider_refresh = false;
+            self.app.refresh_workspace_canonical_snapshot();
+            self.app
+                .state
+                .clamp_workspace_switcher_selection_from(&self.app.terminal_runtimes);
+            needs_render = true;
+        }
+        if let Some(preview_path) = self
+            .app
+            .state
+            .workspace_switcher
+            .needs_preview_refresh
+            .take()
+        {
+            let selected_path = self
+                .app
+                .state
+                .workspace_switcher
+                .selected_target
+                .as_ref()
+                .and_then(|t| match t {
+                    crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Directory {
+                        shown_path,
+                        ..
+                    } => Some(shown_path.clone()),
+                    _ => None,
+                });
+            if selected_path.as_ref() == Some(&preview_path) {
+                self.app
+                    .state
+                    .refresh_workspace_switcher_preview_from(&self.app.terminal_runtimes);
+            }
             needs_render = true;
         }
 
@@ -912,33 +951,32 @@ impl HeadlessServer {
             needs_render = true;
         }
 
+        // Handle pending directory acceptance (focus-or-create).
+        // Deferred: wait until the Opening… preview has been rendered (item 8).
         if let Some(pending) = self.app.state.workspace_switcher.pending_directory.clone() {
-            self.app.state.workspace_switcher.pending_directory = None;
-            let response = self.headless_workspace_create(
-                "headless.workspace.create_cwd",
-                Some(pending.shown_path.display().to_string()),
-                None,
-            );
-            if response.is_ok() {
-                self.app.state.workspace_switcher.active = false;
-                self.app.state.mode = app::Mode::Terminal;
-            } else {
-                if let Err(error) = &response {
-                    tracing::error!(
-                        code = %error.code,
-                        message = %error.message,
-                        "failed to create workspace at directory"
+            if self.app.state.workspace_switcher.pending_directory_rendered {
+                self.app.state.workspace_switcher.pending_directory = None;
+                self.app.state.workspace_switcher.pending_directory_rendered = false;
+                // Shared canonical recheck (item 10, 13).
+                if !self.app.recheck_directory_focus(&pending) {
+                    let response = self.headless_workspace_create(
+                        "headless.workspace.create_cwd",
+                        Some(pending.shown_path.display().to_string()),
+                        None,
                     );
+                    if let Err(error) = &response {
+                        tracing::error!(
+                            code = %error.code,
+                            message = %error.message,
+                            "failed to create workspace at directory"
+                        );
+                    }
+                    self.app
+                        .finalize_directory_acceptance(&pending, response.is_ok());
                 }
-                self.app.state.workspace_switcher.search_error =
-                    Some(format!("Could not open {}", pending.shown_path.display()));
-                self.app.state.workspace_switcher.preview =
-                    crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Empty {
-                        message: format!("Could not open {}", pending.shown_path.display()),
-                    };
+                needs_render = true;
+                crate::render_prof::event("full_render_cause.deferred_directory_accept");
             }
-            needs_render = true;
-            crate::render_prof::event("full_render_cause.deferred_directory_accept");
         }
 
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {

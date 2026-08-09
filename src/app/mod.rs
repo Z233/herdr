@@ -994,10 +994,41 @@ impl App {
 
             // -- Workspace Switcher Search provider controller --
 
-            // Spawn zoxide query when Search is entered.
+            // Refresh the workspace canonical snapshot when Search starts
+            // or after provider/preview events that change candidates.
             if self.state.workspace_switcher.search_started {
                 self.state.workspace_switcher.search_started = false;
+                self.refresh_workspace_canonical_snapshot();
                 self.start_zoxide_query();
+                needs_render = true;
+            }
+
+            // Handle async provider/preview refresh signals (item 2).
+            if self.state.workspace_switcher.needs_provider_refresh {
+                self.state.workspace_switcher.needs_provider_refresh = false;
+                self.refresh_workspace_canonical_snapshot();
+                self.state
+                    .clamp_workspace_switcher_selection_from(&self.terminal_runtimes);
+                needs_render = true;
+            }
+            if let Some(preview_path) = self.state.workspace_switcher.needs_preview_refresh.take() {
+                // Refresh preview only if this path is currently selected.
+                let selected_path = self
+                    .state
+                    .workspace_switcher
+                    .selected_target
+                    .as_ref()
+                    .and_then(|t| match t {
+                        crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Directory {
+                            shown_path,
+                            ..
+                        } => Some(shown_path.clone()),
+                        _ => None,
+                    });
+                if selected_path.as_ref() == Some(&preview_path) {
+                    self.state
+                        .refresh_workspace_switcher_preview_from(&self.terminal_runtimes);
+                }
                 needs_render = true;
             }
 
@@ -1008,32 +1039,28 @@ impl App {
             }
 
             // Handle pending directory acceptance (focus-or-create).
+            // Deferred: wait until the Opening… preview has been rendered
+            // (item 8) so the user sees the state before the create runs.
             if let Some(pending) = self.state.workspace_switcher.pending_directory.clone() {
-                self.state.workspace_switcher.pending_directory = None;
-                let prev_count = self.state.workspaces.len();
-                self.runtime_workspace_create(
-                    "tui.workspace.create_cwd",
-                    crate::api::schema::WorkspaceCreateParams {
-                        cwd: Some(pending.shown_path.display().to_string()),
-                        focus: true,
-                        label: None,
-                        env: Default::default(),
-                    },
-                );
-                if self.state.workspaces.len() > prev_count {
-                    // Success: workspace was created and focused (focus: true).
-                    self.state.workspace_switcher.active = false;
-                    self.state.mode = Mode::Terminal;
-                } else {
-                    // Failure: keep Search open with an inline error.
-                    self.state.workspace_switcher.search_error =
-                        Some(format!("Could not open {}", pending.shown_path.display()));
-                    self.state.workspace_switcher.preview =
-                        crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Empty {
-                            message: format!("Could not open {}", pending.shown_path.display()),
-                        };
+                if self.state.workspace_switcher.pending_directory_rendered {
+                    self.state.workspace_switcher.pending_directory = None;
+                    self.state.workspace_switcher.pending_directory_rendered = false;
+                    if !self.recheck_directory_focus(&pending) {
+                        let prev_count = self.state.workspaces.len();
+                        self.runtime_workspace_create(
+                            "tui.workspace.create_cwd",
+                            crate::api::schema::WorkspaceCreateParams {
+                                cwd: Some(pending.shown_path.display().to_string()),
+                                focus: true,
+                                label: None,
+                                env: Default::default(),
+                            },
+                        );
+                        let ok = self.state.workspaces.len() > prev_count;
+                        self.finalize_directory_acceptance(&pending, ok);
+                    }
+                    needs_render = true;
                 }
-                needs_render = true;
             }
 
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
@@ -1632,23 +1659,25 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
-    /// Check zoxide availability and spawn the background query for the
-    /// current Search session. Called when the `search_started` flag is set.
+    /// Spawn the background zoxide query for the current Search session.
+    /// Called when the `search_started` flag is set. The background thread
+    /// attempts to spawn zoxide; if the spawn succeeds it emits
+    /// `ZoxideQueryStarted` (so the UI shows Loading only after a confirmed
+    /// spawn), then reads output and emits `ZoxideQueryCompleted`. If the
+    /// spawn fails it emits only `ZoxideQueryCompleted { available: false }`,
+    /// so there is no Loading flash for a missing or non-executable binary.
     pub(crate) fn start_zoxide_query(&mut self) {
         let generation = self.state.workspace_switcher.search_generation;
-        if !crate::app::workspace_search_provider::zoxide_available() {
-            self.state.workspace_switcher.provider_status =
-                crate::app::workspace_search_provider::SearchProviderStatus::Unavailable;
-            return;
-        }
-        self.state.workspace_switcher.provider_status =
-            crate::app::workspace_search_provider::SearchProviderStatus::Loading;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = crate::app::workspace_search_provider::run_zoxide_query(
                 "zoxide",
                 std::time::Duration::from_secs(2),
             );
+            if result.available {
+                let _ = event_tx
+                    .blocking_send(crate::events::AppEvent::ZoxideQueryStarted { generation });
+            }
             let _ = event_tx.blocking_send(crate::events::AppEvent::ZoxideQueryCompleted {
                 generation,
                 available: result.available,
@@ -1678,6 +1707,96 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Compute and store the workspace canonical-cwd snapshot in the switcher
+    /// state. This is the single place that performs filesystem I/O for
+    /// canonical resolution; the UI layer reads only the resulting snapshot.
+    /// Called at Search start, after provider completion, and after
+    /// successful workspace create.
+    pub(crate) fn refresh_workspace_canonical_snapshot(&mut self) {
+        let terminal_runtimes = &self.terminal_runtimes;
+        let snapshot: Vec<crate::ui::workspace_switcher::WorkspaceCanonicalEntry> = self
+            .state
+            .workspace_mru_indices()
+            .into_iter()
+            .filter_map(|ws_idx| {
+                let ws = self.state.workspaces.get(ws_idx)?;
+                let canonical = if let Some(space) = ws.worktree_space() {
+                    Some(crate::worktree::canonical_or_original(&space.checkout_path))
+                } else {
+                    ws.resolved_identity_cwd_from(&self.state.terminals, terminal_runtimes)
+                        .map(|cwd| crate::worktree::canonical_or_original(&cwd))
+                };
+                canonical.map(|c| crate::ui::workspace_switcher::WorkspaceCanonicalEntry {
+                    workspace_id: ws.id.clone(),
+                    canonical_cwd: c,
+                })
+            })
+            .collect();
+        self.state.workspace_switcher.workspace_canonical_snapshot = snapshot;
+    }
+
+    /// Recheck canonical identity for a pending directory acceptance.
+    /// If the path now matches an open workspace, focus it and return true.
+    /// Otherwise return false (caller should dispatch workspace.create).
+    /// This is the single canonical-workspace lookup helper (item 10).
+    pub(crate) fn recheck_directory_focus(
+        &mut self,
+        pending: &crate::ui::workspace_switcher::PendingDirectoryAccept,
+    ) -> bool {
+        // Refresh snapshot before rechecking (the path may now be open).
+        self.refresh_workspace_canonical_snapshot();
+        let rechecked_canonical = crate::worktree::canonical_or_original(&pending.shown_path);
+
+        // Find the most-recent workspace whose canonical cwd matches.
+        let mru_indices = self.state.workspace_mru_indices();
+        for ws_idx in &mru_indices {
+            let matches = self
+                .state
+                .workspace_switcher
+                .workspace_canonical_snapshot
+                .iter()
+                .find(|e| {
+                    self.state
+                        .workspaces
+                        .get(*ws_idx)
+                        .is_some_and(|ws| ws.id == e.workspace_id)
+                        && e.canonical_cwd == rechecked_canonical
+                });
+            if matches.is_some() {
+                self.state.switch_workspace(*ws_idx);
+                self.state.workspace_switcher.active = false;
+                self.state.mode = Mode::Terminal;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Finalize a directory acceptance after workspace.create has been
+    /// attempted. On success, close Search. On failure, remove the stale
+    /// candidate, show an inline error, and clamp selection (item 3).
+    pub(crate) fn finalize_directory_acceptance(
+        &mut self,
+        pending: &crate::ui::workspace_switcher::PendingDirectoryAccept,
+        create_succeeded: bool,
+    ) {
+        if create_succeeded {
+            self.state.workspace_switcher.active = false;
+            self.state.mode = Mode::Terminal;
+        } else {
+            // Remove the failed canonical candidate so the user cannot
+            // re-select it (item 3).
+            self.state
+                .workspace_switcher
+                .provider_candidates
+                .retain(|c| c.canonical_path != pending.canonical_path);
+            self.state.workspace_switcher.search_error =
+                Some(format!("Could not open {}", pending.shown_path.display()));
+            self.state
+                .clamp_workspace_switcher_selection_from(&self.terminal_runtimes);
+        }
     }
 
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {

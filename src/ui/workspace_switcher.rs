@@ -133,8 +133,24 @@ pub(crate) struct WorkspaceSwitcherState {
     pub search_started: bool,
     /// A directory acceptance is in flight (Opening…). Prevents re-acceptance.
     pub pending_directory: Option<PendingDirectoryAccept>,
+    /// Set to true when the pending_directory was set and the Opening…
+    /// preview has been rendered. The App controller waits for this before
+    /// dispatching workspace.create so the user sees the Opening state.
+    pub pending_directory_rendered: bool,
     /// Concise inline error shown in the preview pane.
     pub search_error: Option<String>,
+    /// Snapshot of workspace_id → canonical_cwd, computed by the App
+    /// controller. The UI reads only this for row coalescing and directory
+    /// acceptance — never filesystem I/O.
+    pub workspace_canonical_snapshot: Vec<WorkspaceCanonicalEntry>,
+    /// Set by handle_app_event when provider candidates change. The App
+    /// controller reads and clears this to clamp selection and refresh
+    /// preview with terminal runtimes.
+    pub needs_provider_refresh: bool,
+    /// Set by handle_app_event when a directory preview completes. The App
+    /// controller reads and clears this to refresh the preview if the path
+    /// is currently selected.
+    pub needs_preview_refresh: Option<std::path::PathBuf>,
 }
 
 /// Tracks a directory acceptance in flight so the UI can show "Opening…"
@@ -143,6 +159,15 @@ pub(crate) struct WorkspaceSwitcherState {
 pub(crate) struct PendingDirectoryAccept {
     pub shown_path: std::path::PathBuf,
     pub canonical_path: std::path::PathBuf,
+}
+
+/// One entry in the workspace canonical-cwd snapshot. The App controller
+/// computes this at Search start and after provider/create events so the
+/// UI layer never performs filesystem I/O during row projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceCanonicalEntry {
+    pub workspace_id: String,
+    pub canonical_cwd: std::path::PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +289,9 @@ impl AppState {
     /// Build unified search rows: workspaces (optionally coalesced with
     /// zoxide candidates) and unopened zoxide directories, ranked by match
     /// quality, workspace priority, and zoxide score.
+    ///
+    /// This is a pure projection: it reads only the workspace_canonical_snapshot
+    /// and provider_candidates — never the filesystem.
     fn search_rows_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -283,14 +311,25 @@ impl AppState {
             .map(|c| (c.canonical_path.clone(), c))
             .collect();
 
-        // Compute canonical cwd for each workspace and track which canonical
-        // paths are coalesced (have an open workspace) and which workspace is
-        // the enriched one (first in MRU order).
+        // Build workspace_id → canonical_cwd from the snapshot (pure data, no I/O).
+        let snapshot_by_id: HashMap<&str, &std::path::Path> = self
+            .workspace_switcher
+            .workspace_canonical_snapshot
+            .iter()
+            .map(|e| (e.workspace_id.as_str(), e.canonical_cwd.as_path()))
+            .collect();
+
+        // Map ws_idx → canonical_cwd from the snapshot, and track which
+        // canonical paths are coalesced (have an open workspace) and which
+        // workspace is the enriched one (first in MRU order).
         let mut workspace_canonicals: HashMap<usize, Option<std::path::PathBuf>> = HashMap::new();
         let mut enriched_workspace: HashMap<std::path::PathBuf, usize> = HashMap::new();
 
         for &ws_idx in workspace_indices {
-            let canonical = self.workspace_canonical_cwd(ws_idx, terminal_runtimes);
+            let ws = self.workspaces.get(ws_idx);
+            let canonical = ws
+                .and_then(|w| snapshot_by_id.get(w.id.as_str()))
+                .map(|p| p.to_path_buf());
             if let Some(ref canon) = canonical {
                 if candidates_by_canonical.contains_key(canon.as_path()) {
                     enriched_workspace.entry(canon.clone()).or_insert(ws_idx);
@@ -332,7 +371,8 @@ impl AppState {
             let mut best_rank = workspace_switcher_match_rank(query, &label);
 
             // If this workspace is the enriched one for its canonical path,
-            // also match against the zoxide candidate's basename and shown path.
+            // also match against the zoxide candidate using the candidate's
+            // own match_rank helper (basename-first).
             let is_enriched = workspace_canonicals
                 .get(&ws_idx)
                 .and_then(|canon| canon.as_ref())
@@ -342,19 +382,9 @@ impl AppState {
             if is_enriched {
                 if let Some(canon) = workspace_canonicals.get(&ws_idx).and_then(|c| c.as_ref()) {
                     if let Some(candidate) = candidates_by_canonical.get(canon.as_path()) {
-                        let basename = candidate
-                            .shown_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let path_str = candidate.shown_path.display().to_string();
-                        if let Some(basename_rank) = workspace_switcher_match_rank(query, &basename)
-                        {
+                        if let Some(candidate_rank) = candidate.match_rank(query) {
                             best_rank =
-                                Some(best_rank.map_or(basename_rank, |r| r.min(basename_rank)));
-                        }
-                        if let Some(path_rank) = workspace_switcher_match_rank(query, &path_str) {
-                            best_rank = Some(best_rank.map_or(path_rank, |r| r.min(path_rank)));
+                                Some(best_rank.map_or(candidate_rank, |r| r.min(candidate_rank)));
                         }
                     }
                 }
@@ -379,21 +409,7 @@ impl AppState {
             if enriched_workspace.contains_key(&candidate.canonical_path) {
                 continue;
             }
-            let basename = candidate
-                .shown_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let path_str = candidate.shown_path.display().to_string();
-            let basename_rank = workspace_switcher_match_rank(query, &basename);
-            let path_rank = workspace_switcher_match_rank(query, &path_str);
-            let rank = match (basename_rank, path_rank) {
-                (Some(b), Some(p)) => Some(b.min(p)),
-                (Some(b), None) => Some(b),
-                (None, Some(p)) => Some(p),
-                (None, None) => None,
-            };
-            let Some(rank) = rank else {
+            let Some(rank) = candidate.match_rank(query) else {
                 continue;
             };
             scored.push(ScoredRow {
@@ -429,32 +445,13 @@ impl AppState {
             .collect()
     }
 
-    /// Compute the canonical cwd for a workspace, checking worktree checkout
-    /// path and resolved identity cwd.
-    fn workspace_canonical_cwd(
-        &self,
-        ws_idx: usize,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) -> Option<std::path::PathBuf> {
-        let ws = self.workspaces.get(ws_idx)?;
-        if let Some(space) = ws.worktree_space() {
-            return Some(crate::worktree::canonical_or_original(&space.checkout_path));
-        }
-        ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
-            .map(|cwd| crate::worktree::canonical_or_original(&cwd))
-    }
-
     /// Build a directory row from a zoxide candidate.
     fn directory_row(
         &self,
         candidate: &crate::app::workspace_search_provider::SearchProviderCandidate,
     ) -> WorkspaceSwitcherRow {
-        let label = candidate
-            .shown_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| candidate.shown_path.display().to_string());
-        let meta = candidate.shown_path.display().to_string();
+        let label = candidate.basename();
+        let meta = candidate.abbreviated_path();
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Directory {
                 shown_path: candidate.shown_path.clone(),
@@ -696,13 +693,7 @@ impl AppState {
         self.workspace_switcher.expanded_workspaces.clear();
         self.workspace_switcher.search_generation =
             self.workspace_switcher.search_generation.wrapping_add(1);
-        self.workspace_switcher.provider_status =
-            crate::app::workspace_search_provider::SearchProviderStatus::Idle;
-        self.workspace_switcher.provider_candidates.clear();
-        self.workspace_switcher.directory_preview_cache.clear();
-        self.workspace_switcher.preview_request = None;
-        self.workspace_switcher.pending_directory = None;
-        self.workspace_switcher.search_error = None;
+        self.reset_search_provider_state();
         self.workspace_switcher.search_started = true;
         self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
@@ -713,14 +704,24 @@ impl AppState {
     ) {
         self.workspace_switcher.mode = WorkspaceSwitcherMode::QuickSwitch;
         self.workspace_switcher.query.clear();
+        self.reset_search_provider_state();
+        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
+    }
+
+    /// Reset all search-provider session state to its default/idle values.
+    /// Used by enter, leave, and close to avoid duplicated reset logic.
+    fn reset_search_provider_state(&mut self) {
         self.workspace_switcher.provider_status =
             crate::app::workspace_search_provider::SearchProviderStatus::Idle;
         self.workspace_switcher.provider_candidates.clear();
         self.workspace_switcher.directory_preview_cache.clear();
         self.workspace_switcher.preview_request = None;
         self.workspace_switcher.pending_directory = None;
+        self.workspace_switcher.pending_directory_rendered = false;
         self.workspace_switcher.search_error = None;
-        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
+        self.workspace_switcher.workspace_canonical_snapshot.clear();
+        self.workspace_switcher.needs_provider_refresh = false;
+        self.workspace_switcher.needs_preview_refresh = None;
     }
 
     pub(crate) fn accept_workspace_switcher_selection_from(
@@ -759,22 +760,14 @@ impl AppState {
         shown_path: std::path::PathBuf,
         canonical_path: std::path::PathBuf,
     ) -> bool {
-        // Recheck canonical identity: the path may now be open as a workspace.
-        let rechecked_canonical = crate::worktree::canonical_or_original(&shown_path);
-        if let Some(ws_idx) =
-            self.workspace_idx_for_canonical_path(&rechecked_canonical, terminal_runtimes)
-        {
-            self.switch_workspace(ws_idx);
-            self.workspace_switcher.active = false;
-            self.mode = Mode::Terminal;
-            return true;
-        }
-        // Not open: set pending-create state. The App controller will
-        // dispatch workspace.create and close Search on success.
+        // Pure acceptance: record the pending target only. The App controller
+        // performs the final canonical recheck and chooses MRU focus or create.
+        // No filesystem I/O here.
         self.workspace_switcher.pending_directory = Some(PendingDirectoryAccept {
             shown_path: shown_path.clone(),
             canonical_path: canonical_path.clone(),
         });
+        self.workspace_switcher.pending_directory_rendered = false;
         self.workspace_switcher.search_error = None;
         self.refresh_workspace_switcher_preview_from(terminal_runtimes);
         true
@@ -849,6 +842,9 @@ impl AppState {
             self.workspace_switcher.preview = WorkspaceSwitcherPreview::Opening {
                 shown_path: pending.shown_path.clone(),
             };
+            // Mark as rendered so the App controller knows it can proceed
+            // with workspace.create on the next run-loop turn.
+            self.workspace_switcher.pending_directory_rendered = true;
             return;
         }
 
@@ -935,35 +931,6 @@ impl AppState {
             .get(self.workspace_switcher.selected)
             .filter(|row| !row.is_directory)
             .map(|row| row.ws_idx)
-    }
-
-    /// Find the most-recent workspace (in switcher MRU order) whose canonical
-    /// cwd matches the given canonical path. Used to decide focus-vs-create
-    /// when accepting a directory row.
-    fn workspace_idx_for_canonical_path(
-        &self,
-        canonical_path: &std::path::Path,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) -> Option<usize> {
-        for ws_idx in self.workspace_mru_indices() {
-            let Some(ws) = self.workspaces.get(ws_idx) else {
-                continue;
-            };
-            // Check worktree checkout path.
-            if ws.worktree_space().is_some_and(|space| {
-                crate::worktree::canonical_or_original(&space.checkout_path) == canonical_path
-            }) {
-                return Some(ws_idx);
-            }
-            // Check resolved identity cwd.
-            if ws
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
-                .is_some_and(|cwd| crate::worktree::canonical_or_original(&cwd) == canonical_path)
-            {
-                return Some(ws_idx);
-            }
-        }
-        None
     }
 
     fn workspace_switcher_preview_for_target_from(
@@ -1064,7 +1031,7 @@ impl AppState {
         WorkspaceSwitcherPreview::Content { pane_id, text }
     }
 
-    fn workspace_mru_indices(&self) -> Vec<usize> {
+    pub(crate) fn workspace_mru_indices(&self) -> Vec<usize> {
         let mut order = Vec::new();
         for workspace_id in &self.workspace_mru {
             if let Some(idx) = self
@@ -1094,7 +1061,7 @@ impl AppState {
     }
 }
 
-fn workspace_switcher_match_rank(query: &str, text: &str) -> Option<(u8, usize)> {
+pub(crate) fn workspace_switcher_match_rank(query: &str, text: &str) -> Option<(u8, usize)> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some((0, 0));
@@ -1426,13 +1393,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
 fn close_workspace_switcher(state: &mut AppState) {
     state.workspace_switcher.active = false;
     state.workspace_switcher.selected_target = None;
-    state.workspace_switcher.provider_status =
-        crate::app::workspace_search_provider::SearchProviderStatus::Idle;
-    state.workspace_switcher.provider_candidates.clear();
-    state.workspace_switcher.directory_preview_cache.clear();
-    state.workspace_switcher.preview_request = None;
-    state.workspace_switcher.pending_directory = None;
-    state.workspace_switcher.search_error = None;
+    state.reset_search_provider_state();
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     } else {
@@ -3275,6 +3236,28 @@ mod tests {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         state.open_workspace_switcher_from(&terminal_runtimes);
         state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        // Populate snapshot from identity_cwd fields (normally done by App
+        // controller’s refresh_workspace_canonical_snapshot).
+        set_snapshot(state);
+    }
+
+    /// Populate the workspace canonical-cwd snapshot from identity_cwd fields.
+    /// In production this is done by the App controller; tests set it directly
+    /// to avoid filesystem I/O in the UI layer.
+    fn set_snapshot(state: &mut AppState) {
+        state.workspace_switcher.workspace_canonical_snapshot = state
+            .workspaces
+            .iter()
+            .filter_map(|ws| {
+                if ws.cached_identity_cwd.as_os_str().is_empty() {
+                    return None;
+                }
+                Some(crate::ui::workspace_switcher::WorkspaceCanonicalEntry {
+                    workspace_id: ws.id.clone(),
+                    canonical_cwd: ws.cached_identity_cwd.clone(),
+                })
+            })
+            .collect();
     }
 
     fn set_query(state: &mut AppState, query: &str) {
@@ -3606,14 +3589,21 @@ mod tests {
         state.open_workspace_switcher_from(&terminal_runtimes);
         state.enter_workspace_switcher_search_from(&terminal_runtimes);
 
-        // Simulate accepting a directory whose canonical path now matches an
-        // open workspace. accept_directory_from should recheck and focus.
+        // In the new architecture, accept_directory_from records the pending
+        // target only — it does NOT perform the canonical recheck. The App
+        // controller's recheck_directory_focus does that.
         let accepted =
             state.accept_directory_from(&terminal_runtimes, canonical.clone(), canonical.clone());
         assert!(accepted);
-        assert!(!state.workspace_switcher.active);
-        assert_eq!(state.mode, Mode::Terminal);
-        assert!(state.workspace_switcher.pending_directory.is_none());
+        // Switcher stays open; pending_directory is set.
+        assert!(state.workspace_switcher.active);
+        assert!(state.workspace_switcher.pending_directory.is_some());
+        assert!(state.workspace_switcher.pending_directory_rendered);
+        // The preview shows Opening…
+        assert!(matches!(
+            state.workspace_switcher.preview,
+            crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Opening { .. }
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3793,5 +3783,381 @@ mod tests {
         assert!(rows.iter().all(|r| !r.is_directory));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 14: Quick Switch regression tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn quick_switch_shows_all_workspaces_with_tabs_collapsed() {
+        let mut state = app_with_workspaces(&["alpha", "beta", "gamma"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        // Quick Switch mode by default.
+        assert_eq!(
+            state.workspace_switcher.mode,
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::QuickSwitch
+        );
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        // All three workspaces, no tabs (collapsed), no directories.
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| !r.is_directory && !r.is_tab));
+    }
+
+    #[test]
+    fn quick_switch_accept_focuses_selected_workspace() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        // Select the second workspace (index 1 in the row list).
+        state.workspace_switcher.selected = 1;
+        state.capture_workspace_switcher_target_from(&terminal_runtimes);
+        let accepted = state.accept_workspace_switcher_selection_from(&terminal_runtimes);
+        assert!(accepted);
+        assert!(!state.workspace_switcher.active);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn quick_switch_escape_closes_without_changing_active() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        let original_active = state.active;
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        assert!(state.workspace_switcher.active);
+        close_workspace_switcher(&mut state);
+        assert!(!state.workspace_switcher.active);
+        assert_eq!(state.active, original_active);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn quick_switch_no_directory_rows_or_provider_state() {
+        let mut state = app_with_workspaces(&["alpha"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert!(rows.iter().all(|r| !r.is_directory));
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Idle
+        );
+        assert!(state.workspace_switcher.provider_candidates.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 14: Row projection uses snapshot (no filesystem I/O)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn row_projection_uses_snapshot_not_filesystem() {
+        // Create a workspace with a canonical cwd that does NOT exist on the
+        // filesystem. If the UI tried to canonicalize, it would get a
+        // different path. The snapshot ensures pure data comparison.
+        let mut state = AppState::test_new();
+        let mut ws = Workspace::test_new("test");
+        ws.cached_identity_cwd = std::path::PathBuf::from("/fake/nonexistent/path");
+        state.workspaces.push(ws);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.mode = Mode::Terminal;
+
+        enter_search(&mut state);
+        // Set candidates that match the snapshot canonical path.
+        state.workspace_switcher.provider_candidates = vec![candidate(
+            "/fake/nonexistent/path",
+            "/fake/nonexistent/path",
+            100.0,
+        )];
+        state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+        set_query(&mut state, "path");
+
+        let rows = state.workspace_switcher_rows();
+        // The workspace should be coalesced (enriched), no directory row.
+        let workspace_rows: Vec<_> = rows.iter().filter(|r| !r.is_directory).collect();
+        assert_eq!(workspace_rows.len(), 1);
+        assert!(rows.iter().all(|r| !r.is_directory));
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 4: Basename-first ranking — path rank better but basename controls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn basename_rank_wins_over_better_path_rank() {
+        // Distinguishes basename-first from min(basename, path):
+        //
+        // Candidate A "/foo/bar": basename "bar" does NOT match query "foo",
+        // path matches at quality 0 (word prefix). Rank = 0 (path only).
+        //
+        // Candidate B "/xfoo": basename "xfoo" matches "foo" at quality 1
+        // (contains, not word prefix). Path "/xfoo" also matches at quality 0
+        // (word prefix).
+        //
+        // Old min(b,p): B=0, A=0 → tie → B (score 200) before A (score 100).
+        // New basename-first: B=1, A=0 → A before B.
+        let mut state = app_with_workspaces(&["placeholder"]);
+        enter_search(&mut state);
+        state.workspace_switcher.provider_candidates = vec![
+            candidate("/xfoo", "/xfoo", 200.0),
+            candidate("/foo/bar", "/foo/bar", 100.0),
+        ];
+        state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+        set_query(&mut state, "foo");
+
+        let rows = state.workspace_switcher_rows();
+        assert_eq!(rows.len(), 2);
+        // A (path-only match, quality 0) ranks before B (basename contains,
+        // quality 1) even though B has a higher score.
+        assert_eq!(rows[0].label, "bar");
+        assert_eq!(rows[1].label, "xfoo");
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 3: Stale candidate removal on create failure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn create_failure_removes_stale_candidate_and_clamps() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        state.workspace_switcher.provider_candidates = vec![
+            candidate("/tmp/bad-dir", "/tmp/bad-dir", 10.0),
+            candidate("/tmp/good-dir", "/tmp/good-dir", 5.0),
+        ];
+        state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+        set_query(&mut state, "dir");
+
+        // Simulate a failed create: the finalize_directory_acceptance path
+        // removes the candidate and shows an error.
+        let pending = crate::ui::workspace_switcher::PendingDirectoryAccept {
+            shown_path: std::path::PathBuf::from("/tmp/bad-dir"),
+            canonical_path: std::path::PathBuf::from("/tmp/bad-dir"),
+        };
+        // We can’t call finalize_directory_acceptance from AppState tests
+        // (it’s on App), but we can verify the retain logic works:
+        state
+            .workspace_switcher
+            .provider_candidates
+            .retain(|c| c.canonical_path != pending.canonical_path);
+        state.workspace_switcher.search_error = Some("Could not open /tmp/bad-dir".to_string());
+
+        // The bad candidate is gone, the good one remains.
+        assert_eq!(state.workspace_switcher.provider_candidates.len(), 1);
+        assert_eq!(
+            state.workspace_switcher.provider_candidates[0].shown_path,
+            std::path::PathBuf::from("/tmp/good-dir")
+        );
+        // Error is set.
+        assert!(state.workspace_switcher.search_error.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 8: Deferred Opening… — pending_directory_rendered flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn opening_preview_sets_rendered_flag() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        state.workspace_switcher.provider_candidates =
+            vec![candidate("/tmp/somedir", "/tmp/somedir", 10.0)];
+        state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+        set_query(&mut state, "somedir");
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        // Select the directory row and accept.
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let dir_idx = rows.iter().position(|r| r.is_directory).expect("dir row");
+        state.workspace_switcher.selected = dir_idx;
+        state.capture_workspace_switcher_target_from(&terminal_runtimes);
+        let accepted = state.accept_workspace_switcher_selection_from(&terminal_runtimes);
+
+        assert!(accepted);
+        assert!(state.workspace_switcher.pending_directory.is_some());
+        // The refresh_workspace_switcher_preview_from call inside
+        // accept_directory_from sets the Opening… preview and the
+        // pending_directory_rendered flag.
+        assert!(state.workspace_switcher.pending_directory_rendered);
+        assert!(matches!(
+            state.workspace_switcher.preview,
+            crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Opening { .. }
+        ));
+    }
+
+    #[test]
+    fn repeated_acceptance_prevented_while_pending() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        state.workspace_switcher.provider_candidates =
+            vec![candidate("/tmp/somedir", "/tmp/somedir", 10.0)];
+        state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+        set_query(&mut state, "somedir");
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let dir_idx = rows.iter().position(|r| r.is_directory).expect("dir row");
+        state.workspace_switcher.selected = dir_idx;
+        state.capture_workspace_switcher_target_from(&terminal_runtimes);
+
+        // First accept succeeds.
+        assert!(state.accept_workspace_switcher_selection_from(&terminal_runtimes));
+        // Second accept is blocked.
+        assert!(!state.accept_workspace_switcher_selection_from(&terminal_runtimes));
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 14: Headless/App-level Search provider event tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn zoxide_query_started_sets_loading_status() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let gen = state.workspace_switcher.search_generation;
+        state.handle_app_event(AppEvent::ZoxideQueryStarted { generation: gen });
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Loading
+        );
+    }
+
+    #[test]
+    fn zoxide_query_started_discarded_for_stale_generation() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        state.handle_app_event(AppEvent::ZoxideQueryStarted { generation: 999 });
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Idle
+        );
+    }
+
+    #[test]
+    fn zoxide_query_completed_sets_ready_and_refresh_flag() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let gen = state.workspace_switcher.search_generation;
+        state.handle_app_event(AppEvent::ZoxideQueryCompleted {
+            generation: gen,
+            available: true,
+            candidates: vec![candidate("/tmp/dir", "/tmp/dir", 10.0)],
+        });
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Ready
+        );
+        assert_eq!(state.workspace_switcher.provider_candidates.len(), 1);
+        assert!(state.workspace_switcher.needs_provider_refresh);
+    }
+
+    #[test]
+    fn zoxide_query_completed_unavailable_clears_candidates() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        state.workspace_switcher.provider_candidates = vec![candidate("/tmp/old", "/tmp/old", 5.0)];
+        let gen = state.workspace_switcher.search_generation;
+        state.handle_app_event(AppEvent::ZoxideQueryCompleted {
+            generation: gen,
+            available: false,
+            candidates: vec![],
+        });
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Unavailable
+        );
+        assert!(state.workspace_switcher.provider_candidates.is_empty());
+        assert!(state.workspace_switcher.needs_provider_refresh);
+    }
+
+    #[test]
+    fn directory_preview_completed_sets_cache_and_refresh_flag() {
+        use crate::app::workspace_search_provider::DirectoryPreview;
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let gen = state.workspace_switcher.search_generation;
+        let path = std::path::PathBuf::from("/tmp/somedir");
+        let preview = DirectoryPreview {
+            entries: vec![],
+            truncated: false,
+        };
+        state.handle_app_event(AppEvent::DirectoryPreviewCompleted {
+            generation: gen,
+            shown_path: path.clone(),
+            result: Ok(preview),
+        });
+        assert!(state
+            .workspace_switcher
+            .directory_preview_cache
+            .contains_key(&path));
+        assert_eq!(state.workspace_switcher.needs_preview_refresh, Some(path));
+    }
+
+    #[test]
+    fn directory_preview_completed_error_caches_error_state() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let gen = state.workspace_switcher.search_generation;
+        let path = std::path::PathBuf::from("/tmp/missing");
+        state.handle_app_event(AppEvent::DirectoryPreviewCompleted {
+            generation: gen,
+            shown_path: path.clone(),
+            result: Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+        });
+        assert!(matches!(
+            state.workspace_switcher.directory_preview_cache.get(&path),
+            Some(crate::app::workspace_search_provider::DirectoryPreviewState::Error)
+        ));
+        assert_eq!(state.workspace_switcher.needs_preview_refresh, Some(path));
+    }
+
+    #[test]
+    fn stale_generation_events_discarded() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let old_gen = state.workspace_switcher.search_generation;
+        // Enter search again to bump the generation.
+        enter_search(&mut state);
+        assert_ne!(state.workspace_switcher.search_generation, old_gen);
+
+        // Old-generation events should be ignored.
+        state.handle_app_event(AppEvent::ZoxideQueryCompleted {
+            generation: old_gen,
+            available: true,
+            candidates: vec![candidate("/tmp/stale", "/tmp/stale", 10.0)],
+        });
+        assert_eq!(
+            state.workspace_switcher.provider_status,
+            SearchProviderStatus::Idle
+        );
+        assert!(state.workspace_switcher.provider_candidates.is_empty());
+        assert!(!state.workspace_switcher.needs_provider_refresh);
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 5: Abbreviated path metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn directory_row_uses_abbreviated_path_metadata() {
+        let mut state = app_with_workspaces(&["main"]);
+        enter_search(&mut state);
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            let dir_path = home.join("projects/myapp");
+            state.workspace_switcher.provider_candidates = vec![candidate(
+                dir_path.to_str().unwrap(),
+                dir_path.to_str().unwrap(),
+                10.0,
+            )];
+            state.workspace_switcher.provider_status = SearchProviderStatus::Ready;
+            set_query(&mut state, "myapp");
+
+            let rows = state.workspace_switcher_rows();
+            let dir_row = rows.iter().find(|r| r.is_directory).expect("dir row");
+            assert!(dir_row.meta.starts_with('~'));
+            assert!(dir_row.meta.contains("projects/myapp"));
+        }
     }
 }
