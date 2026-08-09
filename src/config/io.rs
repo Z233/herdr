@@ -954,6 +954,38 @@ claude = [["terminal_title"]]
     }
 
     #[test]
+    fn load_live_config_rejects_removed_switcher_keys_and_applies_new_key() {
+        let loaded = load_live_config_from_str(
+            r#"
+[keys]
+workspace_picker = "prefix+w"
+quick_switch_workspace = "ctrl+tab"
+quick_switch_workspace_backward = "ctrl+shift+tab"
+workspace_switcher = "alt+tab"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.diagnostics,
+            vec![
+                "unknown config key keys.quick_switch_workspace; ignoring key",
+                "unknown config key keys.quick_switch_workspace_backward; ignoring key",
+                "unknown config key keys.workspace_picker; ignoring key",
+            ]
+        );
+        assert_eq!(
+            loaded
+                .config
+                .keybinds()
+                .workspace_switcher
+                .label()
+                .as_deref(),
+            Some("alt+tab")
+        );
+    }
+
+    #[test]
     fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
         let loaded = load_live_config_from_str(
             r#"

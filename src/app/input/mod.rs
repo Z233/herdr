@@ -85,7 +85,7 @@ use self::{
 };
 use super::state::{AppState, Mode};
 use super::App;
-use crate::ui::workspace_picker::handle_workspace_picker_key;
+use crate::ui::workspace_switcher::handle_workspace_switcher_key;
 
 // ---------------------------------------------------------------------------
 // Key handling
@@ -93,7 +93,7 @@ use crate::ui::workspace_picker::handle_workspace_picker_key;
 
 impl App {
     pub(crate) fn handle_key_release(&mut self, key: TerminalKey) -> bool {
-        crate::ui::workspace_picker::handle_quick_switch_key_release(
+        crate::ui::workspace_switcher::handle_workspace_switcher_key_release(
             &mut self.state,
             &self.terminal_runtimes,
             key,
@@ -108,8 +108,8 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
-        if self.state.workspace_picker.active {
-            handle_workspace_picker_key(&mut self.state, &self.terminal_runtimes, key_event);
+        if self.state.workspace_switcher.active {
+            handle_workspace_switcher_key(&mut self.state, &self.terminal_runtimes, key_event);
             return None;
         }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
@@ -221,7 +221,7 @@ impl App {
             }
             return;
         }
-        if crate::ui::workspace_picker::paste_workspace_picker_query(
+        if crate::ui::workspace_switcher::paste_workspace_switcher_query(
             &mut self.state,
             &self.terminal_runtimes,
             &text,

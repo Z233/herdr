@@ -329,12 +329,10 @@ pub struct KeysConfig {
     pub rename_workspace: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
-    /// Open the searchable workspace picker. Default: ["prefix+w", "prefix+w+w"]
-    pub workspace_picker: BindingConfig,
-    /// Open the MRU quick workspace switcher. Default: "ctrl+tab"
-    pub quick_switch_workspace: BindingConfig,
-    /// Cycle backward in the MRU quick workspace switcher. Derived from quick_switch_workspace when unset.
-    pub quick_switch_workspace_backward: BindingConfig,
+    /// Open the MRU workspace switcher. Default: "ctrl+tab"
+    pub workspace_switcher: BindingConfig,
+    /// Cycle backward in the MRU workspace switcher. Derived from workspace_switcher when unset.
+    pub workspace_switcher_backward: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
@@ -467,11 +465,9 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     close_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_picker: Option<BindingConfig>,
+    workspace_switcher: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    quick_switch_workspace: Option<BindingConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    quick_switch_workspace_backward: Option<BindingConfig>,
+    workspace_switcher_backward: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     goto: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -603,9 +599,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(remove_worktree);
         apply_field!(rename_workspace);
         apply_field!(close_workspace);
-        apply_field!(workspace_picker);
-        apply_field!(quick_switch_workspace);
-        apply_field!(quick_switch_workspace_backward);
+        apply_field!(workspace_switcher);
+        apply_field!(workspace_switcher_backward);
         apply_field!(goto);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
@@ -710,11 +705,10 @@ impl KeysConfig {
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
-        copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
-        copy_effective_action_field!(quick_switch_workspace, keybinds.quick_switch_workspace);
+        copy_effective_action_field!(workspace_switcher, keybinds.workspace_switcher);
         copy_effective_action_field!(
-            quick_switch_workspace_backward,
-            keybinds.quick_switch_workspace_backward
+            workspace_switcher_backward,
+            keybinds.workspace_switcher_backward
         );
         copy_effective_action_field!(goto, keybinds.goto);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
@@ -1003,9 +997,8 @@ impl Default for KeysConfig {
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             close_workspace: BindingConfig::one("prefix+shift+d"),
-            workspace_picker: BindingConfig::Many(vec!["prefix+w".into(), "prefix+w+w".into()]),
-            quick_switch_workspace: BindingConfig::one("ctrl+tab"),
-            quick_switch_workspace_backward: BindingConfig::empty(),
+            workspace_switcher: BindingConfig::one("ctrl+tab"),
+            workspace_switcher_backward: BindingConfig::empty(),
             goto: BindingConfig::one("prefix+g"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),

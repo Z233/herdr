@@ -26,32 +26,27 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerTarget {
+pub(crate) enum WorkspaceSwitcherTarget {
     Workspace { workspace_id: String },
     Tab { tab_id: String },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerMode {
+pub(crate) enum WorkspaceSwitcherMode {
     #[default]
-    Search,
     QuickSwitch,
-    QuickSwitchSearch,
+    Search,
 }
 
-impl WorkspacePickerMode {
+impl WorkspaceSwitcherMode {
     pub(crate) fn search_visible(self) -> bool {
-        matches!(self, Self::Search | Self::QuickSwitchSearch)
-    }
-
-    pub(crate) fn is_quick_switch(self) -> bool {
-        matches!(self, Self::QuickSwitch | Self::QuickSwitchSearch)
+        self == Self::Search
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspacePickerRow {
-    pub target: WorkspacePickerTarget,
+pub(crate) struct WorkspaceSwitcherRow {
+    pub target: WorkspaceSwitcherTarget,
     pub ws_idx: usize,
     pub depth: u8,
     pub label: String,
@@ -64,12 +59,12 @@ pub(crate) struct WorkspacePickerRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WorkspacePickerPreview {
+pub(crate) enum WorkspaceSwitcherPreview {
     Empty { message: String },
     Content { pane_id: PaneId, text: String },
 }
 
-impl Default for WorkspacePickerPreview {
+impl Default for WorkspaceSwitcherPreview {
     fn default() -> Self {
         Self::Empty {
             message: "select a workspace".to_string(),
@@ -78,91 +73,66 @@ impl Default for WorkspacePickerPreview {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct WorkspacePickerState {
+pub(crate) struct WorkspaceSwitcherState {
     pub active: bool,
-    pub mode: WorkspacePickerMode,
+    pub mode: WorkspaceSwitcherMode,
     pub query: String,
     pub selected: usize,
-    pub selected_target: Option<WorkspacePickerTarget>,
+    pub selected_target: Option<WorkspaceSwitcherTarget>,
     pub scroll: usize,
-    pub preview: WorkspacePickerPreview,
+    pub preview: WorkspaceSwitcherPreview,
     pub preview_ws_idx: Option<usize>,
     pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Workspace picker operations
+// Workspace switcher operations
 // ---------------------------------------------------------------------------
 
 impl AppState {
     #[cfg(test)]
-    pub(crate) fn open_workspace_picker(&mut self) {
+    pub(crate) fn open_workspace_switcher(&mut self) {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        self.open_workspace_picker_from(&terminal_runtimes);
+        self.open_workspace_switcher_from(&terminal_runtimes);
     }
 
-    pub(crate) fn open_workspace_picker_from(
+    pub(crate) fn open_workspace_switcher_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        self.workspace_picker.mode = WorkspacePickerMode::Search;
-        self.workspace_picker.query.clear();
-        self.workspace_picker.scroll = 0;
-        self.workspace_picker.expanded_workspaces.clear();
-        self.workspace_picker.active = true;
+        self.workspace_switcher.mode = WorkspaceSwitcherMode::QuickSwitch;
+        self.workspace_switcher.query.clear();
+        self.workspace_switcher.scroll = 0;
+        self.workspace_switcher.expanded_workspaces.clear();
+        self.workspace_switcher.active = true;
 
-        let target = self.active.unwrap_or(self.selected);
-        self.workspace_picker.selected = self
-            .workspace_picker_rows_from(terminal_runtimes)
-            .iter()
-            .position(|row| row.ws_idx == target)
-            .unwrap_or(0);
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
-    }
-
-    pub(crate) fn open_quick_switch_workspace_from(
-        &mut self,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) {
-        self.workspace_picker.mode = WorkspacePickerMode::QuickSwitch;
-        self.workspace_picker.query.clear();
-        self.workspace_picker.scroll = 0;
-        self.workspace_picker.expanded_workspaces.clear();
-        self.workspace_picker.active = true;
-
-        let rows = self.workspace_picker_rows_from(terminal_runtimes);
-        self.workspace_picker.selected = self
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        self.workspace_switcher.selected = self
             .active
             .and_then(|active| {
                 rows.iter()
                     .position(|row| row.ws_idx != active && !row.is_tab)
             })
             .unwrap_or(0);
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
     #[cfg(test)]
-    pub(crate) fn workspace_picker_rows(&self) -> Vec<WorkspacePickerRow> {
+    pub(crate) fn workspace_switcher_rows(&self) -> Vec<WorkspaceSwitcherRow> {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        self.workspace_picker_rows_from(&terminal_runtimes)
+        self.workspace_switcher_rows_from(&terminal_runtimes)
     }
 
-    pub(crate) fn workspace_picker_rows_from(
+    pub(crate) fn workspace_switcher_rows_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) -> Vec<WorkspacePickerRow> {
-        let query = self.workspace_picker.query.trim();
-        let workspace_indices = if self.workspace_picker.mode.is_quick_switch() {
-            self.workspace_mru_indices()
-        } else {
-            (0..self.workspaces.len()).collect()
-        };
-        let search_visible = self.workspace_picker.mode.search_visible();
-        let include_tabs = self.workspace_picker.mode == WorkspacePickerMode::QuickSwitch;
+    ) -> Vec<WorkspaceSwitcherRow> {
+        let query = self.workspace_switcher.query.trim();
+        let workspace_indices = self.workspace_mru_indices();
+        let search_visible = self.workspace_switcher.mode.search_visible();
+        let include_tabs = self.workspace_switcher.mode == WorkspaceSwitcherMode::QuickSwitch;
         let mut rows = Vec::new();
 
         for (order, ws_idx) in workspace_indices.into_iter().enumerate() {
@@ -182,7 +152,7 @@ impl AppState {
                 }
             };
             let rank = if search_visible && !query.is_empty() {
-                match workspace_picker_match_rank(query, &label) {
+                match workspace_switcher_match_rank(query, &label) {
                     Some(rank) => rank,
                     None => continue,
                 }
@@ -191,15 +161,15 @@ impl AppState {
             };
 
             let expanded =
-                include_tabs && self.workspace_picker.expanded_workspaces.contains(&ws.id);
+                include_tabs && self.workspace_switcher.expanded_workspaces.contains(&ws.id);
             rows.push((
-                self.workspace_picker_workspace_row(ws_idx, label, expanded),
+                self.workspace_switcher_workspace_row(ws_idx, label, expanded),
                 rank,
                 order,
             ));
             if expanded {
                 rows.extend(
-                    self.workspace_picker_tab_rows(ws_idx)
+                    self.workspace_switcher_tab_rows(ws_idx)
                         .into_iter()
                         .map(|row| (row, rank, order)),
                 );
@@ -213,12 +183,12 @@ impl AppState {
         rows.into_iter().map(|(row, _, _)| row).collect()
     }
 
-    fn workspace_picker_workspace_row(
+    fn workspace_switcher_workspace_row(
         &self,
         ws_idx: usize,
         label: String,
         expanded: bool,
-    ) -> WorkspacePickerRow {
+    ) -> WorkspaceSwitcherRow {
         let ws = &self.workspaces[ws_idx];
         let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
         let mut meta = if pane_count == 1 {
@@ -233,8 +203,8 @@ impl AppState {
         }
         let (state, seen) = ws.aggregate_state(&self.terminals);
 
-        WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace {
+        WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
                 workspace_id: ws.id.clone(),
             },
             ws_idx,
@@ -249,7 +219,7 @@ impl AppState {
         }
     }
 
-    fn workspace_picker_tab_rows(&self, ws_idx: usize) -> Vec<WorkspacePickerRow> {
+    fn workspace_switcher_tab_rows(&self, ws_idx: usize) -> Vec<WorkspaceSwitcherRow> {
         let Some(ws) = self.workspaces.get(ws_idx) else {
             return Vec::new();
         };
@@ -259,8 +229,8 @@ impl AppState {
             .map(|(tab_idx, tab)| {
                 let pane_count = tab.panes.len();
                 let (state, seen) = tab_aggregate_state(tab, &self.terminals);
-                WorkspacePickerRow {
-                    target: WorkspacePickerTarget::Tab {
+                WorkspaceSwitcherRow {
+                    target: WorkspaceSwitcherTarget::Tab {
                         tab_id: crate::workspace::public_tab_id_for_number(&ws.id, tab.number),
                     },
                     ws_idx,
@@ -281,7 +251,7 @@ impl AppState {
             .collect()
     }
 
-    pub(crate) fn workspace_picker_max_scroll_from(
+    pub(crate) fn workspace_switcher_max_scroll_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         viewport: usize,
@@ -289,85 +259,87 @@ impl AppState {
         if viewport == 0 {
             return 0;
         }
-        self.workspace_picker_rows_from(terminal_runtimes)
+        self.workspace_switcher_rows_from(terminal_runtimes)
             .len()
             .saturating_sub(viewport)
     }
 
-    pub(crate) fn ensure_workspace_picker_selection_visible_from(
+    pub(crate) fn ensure_workspace_switcher_selection_visible_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let viewport = self.workspace_picker_body_rect().height as usize;
+        let viewport = self.workspace_switcher_body_rect().height as usize;
         if viewport == 0 {
-            self.workspace_picker.scroll = 0;
+            self.workspace_switcher.scroll = 0;
             return;
         }
-        let max_scroll = self.workspace_picker_max_scroll_from(terminal_runtimes, viewport);
-        if self.workspace_picker.selected < self.workspace_picker.scroll {
-            self.workspace_picker.scroll = self.workspace_picker.selected;
-        } else if self.workspace_picker.selected >= self.workspace_picker.scroll + viewport {
-            self.workspace_picker.scroll = self
-                .workspace_picker
+        let max_scroll = self.workspace_switcher_max_scroll_from(terminal_runtimes, viewport);
+        if self.workspace_switcher.selected < self.workspace_switcher.scroll {
+            self.workspace_switcher.scroll = self.workspace_switcher.selected;
+        } else if self.workspace_switcher.selected >= self.workspace_switcher.scroll + viewport {
+            self.workspace_switcher.scroll = self
+                .workspace_switcher
                 .selected
                 .saturating_add(1)
                 .saturating_sub(viewport);
         }
-        self.workspace_picker.scroll = self.workspace_picker.scroll.min(max_scroll);
+        self.workspace_switcher.scroll = self.workspace_switcher.scroll.min(max_scroll);
     }
 
-    pub(crate) fn clamp_workspace_picker_selection_from(
+    pub(crate) fn clamp_workspace_switcher_selection_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let count = self.workspace_picker_rows_from(terminal_runtimes).len();
-        self.workspace_picker.selected =
-            self.workspace_picker.selected.min(count.saturating_sub(1));
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
+        let count = self.workspace_switcher_rows_from(terminal_runtimes).len();
+        self.workspace_switcher.selected = self
+            .workspace_switcher
+            .selected
+            .min(count.saturating_sub(1));
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
-    pub(crate) fn move_workspace_picker_selection_from(
+    pub(crate) fn move_workspace_switcher_selection_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         delta: isize,
     ) {
-        let count = self.workspace_picker_rows_from(terminal_runtimes).len();
+        let count = self.workspace_switcher_rows_from(terminal_runtimes).len();
         if count == 0 {
-            self.workspace_picker.selected = 0;
-            self.workspace_picker.scroll = 0;
-            self.refresh_workspace_picker_preview_from(terminal_runtimes);
+            self.workspace_switcher.selected = 0;
+            self.workspace_switcher.scroll = 0;
+            self.refresh_workspace_switcher_preview_from(terminal_runtimes);
             return;
         }
 
-        let current = self.workspace_picker.selected.min(count - 1) as isize;
-        self.workspace_picker.selected = (current + delta).clamp(0, count as isize - 1) as usize;
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
+        let current = self.workspace_switcher.selected.min(count - 1) as isize;
+        self.workspace_switcher.selected = (current + delta).clamp(0, count as isize - 1) as usize;
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
-    pub(crate) fn cycle_quick_switch_workspace_from(
+    pub(crate) fn cycle_workspace_switcher_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         delta: isize,
     ) {
-        let rows = self.workspace_picker_rows_from(terminal_runtimes);
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
         let workspace_positions = rows
             .iter()
             .enumerate()
             .filter_map(|(idx, row)| (!row.is_tab).then_some(idx))
             .collect::<Vec<_>>();
         if workspace_positions.is_empty() {
-            self.workspace_picker.selected = 0;
-            self.workspace_picker.scroll = 0;
-            self.refresh_workspace_picker_preview_from(terminal_runtimes);
+            self.workspace_switcher.selected = 0;
+            self.workspace_switcher.scroll = 0;
+            self.refresh_workspace_switcher_preview_from(terminal_runtimes);
             return;
         }
 
         let selected_ws_idx = rows
-            .get(self.workspace_picker.selected)
+            .get(self.workspace_switcher.selected)
             .map(|row| row.ws_idx)
             .unwrap_or_else(|| rows[workspace_positions[0]].ws_idx);
         let current_pos = workspace_positions
@@ -376,99 +348,99 @@ impl AppState {
             .unwrap_or(0);
         let next_pos =
             (current_pos as isize + delta).rem_euclid(workspace_positions.len() as isize) as usize;
-        self.workspace_picker.selected = workspace_positions[next_pos];
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
+        self.workspace_switcher.selected = workspace_positions[next_pos];
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
-    pub(crate) fn expand_selected_workspace_picker_workspace_from(
+    pub(crate) fn expand_selected_workspace_switcher_workspace_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let Some(ws_idx) = self.selected_workspace_picker_ws_idx_from(terminal_runtimes) else {
+        let Some(ws_idx) = self.selected_workspace_switcher_ws_idx_from(terminal_runtimes) else {
             return;
         };
         let Some(workspace_id) = self.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
             return;
         };
-        self.workspace_picker
+        self.workspace_switcher
             .expanded_workspaces
             .insert(workspace_id);
-        self.clamp_workspace_picker_selection_from(terminal_runtimes);
+        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
 
-    pub(crate) fn collapse_selected_workspace_picker_workspace_from(
+    pub(crate) fn collapse_selected_workspace_switcher_workspace_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let rows = self.workspace_picker_rows_from(terminal_runtimes);
-        let Some(row) = rows.get(self.workspace_picker.selected) else {
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        let Some(row) = rows.get(self.workspace_switcher.selected) else {
             return;
         };
         let ws_idx = row.ws_idx;
         let Some(workspace_id) = self.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
             return;
         };
-        self.workspace_picker
+        self.workspace_switcher
             .expanded_workspaces
             .remove(&workspace_id);
-        self.workspace_picker.selected = self
-            .workspace_picker_rows_from(terminal_runtimes)
+        self.workspace_switcher.selected = self
+            .workspace_switcher_rows_from(terminal_runtimes)
             .iter()
             .position(|row| row.ws_idx == ws_idx && !row.is_tab)
             .unwrap_or(0);
-        self.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-        self.refresh_workspace_picker_preview_from(terminal_runtimes);
-        self.capture_workspace_picker_target_from(terminal_runtimes);
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
-    pub(crate) fn enter_quick_switch_search_from(
+    pub(crate) fn enter_workspace_switcher_search_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        self.workspace_picker.mode = WorkspacePickerMode::QuickSwitchSearch;
-        self.workspace_picker.query.clear();
-        self.workspace_picker.expanded_workspaces.clear();
-        self.clamp_workspace_picker_selection_from(terminal_runtimes);
+        self.workspace_switcher.mode = WorkspaceSwitcherMode::Search;
+        self.workspace_switcher.query.clear();
+        self.workspace_switcher.expanded_workspaces.clear();
+        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
 
-    pub(crate) fn leave_quick_switch_search_from(
+    pub(crate) fn leave_workspace_switcher_search_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        self.workspace_picker.mode = WorkspacePickerMode::QuickSwitch;
-        self.workspace_picker.query.clear();
-        self.clamp_workspace_picker_selection_from(terminal_runtimes);
+        self.workspace_switcher.mode = WorkspaceSwitcherMode::QuickSwitch;
+        self.workspace_switcher.query.clear();
+        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
 
-    pub(crate) fn accept_workspace_picker_selection_from(
+    pub(crate) fn accept_workspace_switcher_selection_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        let Some(target) = self.workspace_picker.selected_target.clone().or_else(|| {
-            self.workspace_picker_rows_from(terminal_runtimes)
-                .get(self.workspace_picker.selected)
+        let Some(target) = self.workspace_switcher.selected_target.clone().or_else(|| {
+            self.workspace_switcher_rows_from(terminal_runtimes)
+                .get(self.workspace_switcher.selected)
                 .map(|row| row.target.clone())
         }) else {
             return false;
         };
-        self.focus_workspace_picker_target(target)
+        self.focus_workspace_switcher_target(target)
     }
 
-    fn capture_workspace_picker_target_from(
+    fn capture_workspace_switcher_target_from(
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) {
-        self.workspace_picker.selected_target = self
-            .workspace_picker_rows_from(terminal_runtimes)
-            .get(self.workspace_picker.selected)
+        self.workspace_switcher.selected_target = self
+            .workspace_switcher_rows_from(terminal_runtimes)
+            .get(self.workspace_switcher.selected)
             .map(|row| row.target.clone());
     }
 
-    fn focus_workspace_picker_target(&mut self, target: WorkspacePickerTarget) -> bool {
+    fn focus_workspace_switcher_target(&mut self, target: WorkspaceSwitcherTarget) -> bool {
         match target {
-            WorkspacePickerTarget::Workspace { workspace_id } => {
+            WorkspaceSwitcherTarget::Workspace { workspace_id } => {
                 let Some(ws_idx) = self
                     .workspaces
                     .iter()
@@ -477,11 +449,11 @@ impl AppState {
                     return false;
                 };
                 self.switch_workspace(ws_idx);
-                self.workspace_picker.active = false;
+                self.workspace_switcher.active = false;
                 self.mode = Mode::Terminal;
                 true
             }
-            WorkspacePickerTarget::Tab { tab_id } => {
+            WorkspaceSwitcherTarget::Tab { tab_id } => {
                 let Some((ws_idx, tab_idx)) =
                     self.workspaces
                         .iter()
@@ -503,7 +475,7 @@ impl AppState {
                     return false;
                 };
                 if self.switch_workspace_tab(ws_idx, tab_idx) {
-                    self.workspace_picker.active = false;
+                    self.workspace_switcher.active = false;
                     self.mode = Mode::Terminal;
                     true
                 } else {
@@ -513,13 +485,13 @@ impl AppState {
         }
     }
 
-    pub(crate) fn refresh_workspace_picker_preview_from(
+    pub(crate) fn refresh_workspace_switcher_preview_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let Some(ws_idx) = self.selected_workspace_picker_ws_idx_from(terminal_runtimes) else {
-            self.workspace_picker.preview_ws_idx = None;
-            self.workspace_picker.preview = WorkspacePickerPreview::Empty {
+        let Some(ws_idx) = self.selected_workspace_switcher_ws_idx_from(terminal_runtimes) else {
+            self.workspace_switcher.preview_ws_idx = None;
+            self.workspace_switcher.preview = WorkspaceSwitcherPreview::Empty {
                 message: if self.workspaces.is_empty() {
                     "no workspaces".to_string()
                 } else {
@@ -529,56 +501,56 @@ impl AppState {
             return;
         };
 
-        self.workspace_picker.preview_ws_idx = Some(ws_idx);
+        self.workspace_switcher.preview_ws_idx = Some(ws_idx);
         let target = self
-            .workspace_picker_rows_from(terminal_runtimes)
-            .get(self.workspace_picker.selected)
+            .workspace_switcher_rows_from(terminal_runtimes)
+            .get(self.workspace_switcher.selected)
             .map(|row| row.target.clone())
-            .unwrap_or_else(|| WorkspacePickerTarget::Workspace {
+            .unwrap_or_else(|| WorkspaceSwitcherTarget::Workspace {
                 workspace_id: self.workspaces[ws_idx].id.clone(),
             });
-        self.workspace_picker.preview =
-            self.workspace_picker_preview_for_target_from(terminal_runtimes, target);
+        self.workspace_switcher.preview =
+            self.workspace_switcher_preview_for_target_from(terminal_runtimes, target);
     }
 
-    fn selected_workspace_picker_ws_idx_from(
+    fn selected_workspace_switcher_ws_idx_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> Option<usize> {
-        self.workspace_picker_rows_from(terminal_runtimes)
-            .get(self.workspace_picker.selected)
+        self.workspace_switcher_rows_from(terminal_runtimes)
+            .get(self.workspace_switcher.selected)
             .map(|row| row.ws_idx)
     }
 
-    fn workspace_picker_preview_for_target_from(
+    fn workspace_switcher_preview_for_target_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-        target: WorkspacePickerTarget,
-    ) -> WorkspacePickerPreview {
+        target: WorkspaceSwitcherTarget,
+    ) -> WorkspaceSwitcherPreview {
         let (ws_idx, pane_id) = match target {
-            WorkspacePickerTarget::Workspace { workspace_id } => {
+            WorkspaceSwitcherTarget::Workspace { workspace_id } => {
                 let Some(ws_idx) = self
                     .workspaces
                     .iter()
                     .position(|workspace| workspace.id == workspace_id)
                 else {
-                    return WorkspacePickerPreview::Empty {
+                    return WorkspaceSwitcherPreview::Empty {
                         message: "workspace unavailable".to_string(),
                     };
                 };
                 let Some(ws) = self.workspaces.get(ws_idx) else {
-                    return WorkspacePickerPreview::Empty {
+                    return WorkspaceSwitcherPreview::Empty {
                         message: "workspace unavailable".to_string(),
                     };
                 };
                 let Some(pane_id) = ws.focused_pane_id() else {
-                    return WorkspacePickerPreview::Empty {
+                    return WorkspaceSwitcherPreview::Empty {
                         message: "no pane content".to_string(),
                     };
                 };
                 (ws_idx, pane_id)
             }
-            WorkspacePickerTarget::Tab { tab_id } => {
+            WorkspaceSwitcherTarget::Tab { tab_id } => {
                 let Some((ws_idx, tab_idx)) =
                     self.workspaces
                         .iter()
@@ -597,7 +569,7 @@ impl AppState {
                                 })
                         })
                 else {
-                    return WorkspacePickerPreview::Empty {
+                    return WorkspaceSwitcherPreview::Empty {
                         message: "tab unavailable".to_string(),
                     };
                 };
@@ -606,7 +578,7 @@ impl AppState {
                     .get(ws_idx)
                     .and_then(|ws| ws.tabs.get(tab_idx))
                 else {
-                    return WorkspacePickerPreview::Empty {
+                    return WorkspaceSwitcherPreview::Empty {
                         message: "tab unavailable".to_string(),
                     };
                 };
@@ -614,12 +586,12 @@ impl AppState {
             }
         };
         let Some(ws) = self.workspaces.get(ws_idx) else {
-            return WorkspacePickerPreview::Empty {
+            return WorkspaceSwitcherPreview::Empty {
                 message: "workspace unavailable".to_string(),
             };
         };
         if ws.find_tab_index_for_pane(pane_id).is_none() {
-            return WorkspacePickerPreview::Empty {
+            return WorkspaceSwitcherPreview::Empty {
                 message: "no pane content".to_string(),
             };
         }
@@ -627,18 +599,18 @@ impl AppState {
         // Mirrors pane.read with ReadSource::Visible and ReadFormat::Ansi.
         let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
         else {
-            return WorkspacePickerPreview::Empty {
+            return WorkspaceSwitcherPreview::Empty {
                 message: "no pane content".to_string(),
             };
         };
         let text = runtime.visible_ansi();
         if text.trim().is_empty() {
-            return WorkspacePickerPreview::Empty {
+            return WorkspaceSwitcherPreview::Empty {
                 message: "no pane content".to_string(),
             };
         }
 
-        WorkspacePickerPreview::Content { pane_id, text }
+        WorkspaceSwitcherPreview::Content { pane_id, text }
     }
 
     fn workspace_mru_indices(&self) -> Vec<usize> {
@@ -671,7 +643,7 @@ impl AppState {
     }
 }
 
-fn workspace_picker_match_rank(query: &str, text: &str) -> Option<(u8, usize)> {
+fn workspace_switcher_match_rank(query: &str, text: &str) -> Option<(u8, usize)> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some((0, 0));
@@ -687,209 +659,206 @@ fn workspace_picker_match_rank(query: &str, text: &str) -> Option<(u8, usize)> {
             .split(|ch: char| !ch.is_alphanumeric())
             .any(|word| word.starts_with(needle))
     }) {
-        return Some((0, workspace_picker_match_position_sum(&terms, &haystack)));
+        return Some((0, workspace_switcher_match_position_sum(&terms, &haystack)));
     }
 
     if terms.iter().all(|needle| haystack.contains(needle)) {
-        return Some((1, workspace_picker_match_position_sum(&terms, &haystack)));
+        return Some((1, workspace_switcher_match_position_sum(&terms, &haystack)));
     }
 
-    if terms
-        .iter()
-        .all(|needle| needle.chars().count() > 1 && workspace_picker_fuzzy_match(needle, &haystack))
-    {
+    if terms.iter().all(|needle| {
+        needle.chars().count() > 1 && workspace_switcher_fuzzy_match(needle, &haystack)
+    }) {
         return Some((2, usize::MAX / 2));
     }
 
     None
 }
 
-fn workspace_picker_match_position_sum(terms: &[&str], haystack: &str) -> usize {
+fn workspace_switcher_match_position_sum(terms: &[&str], haystack: &str) -> usize {
     terms
         .iter()
         .filter_map(|needle| haystack.find(needle))
         .sum()
 }
 
-fn workspace_picker_fuzzy_match(needle: &str, haystack: &str) -> bool {
+fn workspace_switcher_fuzzy_match(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle
         .chars()
         .all(|needle_ch| chars.any(|text_ch| text_ch == needle_ch))
 }
 
-pub(crate) fn handle_workspace_picker_key(
+pub(crate) fn handle_workspace_switcher_key(
     state: &mut AppState,
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     key: KeyEvent,
 ) {
-    if state.workspace_picker.mode.is_quick_switch()
-        && state.workspace_picker.mode != WorkspacePickerMode::QuickSwitchSearch
-    {
-        handle_quick_switch_workspace_picker_key(state, terminal_runtimes, key);
+    if state.workspace_switcher.mode == WorkspaceSwitcherMode::QuickSwitch {
+        handle_quick_switch_key(state, terminal_runtimes, key);
         return;
     }
 
     match key.code {
-        KeyCode::Esc if state.workspace_picker.mode == WorkspacePickerMode::QuickSwitchSearch => {
-            state.leave_quick_switch_search_from(terminal_runtimes);
+        KeyCode::Esc if state.workspace_switcher.mode == WorkspaceSwitcherMode::Search => {
+            state.leave_workspace_switcher_search_from(terminal_runtimes);
         }
-        KeyCode::Esc => close_workspace_picker(state),
+        KeyCode::Esc => close_workspace_switcher(state),
         KeyCode::Enter => {
-            state.accept_workspace_picker_selection_from(terminal_runtimes);
+            state.accept_workspace_switcher_selection_from(terminal_runtimes);
         }
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-            close_workspace_picker(state)
+            close_workspace_switcher(state)
         }
         KeyCode::Char('q')
-            if key.modifiers.is_empty() && state.workspace_picker.query.is_empty() =>
+            if key.modifiers.is_empty() && state.workspace_switcher.query.is_empty() =>
         {
-            close_workspace_picker(state);
+            close_workspace_switcher(state);
         }
         KeyCode::Backspace => {
-            state.workspace_picker.query.pop();
-            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+            state.workspace_switcher.query.pop();
+            state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         KeyCode::Char('u') if key.modifiers == KeyModifiers::CONTROL => {
-            state.workspace_picker.query.clear();
-            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+            state.workspace_switcher.query.clear();
+            state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
-            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, 1);
         }
         KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
-            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, 1);
         }
         KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
-            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::PageDown => {
-            state.move_workspace_picker_selection_from(
+            state.move_workspace_switcher_selection_from(
                 terminal_runtimes,
-                state.workspace_picker_body_rect().height.max(1) as isize,
+                state.workspace_switcher_body_rect().height.max(1) as isize,
             );
         }
         KeyCode::PageUp => {
-            state.move_workspace_picker_selection_from(
+            state.move_workspace_switcher_selection_from(
                 terminal_runtimes,
-                -(state.workspace_picker_body_rect().height.max(1) as isize),
+                -(state.workspace_switcher_body_rect().height.max(1) as isize),
             );
         }
         KeyCode::Home => {
-            state.workspace_picker.selected = 0;
-            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+            state.workspace_switcher.selected = 0;
+            state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_switcher_preview_from(terminal_runtimes);
         }
         KeyCode::End => {
-            state.workspace_picker.selected = state
-                .workspace_picker_rows_from(terminal_runtimes)
+            state.workspace_switcher.selected = state
+                .workspace_switcher_rows_from(terminal_runtimes)
                 .len()
                 .saturating_sub(1);
-            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+            state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_switcher_preview_from(terminal_runtimes);
         }
         KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
-            state.workspace_picker.query.push(c);
-            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+            state.workspace_switcher.query.push(c);
+            state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         _ => {}
     }
-    if state.workspace_picker.active {
-        state.capture_workspace_picker_target_from(terminal_runtimes);
+    if state.workspace_switcher.active {
+        state.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 }
 
-fn handle_quick_switch_workspace_picker_key(
+fn handle_quick_switch_key(
     state: &mut AppState,
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     key: KeyEvent,
 ) {
-    let forward_cycle = state.keybinds.quick_switch_forward_combo();
-    let backward_cycle = state.keybinds.quick_switch_backward_combo();
+    let forward_cycle = state.keybinds.workspace_switcher_forward_combo();
+    let backward_cycle = state.keybinds.workspace_switcher_backward_combo();
 
     match key.code {
-        KeyCode::Esc => close_workspace_picker(state),
+        KeyCode::Esc => close_workspace_switcher(state),
         KeyCode::Enter => {
-            state.accept_workspace_picker_selection_from(terminal_runtimes);
+            state.accept_workspace_switcher_selection_from(terminal_runtimes);
         }
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-            close_workspace_picker(state)
+            close_workspace_switcher(state)
         }
         _ if forward_cycle.is_some_and(|combo| key_event_matches_combo(&key, combo)) => {
-            state.cycle_quick_switch_workspace_from(terminal_runtimes, 1);
+            state.cycle_workspace_switcher_from(terminal_runtimes, 1);
         }
         _ if backward_cycle.is_some_and(|combo| key_event_matches_combo(&key, combo)) => {
-            state.cycle_quick_switch_workspace_from(terminal_runtimes, -1);
+            state.cycle_workspace_switcher_from(terminal_runtimes, -1);
         }
         KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
-            if quick_switch_command_modifiers(state, key.modifiers) =>
+            if workspace_switcher_command_modifiers(state, key.modifiers) =>
         {
-            state.cycle_quick_switch_workspace_from(terminal_runtimes, -1);
+            state.cycle_workspace_switcher_from(terminal_runtimes, -1);
         }
-        KeyCode::Char('s') if quick_switch_command_modifiers(state, key.modifiers) => {
-            state.enter_quick_switch_search_from(terminal_runtimes);
+        KeyCode::Char('s') if workspace_switcher_command_modifiers(state, key.modifiers) => {
+            state.enter_workspace_switcher_search_from(terminal_runtimes);
         }
-        KeyCode::Char('l') if quick_switch_command_modifiers(state, key.modifiers) => {
-            state.expand_selected_workspace_picker_workspace_from(terminal_runtimes);
+        KeyCode::Char('l') if workspace_switcher_command_modifiers(state, key.modifiers) => {
+            state.expand_selected_workspace_switcher_workspace_from(terminal_runtimes);
         }
-        KeyCode::Char('h') if quick_switch_command_modifiers(state, key.modifiers) => {
-            state.collapse_selected_workspace_picker_workspace_from(terminal_runtimes);
+        KeyCode::Char('h') if workspace_switcher_command_modifiers(state, key.modifiers) => {
+            state.collapse_selected_workspace_switcher_workspace_from(terminal_runtimes);
         }
         KeyCode::Down | KeyCode::Char('j')
-            if quick_switch_command_modifiers(state, key.modifiers) =>
+            if workspace_switcher_command_modifiers(state, key.modifiers) =>
         {
-            state.move_workspace_picker_selection_from(terminal_runtimes, 1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, 1);
         }
         KeyCode::Up | KeyCode::Char('k')
-            if quick_switch_command_modifiers(state, key.modifiers) =>
+            if workspace_switcher_command_modifiers(state, key.modifiers) =>
         {
-            state.move_workspace_picker_selection_from(terminal_runtimes, -1);
+            state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::Home => {
-            state.workspace_picker.selected = 0;
-            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+            state.workspace_switcher.selected = 0;
+            state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_switcher_preview_from(terminal_runtimes);
         }
         KeyCode::End => {
-            state.workspace_picker.selected = state
-                .workspace_picker_rows_from(terminal_runtimes)
+            state.workspace_switcher.selected = state
+                .workspace_switcher_rows_from(terminal_runtimes)
                 .len()
                 .saturating_sub(1);
-            state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-            state.refresh_workspace_picker_preview_from(terminal_runtimes);
+            state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+            state.refresh_workspace_switcher_preview_from(terminal_runtimes);
         }
         _ => {}
     }
-    if state.workspace_picker.active {
-        state.capture_workspace_picker_target_from(terminal_runtimes);
+    if state.workspace_switcher.active {
+        state.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 }
 
-fn quick_switch_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
+fn workspace_switcher_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
     modifiers.is_empty()
         || state
             .keybinds
-            .quick_switch_command_modifiers()
+            .workspace_switcher_command_modifiers()
             .is_some_and(|quick_switch_modifiers| modifiers.contains(quick_switch_modifiers))
 }
 
-pub(crate) fn handle_quick_switch_key_release(
+pub(crate) fn handle_workspace_switcher_key_release(
     state: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     key: TerminalKey,
 ) -> bool {
-    if !state.workspace_picker.active
-        || state.workspace_picker.mode != WorkspacePickerMode::QuickSwitch
+    if !state.workspace_switcher.active
+        || state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch
     {
         return false;
     }
 
     if state
         .keybinds
-        .quick_switch_workspace
+        .workspace_switcher
         .bindings
         .iter()
         .filter_map(|binding| match binding.trigger {
@@ -898,15 +867,15 @@ pub(crate) fn handle_quick_switch_key_release(
         })
         .all(|combo| combo.1.is_empty())
     {
-        tracing::trace!("quick_switch_workspace has no modifiers; release-accept unavailable");
+        tracing::trace!("workspace_switcher has no modifiers; release-accept unavailable");
         return false;
     }
 
-    if !quick_switch_modifier_release_matches(&state.keybinds.quick_switch_workspace, key) {
+    if !quick_switch_modifier_release_matches(&state.keybinds.workspace_switcher, key) {
         return false;
     }
 
-    state.accept_workspace_picker_selection_from(terminal_runtimes)
+    state.accept_workspace_switcher_selection_from(terminal_runtimes)
 }
 
 fn quick_switch_modifier_release_matches(
@@ -951,57 +920,61 @@ fn released_modifier(code: KeyCode) -> Option<KeyModifiers> {
     }
 }
 
-pub(crate) fn handle_workspace_picker_mouse(
+pub(crate) fn handle_workspace_switcher_mouse(
     state: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     mouse: MouseEvent,
 ) {
     match mouse.kind {
         MouseEventKind::Moved => {
-            if let Some(idx) =
-                state.workspace_picker_row_index_at_from(terminal_runtimes, mouse.column, mouse.row)
-            {
-                if state.workspace_picker.selected != idx {
-                    state.workspace_picker.selected = idx;
-                    state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-                    state.refresh_workspace_picker_preview_from(terminal_runtimes);
+            if let Some(idx) = state.workspace_switcher_row_index_at_from(
+                terminal_runtimes,
+                mouse.column,
+                mouse.row,
+            ) {
+                if state.workspace_switcher.selected != idx {
+                    state.workspace_switcher.selected = idx;
+                    state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+                    state.refresh_workspace_switcher_preview_from(terminal_runtimes);
                 }
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(idx) =
-                state.workspace_picker_row_index_at_from(terminal_runtimes, mouse.column, mouse.row)
-            {
-                state.workspace_picker.selected = idx;
-                state.capture_workspace_picker_target_from(terminal_runtimes);
-                state.accept_workspace_picker_selection_from(terminal_runtimes);
-            } else if !state.workspace_picker_popup_contains(mouse.column, mouse.row) {
-                close_workspace_picker(state);
+            if let Some(idx) = state.workspace_switcher_row_index_at_from(
+                terminal_runtimes,
+                mouse.column,
+                mouse.row,
+            ) {
+                state.workspace_switcher.selected = idx;
+                state.capture_workspace_switcher_target_from(terminal_runtimes);
+                state.accept_workspace_switcher_selection_from(terminal_runtimes);
+            } else if !state.workspace_switcher_popup_contains(mouse.column, mouse.row) {
+                close_workspace_switcher(state);
             }
         }
         MouseEventKind::ScrollUp => {
-            state.workspace_picker.scroll = state.workspace_picker.scroll.saturating_sub(3);
-            state.workspace_picker.selected = state.workspace_picker.scroll;
-            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+            state.workspace_switcher.scroll = state.workspace_switcher.scroll.saturating_sub(3);
+            state.workspace_switcher.selected = state.workspace_switcher.scroll;
+            state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         MouseEventKind::ScrollDown => {
-            let viewport = state.workspace_picker_body_rect().height as usize;
-            let max = state.workspace_picker_max_scroll_from(terminal_runtimes, viewport);
-            state.workspace_picker.scroll =
-                state.workspace_picker.scroll.saturating_add(3).min(max);
-            state.workspace_picker.selected = state.workspace_picker.scroll;
-            state.clamp_workspace_picker_selection_from(terminal_runtimes);
+            let viewport = state.workspace_switcher_body_rect().height as usize;
+            let max = state.workspace_switcher_max_scroll_from(terminal_runtimes, viewport);
+            state.workspace_switcher.scroll =
+                state.workspace_switcher.scroll.saturating_add(3).min(max);
+            state.workspace_switcher.selected = state.workspace_switcher.scroll;
+            state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         _ => {}
     }
-    if state.workspace_picker.active {
-        state.capture_workspace_picker_target_from(terminal_runtimes);
+    if state.workspace_switcher.active {
+        state.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 }
 
-fn close_workspace_picker(state: &mut AppState) {
-    state.workspace_picker.active = false;
-    state.workspace_picker.selected_target = None;
+fn close_workspace_switcher(state: &mut AppState) {
+    state.workspace_switcher.active = false;
+    state.workspace_switcher.selected_target = None;
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     } else {
@@ -1009,27 +982,24 @@ fn close_workspace_picker(state: &mut AppState) {
     }
 }
 
-pub(crate) fn paste_workspace_picker_query(
+pub(crate) fn paste_workspace_switcher_query(
     state: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     text: &str,
 ) -> bool {
-    if !state.workspace_picker.active
-        || !matches!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::Search | WorkspacePickerMode::QuickSwitchSearch
-        )
+    if !state.workspace_switcher.active
+        || state.workspace_switcher.mode != WorkspaceSwitcherMode::Search
     {
         return false;
     }
     state
-        .workspace_picker
+        .workspace_switcher
         .query
         .extend(text.chars().filter(|ch| !ch.is_control()));
-    state.workspace_picker.selected = 0;
-    state.workspace_picker.scroll = 0;
-    state.ensure_workspace_picker_selection_visible_from(terminal_runtimes);
-    state.refresh_workspace_picker_preview_from(terminal_runtimes);
+    state.workspace_switcher.selected = 0;
+    state.workspace_switcher.scroll = 0;
+    state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+    state.refresh_workspace_switcher_preview_from(terminal_runtimes);
     true
 }
 
@@ -1037,7 +1007,7 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn workspace_picker_list_width(width: u16) -> u16 {
+fn workspace_switcher_list_width(width: u16) -> u16 {
     if width < 48 {
         return width;
     }
@@ -1045,7 +1015,7 @@ fn workspace_picker_list_width(width: u16) -> u16 {
 }
 
 impl AppState {
-    pub(crate) fn workspace_picker_popup_rect(&self) -> Rect {
+    pub(crate) fn workspace_switcher_popup_rect(&self) -> Rect {
         let area = self.view.sidebar_rect.union(self.view.terminal_area);
         let margin_x = (area.width / 12).max(2);
         let margin_y = (area.height / 9).max(1);
@@ -1059,23 +1029,23 @@ impl AppState {
         )
     }
 
-    pub(crate) fn workspace_picker_inner_rect(&self) -> Rect {
+    pub(crate) fn workspace_switcher_inner_rect(&self) -> Rect {
         Block::default()
             .borders(Borders::ALL)
-            .inner(self.workspace_picker_popup_rect())
+            .inner(self.workspace_switcher_popup_rect())
     }
 
-    pub(crate) fn workspace_picker_search_rect(&self) -> Rect {
-        if !self.workspace_picker.mode.search_visible() {
+    pub(crate) fn workspace_switcher_search_rect(&self) -> Rect {
+        if !self.workspace_switcher.mode.search_visible() {
             return Rect::default();
         }
-        let inner = self.workspace_picker_inner_rect();
+        let inner = self.workspace_switcher_inner_rect();
         Rect::new(inner.x, inner.y, inner.width, inner.height.min(1))
     }
 
-    pub(crate) fn workspace_picker_content_rect(&self) -> Rect {
-        let inner = self.workspace_picker_inner_rect();
-        if self.workspace_picker.mode.search_visible() {
+    pub(crate) fn workspace_switcher_content_rect(&self) -> Rect {
+        let inner = self.workspace_switcher_inner_rect();
+        if self.workspace_switcher.mode.search_visible() {
             if inner.height <= 3 {
                 return Rect::default();
             }
@@ -1097,31 +1067,31 @@ impl AppState {
         )
     }
 
-    pub(crate) fn workspace_picker_body_rect(&self) -> Rect {
-        let content = self.workspace_picker_content_rect();
-        let list_width = workspace_picker_list_width(content.width);
+    pub(crate) fn workspace_switcher_body_rect(&self) -> Rect {
+        let content = self.workspace_switcher_content_rect();
+        let list_width = workspace_switcher_list_width(content.width);
         Rect::new(content.x, content.y, list_width, content.height)
     }
 
-    pub(crate) fn workspace_picker_divider_rect(&self) -> Rect {
-        let content = self.workspace_picker_content_rect();
-        let list_width = workspace_picker_list_width(content.width);
+    pub(crate) fn workspace_switcher_divider_rect(&self) -> Rect {
+        let content = self.workspace_switcher_content_rect();
+        let list_width = workspace_switcher_list_width(content.width);
         if content.width <= list_width || content.height == 0 {
             return Rect::default();
         }
         Rect::new(content.x + list_width, content.y, 1, content.height)
     }
 
-    pub(crate) fn workspace_picker_preview_rect(&self) -> Rect {
-        let content = self.workspace_picker_content_rect();
-        let list_width = workspace_picker_list_width(content.width);
+    pub(crate) fn workspace_switcher_preview_rect(&self) -> Rect {
+        let content = self.workspace_switcher_content_rect();
+        let list_width = workspace_switcher_list_width(content.width);
         let x = content.x.saturating_add(list_width).saturating_add(1);
         let width = content.width.saturating_sub(list_width).saturating_sub(1);
         Rect::new(x, content.y, width, content.height)
     }
 
-    pub(crate) fn workspace_picker_footer_rect(&self) -> Rect {
-        let inner = self.workspace_picker_inner_rect();
+    pub(crate) fn workspace_switcher_footer_rect(&self) -> Rect {
+        let inner = self.workspace_switcher_inner_rect();
         Rect::new(
             inner.x,
             inner.y + inner.height.saturating_sub(1),
@@ -1130,46 +1100,46 @@ impl AppState {
         )
     }
 
-    pub(crate) fn workspace_picker_popup_contains(&self, col: u16, row: u16) -> bool {
-        rect_contains(self.workspace_picker_popup_rect(), col, row)
+    pub(crate) fn workspace_switcher_popup_contains(&self, col: u16, row: u16) -> bool {
+        rect_contains(self.workspace_switcher_popup_rect(), col, row)
     }
 
-    pub(crate) fn workspace_picker_row_index_at_from(
+    pub(crate) fn workspace_switcher_row_index_at_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         col: u16,
         row: u16,
     ) -> Option<usize> {
-        let body = self.workspace_picker_body_rect();
+        let body = self.workspace_switcher_body_rect();
         if !rect_contains(body, col, row) {
             return None;
         }
         let idx = self
-            .workspace_picker
+            .workspace_switcher
             .scroll
             .saturating_add(row.saturating_sub(body.y) as usize);
-        (idx < self.workspace_picker_rows_from(terminal_runtimes).len()).then_some(idx)
+        (idx < self.workspace_switcher_rows_from(terminal_runtimes).len()).then_some(idx)
     }
 }
 
-pub(super) fn render_workspace_picker_overlay(
+pub(super) fn render_workspace_switcher_overlay(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
-    let popup = app.workspace_picker_popup_rect();
+    let popup = app.workspace_switcher_popup_rect();
     let Some(inner) = render_panel_shell(frame, popup, app.palette.accent, app.palette.panel_bg)
     else {
         return;
     };
 
-    let search = app.workspace_picker_search_rect();
-    let body = app.workspace_picker_body_rect();
-    let divider = app.workspace_picker_divider_rect();
-    let preview = app.workspace_picker_preview_rect();
-    let footer = app.workspace_picker_footer_rect();
+    let search = app.workspace_switcher_search_rect();
+    let body = app.workspace_switcher_body_rect();
+    let divider = app.workspace_switcher_divider_rect();
+    let preview = app.workspace_switcher_preview_rect();
+    let footer = app.workspace_switcher_footer_rect();
 
-    if app.workspace_picker.mode.search_visible() {
+    if app.workspace_switcher.mode.search_visible() {
         render_search(app, terminal_runtimes, frame, search);
         render_separator(
             frame,
@@ -1178,7 +1148,7 @@ pub(super) fn render_workspace_picker_overlay(
         );
     }
     render_rows(app, terminal_runtimes, frame, body);
-    render_workspace_picker_scrollbar(app, terminal_runtimes, frame, body);
+    render_workspace_switcher_scrollbar(app, terminal_runtimes, frame, body);
     render_vertical_divider(app, frame, divider);
     render_preview(app, terminal_runtimes, frame, preview);
     render_footer(app, frame, footer);
@@ -1195,13 +1165,9 @@ fn render_search(
     }
 
     let p = &app.palette;
-    let rows = app.workspace_picker_rows_from(terminal_runtimes);
-    let query = app.workspace_picker.query.trim();
-    let title = if app.workspace_picker.mode.is_quick_switch() {
-        " quick switch "
-    } else {
-        " workspaces "
-    };
+    let rows = app.workspace_switcher_rows_from(terminal_runtimes);
+    let query = app.workspace_switcher.query.trim();
+    let title = " workspace switcher ";
     let mut spans = vec![Span::styled(title, Style::default().fg(p.accent))];
     spans.push(Span::styled("/ ", Style::default().fg(p.overlay0)));
     if query.is_empty() {
@@ -1234,7 +1200,7 @@ fn render_rows(
         return;
     }
 
-    let rows = app.workspace_picker_rows_from(terminal_runtimes);
+    let rows = app.workspace_switcher_rows_from(terminal_runtimes);
     if rows.is_empty() {
         let message = if app.workspaces.is_empty() {
             " no workspaces"
@@ -1248,13 +1214,19 @@ fn render_rows(
         return;
     }
 
-    let start = app.workspace_picker.scroll.min(rows.len());
+    let start = app.workspace_switcher.scroll.min(rows.len());
     let end = rows.len().min(start.saturating_add(body.height as usize));
     for (visible_idx, row) in rows[start..end].iter().enumerate() {
         let idx = start + visible_idx;
         let y = body.y + visible_idx as u16;
         let rect = Rect::new(body.x, y, body.width, 1);
-        render_row(app, frame, rect, row, idx == app.workspace_picker.selected);
+        render_row(
+            app,
+            frame,
+            rect,
+            row,
+            idx == app.workspace_switcher.selected,
+        );
     }
 }
 
@@ -1262,7 +1234,7 @@ fn render_row(
     app: &AppState,
     frame: &mut Frame,
     rect: Rect,
-    row: &WorkspacePickerRow,
+    row: &WorkspaceSwitcherRow,
     selected: bool,
 ) {
     let p = &app.palette;
@@ -1291,19 +1263,15 @@ fn render_row(
     let (dot, dot_style) = state_dot(row.state, row.seen, p);
 
     let mut spans: Vec<Span> = Vec::new();
-    if app.workspace_picker.mode.is_quick_switch() {
-        let caret = if row.is_tab {
-            " "
-        } else if row.expanded {
-            "▾"
-        } else {
-            "▸"
-        };
-        let indent = "  ".repeat(row.depth as usize);
-        spans.push(Span::styled(format!(" {indent}{caret} "), dim_style));
+    let caret = if row.is_tab {
+        " "
+    } else if row.expanded {
+        "▾"
     } else {
-        spans.push(Span::styled(" ", dim_style));
-    }
+        "▸"
+    };
+    let indent = "  ".repeat(row.depth as usize);
+    spans.push(Span::styled(format!(" {indent}{caret} "), dim_style));
     spans.push(Span::styled(dot, dot_style));
     spans.push(Span::styled(" ", dim_style));
 
@@ -1336,7 +1304,7 @@ fn render_row(
     }
 }
 
-fn render_workspace_picker_scrollbar(
+fn render_workspace_switcher_scrollbar(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
@@ -1345,7 +1313,7 @@ fn render_workspace_picker_scrollbar(
     if body.width <= 1 || body.height == 0 {
         return;
     }
-    let rows = app.workspace_picker_rows_from(terminal_runtimes).len();
+    let rows = app.workspace_switcher_rows_from(terminal_runtimes).len();
     let viewport = body.height as usize;
     if rows <= viewport {
         return;
@@ -1354,7 +1322,7 @@ fn render_workspace_picker_scrollbar(
         viewport_rows: viewport,
         offset_from_bottom: rows
             .saturating_sub(viewport)
-            .saturating_sub(app.workspace_picker.scroll),
+            .saturating_sub(app.workspace_switcher.scroll),
         max_offset_from_bottom: rows.saturating_sub(viewport),
     };
     if !should_show_scrollbar(metrics) {
@@ -1397,8 +1365,8 @@ fn render_preview(
     }
 
     let selected_label = app
-        .workspace_picker_rows_from(terminal_runtimes)
-        .get(app.workspace_picker.selected)
+        .workspace_switcher_rows_from(terminal_runtimes)
+        .get(app.workspace_switcher.selected)
         .map(|row| row.label.clone())
         .unwrap_or_else(|| "preview".to_string());
     let title = truncate_text(
@@ -1430,11 +1398,11 @@ fn render_preview(
         return;
     }
 
-    match &app.workspace_picker.preview {
-        WorkspacePickerPreview::Content { text, .. } => {
+    match &app.workspace_switcher.preview {
+        WorkspaceSwitcherPreview::Content { text, .. } => {
             frame.render_widget(Paragraph::new(ansi_to_text(text)), content);
         }
-        WorkspacePickerPreview::Empty { message } => {
+        WorkspaceSwitcherPreview::Empty { message } => {
             frame.render_widget(
                 Paragraph::new(format!(" {message}"))
                     .style(Style::default().fg(app.palette.overlay0)),
@@ -1451,13 +1419,8 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
     let key = Style::default().fg(p.accent).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
-    let line = if app.workspace_picker.mode.is_quick_switch() {
-        let esc_label = if app.workspace_picker.mode == WorkspacePickerMode::QuickSwitchSearch {
-            " back"
-        } else {
-            " close"
-        };
-        Line::from(vec![
+    let line = match app.workspace_switcher.mode {
+        WorkspaceSwitcherMode::QuickSwitch => Line::from(vec![
             Span::styled(" enter", key),
             Span::styled(" switch  ", dim),
             Span::styled("tab", key),
@@ -1467,10 +1430,9 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled("s", key),
             Span::styled(" search  ", dim),
             Span::styled("esc", key),
-            Span::styled(esc_label, dim),
-        ])
-    } else {
-        Line::from(vec![
+            Span::styled(" close", dim),
+        ]),
+        WorkspaceSwitcherMode::Search => Line::from(vec![
             Span::styled(" enter", key),
             Span::styled(" switch  ", dim),
             Span::styled("type", key),
@@ -1478,8 +1440,8 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled("j/k/↑↓", key),
             Span::styled(" move  ", dim),
             Span::styled("esc", key),
-            Span::styled(" close", dim),
-        ])
+            Span::styled(" back", dim),
+        ]),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1757,31 +1719,30 @@ mod tests {
     }
 
     fn config_with_quick_switch(
-        quick_switch_workspace: &str,
-        quick_switch_workspace_backward: Option<&str>,
+        workspace_switcher: &str,
+        workspace_switcher_backward: Option<&str>,
     ) -> crate::config::Config {
-        let backward = quick_switch_workspace_backward
-            .map(|binding| format!("quick_switch_workspace_backward = {binding:?}\n"))
+        let backward = workspace_switcher_backward
+            .map(|binding| format!("workspace_switcher_backward = {binding:?}\n"))
             .unwrap_or_default();
         toml::from_str(&format!(
-            "[keys]\nquick_switch_workspace = {quick_switch_workspace:?}\n{backward}"
+            "[keys]\nworkspace_switcher = {workspace_switcher:?}\n{backward}"
         ))
         .expect("quick switch config should parse")
     }
 
     fn state_with_quick_switch_binding(
-        quick_switch_workspace: &str,
-        quick_switch_workspace_backward: Option<&str>,
+        workspace_switcher: &str,
+        workspace_switcher_backward: Option<&str>,
     ) -> (
         AppState,
         crate::terminal::TerminalRuntimeRegistry,
         KeyModifiers,
     ) {
-        let config =
-            config_with_quick_switch(quick_switch_workspace, quick_switch_workspace_backward);
+        let config = config_with_quick_switch(workspace_switcher, workspace_switcher_backward);
         let quick_switch_modifiers = config
             .keybinds()
-            .quick_switch_command_modifiers()
+            .workspace_switcher_command_modifiers()
             .expect("quick switch should have a direct binding");
         let mut state = state_with_workspaces(&["main", "issue", "docs"]);
         state.keybinds = config.keybinds();
@@ -1791,47 +1752,37 @@ mod tests {
         state.switch_workspace(0);
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
         (state, terminal_runtimes, quick_switch_modifiers)
     }
 
-    fn selected_workspace_picker_ws_idx(
+    fn selected_workspace_switcher_ws_idx(
         state: &AppState,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> usize {
-        let rows = state.workspace_picker_rows_from(terminal_runtimes);
-        rows[state.workspace_picker.selected].ws_idx
+        let rows = state.workspace_switcher_rows_from(terminal_runtimes);
+        rows[state.workspace_switcher.selected].ws_idx
     }
 
     #[test]
-    fn opening_workspace_picker_selects_active_workspace() {
-        let mut state = app_with_workspaces(&["one", "two"]);
-        state.active = Some(1);
-
-        state.open_workspace_picker();
-
-        assert!(state.workspace_picker.active);
-        assert_eq!(
-            state.workspace_picker_rows()[state.workspace_picker.selected].ws_idx,
-            1
-        );
-    }
-
-    #[test]
-    fn picker_accept_resolves_stable_target_after_workspace_reorder() {
+    fn switcher_accept_resolves_stable_target_after_workspace_reorder() {
         let mut state = app_with_workspaces(&["one", "two"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let selected_id = state.workspaces[0].id.clone();
-        state.open_workspace_picker_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let selected_id = state.workspace_switcher_rows()[state.workspace_switcher.selected]
+            .target
+            .clone();
 
         state.workspaces.swap(0, 1);
-        assert!(state.accept_workspace_picker_selection_from(&terminal_runtimes));
+        assert!(state.accept_workspace_switcher_selection_from(&terminal_runtimes));
 
-        assert_eq!(state.active, Some(1));
-        assert_eq!(state.workspaces[1].id, selected_id);
+        let WorkspaceSwitcherTarget::Workspace { workspace_id } = selected_id else {
+            panic!("workspace row should be selected");
+        };
+        assert_eq!(state.workspaces[state.active.unwrap()].id, workspace_id);
     }
     #[test]
-    fn workspace_picker_filters_workspace_names_only() {
+    fn workspace_switcher_filters_workspace_names_only() {
         let mut state = app_with_workspaces(&["one", "issue"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(root).cloned().unwrap();
@@ -1841,40 +1792,64 @@ mod tests {
             .unwrap()
             .set_manual_label("weekly review".into());
 
-        state.open_workspace_picker();
-        state.workspace_picker.query = "weekly".into();
-        assert!(state.workspace_picker_rows().is_empty());
+        state.open_workspace_switcher();
+        state
+            .enter_workspace_switcher_search_from(&crate::terminal::TerminalRuntimeRegistry::new());
+        state.workspace_switcher.query = "weekly".into();
+        assert!(state.workspace_switcher_rows().is_empty());
 
-        state.workspace_picker.query = "ie".into();
-        let rows = state.workspace_picker_rows();
+        state.workspace_switcher.query = "ie".into();
+        let rows = state.workspace_switcher_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ws_idx, 1);
     }
+
     #[test]
-    fn workspace_picker_empty_state_has_placeholder_preview() {
+    fn workspace_switcher_search_ranks_matches_then_preserves_mru_order() {
+        let mut state = app_with_workspaces(&["main", "other issue", "issue alpha", "issue beta"]);
+        state.workspace_mru = vec![
+            state.workspaces[1].id.clone(),
+            state.workspaces[3].id.clone(),
+            state.workspaces[2].id.clone(),
+        ];
+
+        state.open_workspace_switcher();
+        state
+            .enter_workspace_switcher_search_from(&crate::terminal::TerminalRuntimeRegistry::new());
+        state.workspace_switcher.query = "issue".into();
+
+        let rows = state.workspace_switcher_rows();
+        assert_eq!(
+            rows.iter().map(|row| row.ws_idx).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn workspace_switcher_empty_state_has_placeholder_preview() {
         let mut state = AppState::test_new();
 
-        state.open_workspace_picker();
+        state.open_workspace_switcher();
 
-        assert!(state.workspace_picker.active);
+        assert!(state.workspace_switcher.active);
         assert!(matches!(
-            state.workspace_picker.preview,
-            WorkspacePickerPreview::Empty { ref message } if message == "no workspaces"
+            state.workspace_switcher.preview,
+            WorkspaceSwitcherPreview::Empty { ref message } if message == "no workspaces"
         ));
     }
     #[test]
-    fn workspace_picker_preview_handles_missing_runtime() {
+    fn workspace_switcher_preview_handles_missing_runtime() {
         let mut state = app_with_workspaces(&["one"]);
 
-        state.open_workspace_picker();
+        state.open_workspace_switcher();
 
         assert!(matches!(
-            state.workspace_picker.preview,
-            WorkspacePickerPreview::Empty { ref message } if message == "no pane content"
+            state.workspace_switcher.preview,
+            WorkspaceSwitcherPreview::Empty { ref message } if message == "no pane content"
         ));
     }
     #[test]
-    fn workspace_picker_shows_branch_name_for_grouped_child() {
+    fn workspace_switcher_shows_branch_name_for_grouped_child() {
         let mut state = app_with_workspaces(&["main", "issue"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
@@ -1883,8 +1858,8 @@ mod tests {
         state.workspaces[1].custom_name = None;
         state.workspaces[1].cached_git_branch = Some("worktree/issue-137".into());
 
-        state.open_workspace_picker();
-        let rows = state.workspace_picker_rows();
+        state.open_workspace_switcher();
+        let rows = state.workspace_switcher_rows();
 
         // The grouped child should display the branch name (without "worktree/" prefix),
         // matching the sidebar's grouped_child_display_label behavior.
@@ -1892,7 +1867,7 @@ mod tests {
         assert_eq!(child_row.label, "issue-137");
     }
     #[test]
-    fn workspace_picker_shows_cwd_name_for_standalone_workspace() {
+    fn workspace_switcher_shows_cwd_name_for_standalone_workspace() {
         let mut state = app_with_workspaces(&["main", "issue"]);
         // No worktree_space set — standalone workspace.
         state.workspaces[1].custom_name = None;
@@ -1901,8 +1876,8 @@ mod tests {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let raw_label = state.workspaces[1].display_name_from(&state.terminals, &terminal_runtimes);
 
-        state.open_workspace_picker();
-        let rows = state.workspace_picker_rows();
+        state.open_workspace_switcher();
+        let rows = state.workspace_switcher_rows();
 
         // Standalone workspace — no branch substitution, label is CWD-derived.
         let row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
@@ -1910,21 +1885,21 @@ mod tests {
         assert_ne!(row.label, "issue-137");
     }
     #[test]
-    fn workspace_picker_keeps_custom_name_for_grouped_child() {
+    fn workspace_switcher_keeps_custom_name_for_grouped_child() {
         let mut state = app_with_workspaces(&["main", "issue"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
         state.workspaces[1].cached_git_branch = Some("worktree/issue-137".into());
         state.workspaces[1].custom_name = Some("my-custom-name".into());
 
-        state.open_workspace_picker();
-        let rows = state.workspace_picker_rows();
+        state.open_workspace_switcher();
+        let rows = state.workspace_switcher_rows();
 
         let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
         assert_eq!(child_row.label, "my-custom-name");
     }
     #[test]
-    fn workspace_picker_shows_cwd_name_for_linked_only_group() {
+    fn workspace_switcher_shows_cwd_name_for_linked_only_group() {
         // Two linked worktrees with no parent — should NOT form a parentless group.
         let mut state = app_with_workspaces(&["issue", "review"]);
         mark_linked_worktree(&mut state, 0);
@@ -1938,8 +1913,8 @@ mod tests {
         let raw0 = state.workspaces[0].display_name_from(&state.terminals, &terminal_runtimes);
         let raw1 = state.workspaces[1].display_name_from(&state.terminals, &terminal_runtimes);
 
-        state.open_workspace_picker();
-        let rows = state.workspace_picker_rows();
+        state.open_workspace_switcher();
+        let rows = state.workspace_switcher_rows();
 
         // Without a parent worktree, these are not grouped children —
         // the CWD-derived name should be used unchanged.
@@ -1961,16 +1936,16 @@ mod tests {
         ];
         state.switch_workspace(2);
 
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
-        let rows = state.workspace_picker_rows();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows();
 
         assert_eq!(rows[0].ws_idx, 2);
         assert_eq!(rows[1].ws_idx, 1);
         assert_eq!(rows[2].ws_idx, 0);
-        assert_eq!(state.workspace_picker.selected, 1);
+        assert_eq!(state.workspace_switcher.selected, 1);
         assert_eq!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::QuickSwitch
+            state.workspace_switcher.mode,
+            WorkspaceSwitcherMode::QuickSwitch
         );
     }
     #[test]
@@ -1984,11 +1959,11 @@ mod tests {
             state.workspaces[1].id.clone(),
             state.workspaces[0].id.clone(),
         ];
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
 
-        state.cycle_quick_switch_workspace_from(&terminal_runtimes, 1);
+        state.cycle_workspace_switcher_from(&terminal_runtimes, 1);
 
-        let selected = &state.workspace_picker_rows()[state.workspace_picker.selected];
+        let selected = &state.workspace_switcher_rows()[state.workspace_switcher.selected];
         assert_eq!(selected.ws_idx, 0);
         assert!(!selected.is_tab);
     }
@@ -1999,37 +1974,47 @@ mod tests {
         let second_tab = state.workspaces[1].test_add_tab(Some("logs"));
         state.switch_workspace(1);
         state.switch_workspace(0);
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
 
-        state.expand_selected_workspace_picker_workspace_from(&terminal_runtimes);
-        state.move_workspace_picker_selection_from(&terminal_runtimes, 2);
+        state.expand_selected_workspace_switcher_workspace_from(&terminal_runtimes);
+        state.move_workspace_switcher_selection_from(&terminal_runtimes, 2);
 
-        let selected = state.workspace_picker_rows()[state.workspace_picker.selected].clone();
+        let selected = state.workspace_switcher_rows()[state.workspace_switcher.selected].clone();
         assert_eq!(
             selected.target,
-            WorkspacePickerTarget::Tab {
+            WorkspaceSwitcherTarget::Tab {
                 tab_id: crate::workspace::public_tab_id_for_number(
                     &state.workspaces[1].id,
                     state.workspaces[1].tabs[second_tab].number,
                 )
             }
         );
-        assert!(state.accept_workspace_picker_selection_from(&terminal_runtimes));
+        assert!(state.accept_workspace_switcher_selection_from(&terminal_runtimes));
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].active_tab_index(), second_tab);
     }
     #[test]
-    fn workspace_picker_typing_filters_and_enter_switches_workspace() {
+    fn workspace_switcher_typing_filters_and_enter_switches_workspace() {
         let mut state = state_with_workspaces(&["main", "issue"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.open_workspace_picker_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
+        );
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()),
         );
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()),
+        );
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
@@ -2039,13 +2024,13 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
     }
     #[test]
-    fn workspace_picker_escape_closes_without_switching() {
+    fn workspace_switcher_escape_closes_without_switching() {
         let mut state = state_with_workspaces(&["main", "issue"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.open_workspace_picker_from(&terminal_runtimes);
-        state.move_workspace_picker_selection_from(&terminal_runtimes, 1);
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.move_workspace_switcher_selection_from(&terminal_runtimes, 1);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
@@ -2055,32 +2040,38 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
     }
     #[test]
-    fn quick_switch_search_toggle_returns_to_quick_switch_on_escape() {
+    fn workspace_switcher_search_returns_to_quick_switch_on_escape() {
         let mut state = state_with_workspaces(&["main", "issue"]);
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
         );
-        assert_eq!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::QuickSwitchSearch
-        );
+        assert_eq!(state.workspace_switcher.mode, WorkspaceSwitcherMode::Search);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
         assert_eq!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::QuickSwitch
+            state.workspace_switcher.mode,
+            WorkspaceSwitcherMode::QuickSwitch
         );
-        assert!(state.workspace_picker.active);
+        assert!(state.workspace_switcher.active);
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+
+        assert!(!state.workspace_switcher.active);
+        assert_eq!(state.mode, Mode::Terminal);
     }
     #[test]
     fn quick_switch_accepts_control_modified_commands_while_shortcut_is_held() {
@@ -2089,57 +2080,56 @@ mod tests {
         state.workspaces[1].test_add_tab(Some("logs"));
         state.switch_workspace(1);
         state.switch_workspace(0);
-        state.open_quick_switch_workspace_from(&terminal_runtimes);
+        state.open_workspace_switcher_from(&terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
         );
         assert!(state
-            .workspace_picker_rows_from(&terminal_runtimes)
+            .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
             .any(|row| row.ws_idx == 1 && row.is_tab && row.label == "logs"));
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
         );
         assert!(
-            state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab
         );
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
         );
         assert!(
-            !state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            !state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab
         );
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
         );
         assert!(!state
-            .workspace_picker_rows_from(&terminal_runtimes)
+            .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
             .any(|row| row.ws_idx == 1 && row.is_tab));
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         );
-        assert_eq!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::QuickSwitchSearch
-        );
+        assert_eq!(state.workspace_switcher.mode, WorkspaceSwitcherMode::Search);
     }
     #[test]
     fn quick_switch_cycle_and_commands_follow_configured_direct_binding() {
@@ -2191,88 +2181,88 @@ mod tests {
         for (binding, forward_code, forward_modifiers, backward_code, backward_modifiers) in cases {
             let (mut state, terminal_runtimes, command_modifiers) =
                 state_with_quick_switch_binding(binding, None);
-            let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+            let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(forward_code, forward_modifiers),
             );
             assert_ne!(
-                selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+                selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
                 initial_ws,
                 "{binding} should cycle forward"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(backward_code, backward_modifiers),
             );
             assert_eq!(
-                selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+                selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
                 initial_ws,
                 "{binding} should cycle backward"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(KeyCode::Char('l'), command_modifiers),
             );
             assert!(
                 state
-                    .workspace_picker_rows_from(&terminal_runtimes)
+                    .workspace_switcher_rows_from(&terminal_runtimes)
                     .iter()
                     .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
                 "{binding} should expand with the configured modifier"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(KeyCode::Char('j'), command_modifiers),
             );
             assert!(
-                state.workspace_picker_rows_from(&terminal_runtimes)
-                    [state.workspace_picker.selected]
+                state.workspace_switcher_rows_from(&terminal_runtimes)
+                    [state.workspace_switcher.selected]
                     .is_tab,
                 "{binding} should move down with the configured modifier"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(KeyCode::Char('k'), command_modifiers),
             );
             assert!(
-                !state.workspace_picker_rows_from(&terminal_runtimes)
-                    [state.workspace_picker.selected]
+                !state.workspace_switcher_rows_from(&terminal_runtimes)
+                    [state.workspace_switcher.selected]
                     .is_tab,
                 "{binding} should move up with the configured modifier"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(KeyCode::Char('h'), command_modifiers),
             );
             assert!(
                 !state
-                    .workspace_picker_rows_from(&terminal_runtimes)
+                    .workspace_switcher_rows_from(&terminal_runtimes)
                     .iter()
                     .any(|row| row.ws_idx == initial_ws && row.is_tab),
                 "{binding} should collapse with the configured modifier"
             );
 
-            handle_workspace_picker_key(
+            handle_workspace_switcher_key(
                 &mut state,
                 &terminal_runtimes,
                 KeyEvent::new(KeyCode::Char('s'), command_modifiers),
             );
             assert_eq!(
-                state.workspace_picker.mode,
-                WorkspacePickerMode::QuickSwitchSearch,
+                state.workspace_switcher.mode,
+                WorkspaceSwitcherMode::Search,
                 "{binding} should enter search with the configured modifier"
             );
         }
@@ -2281,53 +2271,53 @@ mod tests {
     fn quick_switch_backward_cycle_uses_explicit_override_when_set() {
         let (mut state, terminal_runtimes, _) =
             state_with_quick_switch_binding("cmd+f13", Some("cmd+f14"));
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::F(13), KeyModifiers::SUPER),
         );
-        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let after_forward = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
         assert_ne!(after_forward, initial_ws);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::F(13), KeyModifiers::SUPER | KeyModifiers::SHIFT),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             after_forward,
             "derived backward shortcut should not apply when an override is set"
         );
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::F(14), KeyModifiers::SUPER),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             initial_ws
         );
     }
     #[test]
     fn quick_switch_shift_press_cycles_backward() {
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
         // Cycle forward first
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
         );
-        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let after_forward = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
         assert_ne!(after_forward, initial_ws);
 
         // Shift press while Ctrl held cycles backward
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2336,7 +2326,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             initial_ws,
             "Shift press while modifier held should cycle backward"
         );
@@ -2344,15 +2334,15 @@ mod tests {
     #[test]
     fn quick_shift_press_with_right_shift_cycles_backward() {
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
         );
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2361,7 +2351,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             initial_ws,
             "Right Shift press should also cycle backward"
         );
@@ -2369,10 +2359,10 @@ mod tests {
     #[test]
     fn quick_switch_command_chars_work_with_shift_held() {
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
         // 'l' with CONTROL | SHIFT should still expand (using .contains())
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2382,14 +2372,14 @@ mod tests {
         );
         assert!(
             state
-                .workspace_picker_rows_from(&terminal_runtimes)
+                .workspace_switcher_rows_from(&terminal_runtimes)
                 .iter()
                 .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
             "expand command should work when Shift is held alongside modifier"
         );
 
         // 'j' with CONTROL | SHIFT should still move down
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2398,13 +2388,14 @@ mod tests {
             ),
         );
         assert!(
-            state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab,
             "move down command should work when Shift is held alongside modifier"
         );
 
         // 'k' with CONTROL | SHIFT should still move up
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2413,13 +2404,14 @@ mod tests {
             ),
         );
         assert!(
-            !state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            !state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab,
             "move up command should work when Shift is held alongside modifier"
         );
 
         // 'h' with CONTROL | SHIFT should still collapse
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2429,14 +2421,14 @@ mod tests {
         );
         assert!(
             !state
-                .workspace_picker_rows_from(&terminal_runtimes)
+                .workspace_switcher_rows_from(&terminal_runtimes)
                 .iter()
                 .any(|row| row.ws_idx == initial_ws && row.is_tab),
             "collapse command should work when Shift is held alongside modifier"
         );
 
         // 's' with CONTROL | SHIFT should still enter search
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2445,8 +2437,8 @@ mod tests {
             ),
         );
         assert_eq!(
-            state.workspace_picker.mode,
-            WorkspacePickerMode::QuickSwitchSearch,
+            state.workspace_switcher.mode,
+            WorkspaceSwitcherMode::Search,
             "search command should work when Shift is held alongside modifier"
         );
     }
@@ -2455,19 +2447,19 @@ mod tests {
         // Shift-press should cycle backward even when an explicit backward override is set
         let (mut state, terminal_runtimes, _) =
             state_with_quick_switch_binding("ctrl+tab", Some("ctrl+shift+tab"));
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
         // Cycle forward first
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
         );
-        let after_forward = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let after_forward = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
         assert_ne!(after_forward, initial_ws);
 
         // Shift press should still cycle backward (native overlay, not configurable)
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2476,7 +2468,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             initial_ws,
             "Shift press should cycle backward even with explicit backward override"
         );
@@ -2485,9 +2477,9 @@ mod tests {
     fn quick_switch_shift_press_without_modifier_is_noop() {
         // Shift press without the quick-switch modifier held should not cycle
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
-        let initial_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let initial_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2496,7 +2488,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            selected_workspace_picker_ws_idx(&state, &terminal_runtimes),
+            selected_workspace_switcher_ws_idx(&state, &terminal_runtimes),
             initial_ws,
             "Shift press without quick-switch modifier should be a no-op"
         );
@@ -2506,10 +2498,10 @@ mod tests {
         // Picker starts at first non-active workspace in MRU order (workspace 2).
         // Cycle backward once to reach workspace 0, then again to wrap around.
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
-        let start_ws = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let start_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
 
         // First backward: from start_ws → workspace 0
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2517,11 +2509,11 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
         );
-        let after_one = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let after_one = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
         assert_eq!(after_one, 0, "first backward should land at workspace 0");
 
         // Second backward: wrap from workspace 0 to last in MRU order
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2529,7 +2521,7 @@ mod tests {
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ),
         );
-        let after_wrap = selected_workspace_picker_ws_idx(&state, &terminal_runtimes);
+        let after_wrap = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
         assert_ne!(
             after_wrap, start_ws,
             "wrap-around should land on a different workspace"
@@ -2544,7 +2536,7 @@ mod tests {
         let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
 
         // Expand workspace so tab rows are visible for arrow navigation
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(
@@ -2554,25 +2546,27 @@ mod tests {
         );
 
         // Down arrow with CONTROL | SHIFT should still move down
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
         );
         assert!(
-            state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab,
             "Down arrow should work when Shift is held alongside modifier"
         );
 
         // Up arrow with CONTROL | SHIFT should still move up
-        handle_workspace_picker_key(
+        handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
             KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
         );
         assert!(
-            !state.workspace_picker_rows_from(&terminal_runtimes)[state.workspace_picker.selected]
+            !state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
                 .is_tab,
             "Up arrow should work when Shift is held alongside modifier"
         );
@@ -2583,7 +2577,7 @@ mod tests {
 
         // Releasing Shift while Ctrl is held should NOT trigger accept
         let accepted = quick_switch_modifier_release_matches(
-            &state.keybinds.quick_switch_workspace,
+            &state.keybinds.workspace_switcher,
             TerminalKey::new(
                 KeyCode::Modifier(ModifierKeyCode::LeftShift),
                 KeyModifiers::empty(),
@@ -2598,8 +2592,8 @@ mod tests {
     #[test]
     fn render_row_shows_state_dot_for_blocked_workspace() {
         let app = AppState::test_new();
-        let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace {
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
                 workspace_id: String::new(),
             },
             ws_idx: 0,
@@ -2620,16 +2614,14 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Span layout: [" ", dot, " ", title]
-        // Non-quick-switch, not selected: " ● test" → dot at position 1
-        assert_eq!(buf[(1, 0)].symbol(), "●");
+        assert_eq!(buf[(3, 0)].symbol(), "●");
     }
 
     #[test]
     fn render_row_shows_state_dot_for_idle_seen_workspace() {
         let app = AppState::test_new();
-        let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace {
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
                 workspace_id: String::new(),
             },
             ws_idx: 0,
@@ -2650,17 +2642,15 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Span layout: [" ", dot, " ", title]
-        // Non-quick-switch, not selected: " ○ test" → dot at position 1
-        assert_eq!(buf[(1, 0)].symbol(), "○");
+        assert_eq!(buf[(3, 0)].symbol(), "○");
     }
 
     #[test]
     fn render_row_shows_quick_switch_indent() {
         let mut app = AppState::test_new();
-        app.workspace_picker.mode = WorkspacePickerMode::QuickSwitch;
-        let row = WorkspacePickerRow {
-            target: WorkspacePickerTarget::Workspace {
+        app.workspace_switcher.mode = WorkspaceSwitcherMode::QuickSwitch;
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
                 workspace_id: String::new(),
             },
             ws_idx: 0,
@@ -2681,7 +2671,7 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        // Quick-switch workspace row, depth=1: "   ▸ ● ws"
+        // Workspace switcher row, depth=1: "   ▸ ● ws"
         // Position 3 is caret "▸" (after leading space + 2-char indent)
         assert_eq!(buf[(3, 0)].symbol(), "▸");
     }

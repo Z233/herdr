@@ -10,7 +10,7 @@ use crate::detect::AgentState;
 use crate::input::TerminalKey;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
-use crate::ui::workspace_picker::WorkspacePickerState;
+use crate::ui::workspace_switcher::WorkspaceSwitcherState;
 
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
@@ -1503,7 +1503,7 @@ pub struct AppState {
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
-    pub workspace_picker: WorkspacePickerState,
+    pub workspace_switcher: WorkspaceSwitcherState,
     pub workspace_mru: Vec<String>,
     pub fork_features: crate::fork_features::ForkFeatureState,
     pub copy_mode: Option<CopyModeState>,
@@ -1869,7 +1869,7 @@ impl AppState {
             product_announcement: None,
             keybind_help: KeybindHelpState::default(),
             navigator: NavigatorState::default(),
-            workspace_picker: Default::default(),
+            workspace_switcher: Default::default(),
             workspace_mru: Vec::new(),
             fork_features: Default::default(),
             copy_mode: None,

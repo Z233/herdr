@@ -157,7 +157,7 @@ pub(crate) fn tab_surface_cursor(
         return None;
     };
 
-    (!app.workspace_picker.active || !app.workspace_picker_popup_contains(cursor.x, cursor.y))
+    (!app.workspace_switcher.active || !app.workspace_switcher_popup_contains(cursor.x, cursor.y))
         .then_some(cursor)
 }
 

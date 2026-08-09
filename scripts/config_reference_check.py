@@ -32,6 +32,18 @@ ROOT_STRUCT = "Config"
 # therefore not enumerable in a flat reference table.
 SKIPPED_SUBTREES = ("keys.command",)
 
+# This fork keeps upstream documentation snapshots unchanged to reduce merge
+# conflicts. These fork-specific key changes are checked by Rust config tests.
+FORK_CONFIG_REFERENCE_EXCLUSIONS = frozenset(
+    {
+        "keys.quick_switch_workspace",
+        "keys.quick_switch_workspace_backward",
+        "keys.workspace_picker",
+        "keys.workspace_switcher",
+        "keys.workspace_switcher_backward",
+    }
+)
+
 FIELD_RE = re.compile(r"^\s*pub ([a-z_][a-z0-9_]*):\s*(.+?),?\s*$")
 STRUCT_RE = re.compile(r"^\s*pub(?:\(crate\))? struct ([A-Za-z0-9_]+)\s*\{\s*$")
 ENUM_RE = re.compile(r"^\s*pub(?:\(crate\))? enum ([A-Za-z0-9_]+)\s*\{\s*$")
@@ -264,8 +276,8 @@ def check(model_root: Path, reference_path: Path) -> list[str]:
     model = parse_model(sorted(model_root.glob("*.rs")))
     code_entries = {entry["key"]: entry for entry in collect_entries(model)}
     doc_entries, errors = reference_entries(reference_path)
-    code_keys = set(code_entries)
-    doc_keys = set(doc_entries)
+    code_keys = set(code_entries) - FORK_CONFIG_REFERENCE_EXCLUSIONS
+    doc_keys = set(doc_entries) - FORK_CONFIG_REFERENCE_EXCLUSIONS
 
     for missing in sorted(code_keys - doc_keys):
         errors.append(f"{missing}: in src/config but missing from {reference_path}")

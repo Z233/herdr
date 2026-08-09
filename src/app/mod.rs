@@ -568,7 +568,7 @@ impl App {
             }),
             keybind_help: state::KeybindHelpState::default(),
             navigator: state::NavigatorState::default(),
-            workspace_picker: Default::default(),
+            workspace_switcher: Default::default(),
             workspace_mru: Vec::new(),
             fork_features: Default::default(),
             copy_mode: None,
@@ -1590,7 +1590,7 @@ impl App {
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))
-        } else if self.state.mode == Mode::Terminal && !self.state.workspace_picker.active {
+        } else if self.state.mode == Mode::Terminal && !self.state.workspace_switcher.active {
             Some(TerminalInputContext::Pane)
         } else {
             None
@@ -1741,7 +1741,7 @@ impl App {
                 }
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.try_route_paste_to_popup(&text) {
-                    } else if crate::ui::workspace_picker::paste_workspace_picker_query(
+                    } else if crate::ui::workspace_switcher::paste_workspace_switcher_query(
                         &mut self.state,
                         &self.terminal_runtimes,
                         &text,
@@ -1811,8 +1811,8 @@ impl App {
             return;
         }
 
-        if self.state.workspace_picker.active {
-            crate::ui::workspace_picker::handle_workspace_picker_key(
+        if self.state.workspace_switcher.active {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
                 &mut self.state,
                 &self.terminal_runtimes,
                 key_event,
@@ -5203,10 +5203,11 @@ last_pane = "prefix+tab"
             true,
         );
 
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
         assert_eq!(
-            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
-                [app.state.workspace_picker.selected]
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
                 .ws_idx,
             1
         );
@@ -5220,7 +5221,7 @@ last_pane = "prefix+tab"
             )],
             true,
         );
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
 
         // Press-side cycling continuity: pressing Tab again while Ctrl held still cycles.
         app.route_client_events(
@@ -5232,8 +5233,9 @@ last_pane = "prefix+tab"
             true,
         );
         assert_eq!(
-            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
-                [app.state.workspace_picker.selected]
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
                 .ws_idx,
             0
         );
@@ -5266,7 +5268,7 @@ last_pane = "prefix+tab"
 
         for (binding, modifiers, release_code) in cases {
             let config: Config =
-                toml::from_str(&format!("[keys]\nquick_switch_workspace = {binding:?}\n"))
+                toml::from_str(&format!("[keys]\nworkspace_switcher = {binding:?}\n"))
                     .expect("quick switch config should parse");
             let mut app = test_app();
             app.state.keybinds = config.keybinds();
@@ -5281,21 +5283,21 @@ last_pane = "prefix+tab"
                 vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Press)],
                 true,
             );
-            assert!(app.state.workspace_picker.active, "{binding}");
+            assert!(app.state.workspace_switcher.active, "{binding}");
 
             // Releasing the cycle key while the modifier is held should NOT close the picker.
             app.route_client_events(
                 vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Release)],
                 true,
             );
-            assert!(app.state.workspace_picker.active, "{binding}");
+            assert!(app.state.workspace_switcher.active, "{binding}");
 
             // Press-side cycling continuity: pressing Tab again while modifier held still cycles.
             app.route_client_events(
                 vec![raw_key(KeyCode::Tab, modifiers, KeyEventKind::Press)],
                 true,
             );
-            assert!(app.state.workspace_picker.active, "{binding}");
+            assert!(app.state.workspace_switcher.active, "{binding}");
 
             app.route_client_events(
                 vec![raw_key(
@@ -5335,7 +5337,7 @@ last_pane = "prefix+tab"
             ))
             .await;
         assert!(press_handled);
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
 
         let cycle_handled = app
             .handle_raw_input_event(raw_key(
@@ -5346,8 +5348,9 @@ last_pane = "prefix+tab"
             .await;
         assert!(cycle_handled);
         assert_eq!(
-            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
-                [app.state.workspace_picker.selected]
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
                 .ws_idx,
             0
         );
@@ -5361,7 +5364,7 @@ last_pane = "prefix+tab"
             ))
             .await;
         assert!(!cycle_release_handled);
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
 
         // Press-side cycling continuity: pressing Tab again while Ctrl held still cycles.
         let repress_handled = app
@@ -5373,12 +5376,13 @@ last_pane = "prefix+tab"
             .await;
         assert!(repress_handled);
         assert_eq!(
-            app.state.workspace_picker_rows_from(&app.terminal_runtimes)
-                [app.state.workspace_picker.selected]
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
                 .ws_idx,
             2
         );
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
 
         let unrelated_release_handled = app
             .handle_raw_input_event(raw_key(
@@ -5388,7 +5392,7 @@ last_pane = "prefix+tab"
             ))
             .await;
         assert!(!unrelated_release_handled);
-        assert!(app.state.workspace_picker.active);
+        assert!(app.state.workspace_switcher.active);
 
         let release_handled = app
             .handle_raw_input_event(raw_key(

@@ -324,13 +324,9 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
-            NavigateAction::WorkspacePicker => {
+            NavigateAction::WorkspaceSwitcher => {
                 self.state
-                    .open_workspace_picker_from(&self.terminal_runtimes);
-            }
-            NavigateAction::QuickSwitchWorkspace => {
-                self.state
-                    .open_quick_switch_workspace_from(&self.terminal_runtimes);
+                    .open_workspace_switcher_from(&self.terminal_runtimes);
             }
             NavigateAction::PreviousWorkspace => {
                 if let Some(ws_idx) = self.relative_visible_workspace(-1) {
@@ -1298,11 +1294,7 @@ fn navigation_action_binding_match<T>(
     for (bindings, action) in [
         (&kb.help, NavigateAction::Help),
         (&kb.settings, NavigateAction::Settings),
-        (&kb.workspace_picker, NavigateAction::WorkspacePicker),
-        (
-            &kb.quick_switch_workspace,
-            NavigateAction::QuickSwitchWorkspace,
-        ),
+        (&kb.workspace_switcher, NavigateAction::WorkspaceSwitcher),
         (&kb.new_workspace, NavigateAction::NewWorkspace),
         (&kb.new_worktree, NavigateAction::NewWorktree),
         (&kb.open_worktree, NavigateAction::OpenWorktree),
@@ -1569,8 +1561,7 @@ pub(crate) enum NavigateAction {
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
-    WorkspacePicker,
-    QuickSwitchWorkspace,
+    WorkspaceSwitcher,
     PreviousWorkspace,
     NextWorkspace,
     PreviousAgent,
@@ -1838,11 +1829,8 @@ pub(super) fn execute_navigate_action_in_context(
                 leave_navigate_mode(state);
             }
         }
-        NavigateAction::WorkspacePicker => {
-            state.open_workspace_picker_from(terminal_runtimes);
-        }
-        NavigateAction::QuickSwitchWorkspace => {
-            state.open_quick_switch_workspace_from(terminal_runtimes);
+        NavigateAction::WorkspaceSwitcher => {
+            state.open_workspace_switcher_from(terminal_runtimes);
         }
         NavigateAction::PreviousWorkspace => {
             state.previous_workspace();
@@ -2187,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn default_workspace_picker_key_opens_workspace_picker() {
+    fn navigate_w_does_not_open_workspace_switcher() {
         let mut state = state_with_workspaces(&["test"]);
 
         handle_navigate_key(
@@ -2195,7 +2183,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('w'), KeyModifiers::empty()),
         );
 
-        assert!(state.workspace_picker.active);
+        assert!(!state.workspace_switcher.active);
     }
 
     #[test]
@@ -2800,7 +2788,7 @@ navigate_pane_right = "ctrl+l"
     }
 
     #[test]
-    fn terminal_direct_quick_switch_workspace_shortcut_maps_to_navigation_action() {
+    fn terminal_direct_workspace_switcher_shortcut_maps_to_navigation_action() {
         let state = state_with_workspaces(&["test"]);
 
         let action = terminal_direct_navigation_action(
@@ -2808,11 +2796,11 @@ navigate_pane_right = "ctrl+l"
             TerminalKey::new(KeyCode::Tab, KeyModifiers::CONTROL),
         );
 
-        assert_eq!(action, Some(NavigateAction::QuickSwitchWorkspace));
+        assert_eq!(action, Some(NavigateAction::WorkspaceSwitcher));
     }
 
     #[test]
-    fn terminal_direct_quick_switch_workspace_shortcut_uses_configured_key() {
+    fn terminal_direct_workspace_switcher_shortcut_uses_configured_key() {
         let cases = [
             ("cmd+tab", KeyCode::Tab, KeyModifiers::SUPER),
             ("cmd+f13", KeyCode::F(13), KeyModifiers::SUPER),
@@ -2821,19 +2809,15 @@ navigate_pane_right = "ctrl+l"
 
         for (binding, code, modifiers) in cases {
             let config: Config =
-                toml::from_str(&format!("[keys]\nquick_switch_workspace = {binding:?}\n"))
-                    .expect("quick switch config should parse");
+                toml::from_str(&format!("[keys]\nworkspace_switcher = {binding:?}\n"))
+                    .expect("workspace switcher config should parse");
             let mut state = state_with_workspaces(&["test"]);
             state.keybinds = config.keybinds();
 
             let action =
                 terminal_direct_navigation_action(&state, TerminalKey::new(code, modifiers));
 
-            assert_eq!(
-                action,
-                Some(NavigateAction::QuickSwitchWorkspace),
-                "{binding}"
-            );
+            assert_eq!(action, Some(NavigateAction::WorkspaceSwitcher), "{binding}");
         }
     }
 
@@ -3302,6 +3286,27 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[tokio::test]
+    async fn prefix_w_timeout_is_a_noop() {
+        let (mut app, _) = app_with_two_panes_for_chord();
+
+        app.handle_key(TerminalKey::new(
+            app.state.prefix_code,
+            app.state.prefix_mods,
+        ))
+        .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
+            .await;
+
+        let deadline = app.chord_deadline.expect("chord should be pending");
+        assert!(app.handle_scheduled_tasks(deadline + Duration::from_millis(1), false));
+
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
+    }
+
+    #[tokio::test]
     async fn prefix_chord_unmatched_key_cancels_sequence() {
         let (mut app, _) = app_with_two_panes_for_chord();
 
@@ -3333,7 +3338,7 @@ navigate_pane_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()))
             .await;
 
-        assert!(app.state.workspace_picker.active);
+        assert!(!app.state.workspace_switcher.active);
         assert!(app.state.pending_chord.is_none());
         assert!(app.chord_deadline.is_none());
     }
@@ -3455,12 +3460,15 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[tokio::test]
-    async fn default_workspace_picker_chord_opens_picker_from_w_leader() {
+    async fn prefix_w_w_is_a_noop() {
         let (mut app, _) = app_with_runtime_workspace_for_split();
 
         press_open_pane_chord(&mut app, 'w').await;
 
-        assert!(app.state.workspace_picker.active);
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.state.pending_chord.is_none());
+        assert!(app.chord_deadline.is_none());
     }
 
     #[tokio::test]

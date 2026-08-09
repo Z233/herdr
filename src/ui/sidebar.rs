@@ -301,7 +301,7 @@ pub(crate) fn grouped_child_display_label(
 /// Returns `true` if the workspace at `ws_idx` is a grouped child — a linked
 /// worktree whose `worktree_space()` key has ≥2 members with at least one
 /// non-linked (parent) worktree. This mirrors the `indented` condition in
-/// [`workspace_list_entries`] so the workspace picker can apply the same
+/// [`workspace_list_entries`] so the workspace switcher can apply the same
 /// [`grouped_child_display_label`] substitution as the sidebar.
 pub(crate) fn is_grouped_child_worktree(app: &AppState, ws_idx: usize) -> bool {
     let Some(ws) = app.workspaces.get(ws_idx) else {

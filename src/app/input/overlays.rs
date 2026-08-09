@@ -190,8 +190,8 @@ impl App {
             return true;
         }
 
-        if self.state.workspace_picker.active {
-            crate::ui::workspace_picker::handle_workspace_picker_mouse(
+        if self.state.workspace_switcher.active {
+            crate::ui::workspace_switcher::handle_workspace_switcher_mouse(
                 &mut self.state,
                 &self.terminal_runtimes,
                 mouse,

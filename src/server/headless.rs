@@ -8934,14 +8934,14 @@ next_tab = ""
     }
 
     #[derive(Clone, Copy)]
-    enum PickerTestMode {
-        Search,
+    enum WorkspaceSwitcherTestMode {
         QuickSwitch,
+        Search,
     }
 
-    fn assert_workspace_picker_isolates_live_terminal_updates(
+    fn assert_workspace_switcher_isolates_live_terminal_updates(
         render_encoding: RenderEncoding,
-        picker_mode: PickerTestMode,
+        mode: WorkspaceSwitcherTestMode,
     ) {
         let (mut server, client_rx, pane_id) =
             retained_test_server_with_encoding(b"ACTIVE_SNAPSHOT", render_encoding);
@@ -8955,32 +8955,29 @@ next_tab = ""
         );
         server.app.state.workspaces.push(preview_workspace);
 
-        match picker_mode {
-            PickerTestMode::Search => server
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        if matches!(mode, WorkspaceSwitcherTestMode::Search) {
+            server
                 .app
                 .state
-                .open_workspace_picker_from(&server.app.terminal_runtimes),
-            PickerTestMode::QuickSwitch => server
-                .app
-                .state
-                .open_quick_switch_workspace_from(&server.app.terminal_runtimes),
+                .enter_workspace_switcher_search_from(&server.app.terminal_runtimes);
         }
 
-        let expected_preview = match picker_mode {
-            PickerTestMode::Search => "ACTIVE_SNAPSHOT",
-            PickerTestMode::QuickSwitch => "SELECTED_PREVIEW",
-        };
+        let expected_preview = "SELECTED_PREVIEW";
         let mut decoder = StreamedFrameDecoder::default();
         server.render_and_stream();
         let initial = decoder.decode(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("initial picker frame"),
+                .expect("initial switcher frame"),
         );
-        let preview = server.app.state.workspace_picker_preview_rect();
+        let preview = server.app.state.workspace_switcher_preview_rect();
         assert!(frame_rect_text(&initial, preview).contains(expected_preview));
 
-        let popup = server.app.state.workspace_picker_popup_rect();
+        let popup = server.app.state.workspace_switcher_popup_rect();
         let pane = server.app.state.view.pane_infos[0].inner_rect;
         let panel_marker = "PANEL_UPDATE";
         let panel_x = pane.x.max(popup.x.saturating_add(2));
@@ -9026,57 +9023,70 @@ next_tab = ""
         let updated = decoder.decode(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("updated picker frame"),
+                .expect("updated switcher frame"),
         );
         assert!(!frame_text(&updated).contains(panel_marker));
         assert!(frame_text(&updated).contains(outside_marker));
         assert!(frame_rect_text(&updated, preview).contains(expected_preview));
         assert!(!updated.cursor.as_ref().is_some_and(|cursor| cursor.visible));
 
-        crate::ui::workspace_picker::handle_workspace_picker_key(
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
             &mut server.app.state,
             &server.app.terminal_runtimes,
             crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),
         );
+        if matches!(mode, WorkspaceSwitcherTestMode::Search) {
+            assert!(server.app.state.workspace_switcher.active);
+            assert_eq!(
+                server.app.state.workspace_switcher.mode,
+                crate::ui::workspace_switcher::WorkspaceSwitcherMode::QuickSwitch
+            );
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut server.app.state,
+                &server.app.terminal_runtimes,
+                crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),
+            );
+        }
+        assert!(!server.app.state.workspace_switcher.active);
         server.render_and_stream();
         let closed = decoder.decode(
             client_rx
                 .recv_timeout(Duration::from_millis(100))
-                .expect("closed picker frame"),
+                .expect("closed switcher frame"),
         );
         assert!(frame_text(&closed).contains(panel_marker));
         assert!(frame_text(&closed).contains(outside_marker));
     }
 
     #[tokio::test]
-    async fn semantic_search_picker_isolates_live_terminal_updates() {
-        assert_workspace_picker_isolates_live_terminal_updates(
+    async fn semantic_workspace_switcher_quick_switch_isolates_live_terminal_updates() {
+        assert_workspace_switcher_isolates_live_terminal_updates(
             RenderEncoding::SemanticFrame,
-            PickerTestMode::Search,
+            WorkspaceSwitcherTestMode::QuickSwitch,
         );
     }
 
     #[tokio::test]
-    async fn terminal_ansi_search_picker_isolates_live_terminal_updates() {
-        assert_workspace_picker_isolates_live_terminal_updates(
+    async fn terminal_ansi_workspace_switcher_quick_switch_isolates_live_terminal_updates() {
+        assert_workspace_switcher_isolates_live_terminal_updates(
             RenderEncoding::TerminalAnsi,
-            PickerTestMode::Search,
+            WorkspaceSwitcherTestMode::QuickSwitch,
         );
     }
 
     #[tokio::test]
-    async fn semantic_quick_switch_picker_isolates_live_terminal_updates() {
-        assert_workspace_picker_isolates_live_terminal_updates(
+    async fn semantic_workspace_switcher_search_isolates_live_terminal_updates() {
+        assert_workspace_switcher_isolates_live_terminal_updates(
             RenderEncoding::SemanticFrame,
-            PickerTestMode::QuickSwitch,
+            WorkspaceSwitcherTestMode::Search,
         );
     }
 
     #[tokio::test]
-    async fn terminal_ansi_quick_switch_picker_isolates_live_terminal_updates() {
-        assert_workspace_picker_isolates_live_terminal_updates(
+    async fn terminal_ansi_workspace_switcher_search_isolates_live_terminal_updates() {
+        assert_workspace_switcher_isolates_live_terminal_updates(
             RenderEncoding::TerminalAnsi,
-            PickerTestMode::QuickSwitch,
+            WorkspaceSwitcherTestMode::Search,
         );
     }
 

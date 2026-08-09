@@ -21,7 +21,7 @@ mod tab_surface;
 mod tabs;
 mod text;
 mod widgets;
-pub(crate) mod workspace_picker;
+pub(crate) mod workspace_switcher;
 
 use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
@@ -64,7 +64,7 @@ pub(crate) use self::tab_surface::{
     compute_tab_surface, render_tab_surface, resize_tab_surface, TabSurfaceLayout,
 };
 use self::tabs::render_tab_bar;
-use self::workspace_picker::render_workspace_picker_overlay;
+use self::workspace_switcher::render_workspace_switcher_overlay;
 pub(crate) use self::{
     dialogs::{
         confirm_close_button_rects, confirm_close_popup_rect, new_linked_worktree_button_rects,
@@ -390,7 +390,7 @@ fn compute_mobile_view(
 
 pub(crate) fn retained_terminal_patch_safe(app: &AppState) -> bool {
     app.mode == Mode::Terminal
-        && !app.workspace_picker.active
+        && !app.workspace_switcher.active
         && app.popup_pane.is_none()
         && app.selection.is_none()
         && app.copy_mode.is_none()
@@ -472,8 +472,8 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::Terminal => {}
     }
-    if app.workspace_picker.active {
-        render_workspace_picker_overlay(app, terminal_runtimes, frame);
+    if app.workspace_switcher.active {
+        render_workspace_switcher_overlay(app, terminal_runtimes, frame);
     }
 }
 
