@@ -156,4 +156,16 @@ pub enum AppEvent {
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
+    /// Background zoxide directory query completed for a Search session.
+    ZoxideQueryCompleted {
+        generation: u64,
+        available: bool,
+        candidates: Vec<crate::app::workspace_search_provider::SearchProviderCandidate>,
+    },
+    /// Background directory preview load completed for a Search session.
+    DirectoryPreviewCompleted {
+        generation: u64,
+        shown_path: std::path::PathBuf,
+        result: std::io::Result<crate::app::workspace_search_provider::DirectoryPreview>,
+    },
 }

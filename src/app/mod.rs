@@ -24,6 +24,7 @@ pub mod state;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+pub(crate) mod workspace_search_provider;
 mod worktrees;
 
 use std::collections::{HashMap, HashSet};
@@ -991,6 +992,50 @@ impl App {
                 needs_render = true;
             }
 
+            // -- Workspace Switcher Search provider controller --
+
+            // Spawn zoxide query when Search is entered.
+            if self.state.workspace_switcher.search_started {
+                self.state.workspace_switcher.search_started = false;
+                self.start_zoxide_query();
+                needs_render = true;
+            }
+
+            // Spawn directory preview load when requested.
+            if let Some(shown_path) = self.state.workspace_switcher.preview_request.take() {
+                self.start_directory_preview(shown_path);
+                needs_render = true;
+            }
+
+            // Handle pending directory acceptance (focus-or-create).
+            if let Some(pending) = self.state.workspace_switcher.pending_directory.clone() {
+                self.state.workspace_switcher.pending_directory = None;
+                let prev_count = self.state.workspaces.len();
+                self.runtime_workspace_create(
+                    "tui.workspace.create_cwd",
+                    crate::api::schema::WorkspaceCreateParams {
+                        cwd: Some(pending.shown_path.display().to_string()),
+                        focus: true,
+                        label: None,
+                        env: Default::default(),
+                    },
+                );
+                if self.state.workspaces.len() > prev_count {
+                    // Success: workspace was created and focused (focus: true).
+                    self.state.workspace_switcher.active = false;
+                    self.state.mode = Mode::Terminal;
+                } else {
+                    // Failure: keep Search open with an inline error.
+                    self.state.workspace_switcher.search_error =
+                        Some(format!("Could not open {}", pending.shown_path.display()));
+                    self.state.workspace_switcher.preview =
+                        crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Empty {
+                            message: format!("Could not open {}", pending.shown_path.display()),
+                        };
+                }
+                needs_render = true;
+            }
+
             if let Some(cwd) = self.state.request_new_workspace_cwd.take() {
                 self.runtime_workspace_create(
                     "tui.workspace.create_cwd",
@@ -1587,6 +1632,54 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
+    /// Check zoxide availability and spawn the background query for the
+    /// current Search session. Called when the `search_started` flag is set.
+    pub(crate) fn start_zoxide_query(&mut self) {
+        let generation = self.state.workspace_switcher.search_generation;
+        if !crate::app::workspace_search_provider::zoxide_available() {
+            self.state.workspace_switcher.provider_status =
+                crate::app::workspace_search_provider::SearchProviderStatus::Unavailable;
+            return;
+        }
+        self.state.workspace_switcher.provider_status =
+            crate::app::workspace_search_provider::SearchProviderStatus::Loading;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::app::workspace_search_provider::run_zoxide_query(
+                "zoxide",
+                std::time::Duration::from_secs(2),
+            );
+            let _ = event_tx.blocking_send(crate::events::AppEvent::ZoxideQueryCompleted {
+                generation,
+                available: result.available,
+                candidates: result.candidates,
+            });
+        });
+    }
+
+    /// Spawn a background directory preview load for the given shown path.
+    /// Marks the path as Loading in the cache to prevent duplicate requests.
+    pub(crate) fn start_directory_preview(&mut self, shown_path: std::path::PathBuf) {
+        let generation = self.state.workspace_switcher.search_generation;
+        // Mark as loading to prevent duplicate requests.
+        self.state
+            .workspace_switcher
+            .directory_preview_cache
+            .insert(
+                shown_path.clone(),
+                crate::app::workspace_search_provider::DirectoryPreviewState::Loading,
+            );
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::app::workspace_search_provider::read_directory_preview(&shown_path);
+            let _ = event_tx.blocking_send(crate::events::AppEvent::DirectoryPreviewCompleted {
+                generation,
+                shown_path,
+                result,
+            });
+        });
+    }
+
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
         if let Some(popup) = &self.state.popup_pane {
             Some(TerminalInputContext::Popup(popup.terminal_id.clone()))

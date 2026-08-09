@@ -2932,6 +2932,54 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::ZoxideQueryCompleted {
+                generation,
+                available,
+                candidates,
+            } => {
+                if self.workspace_switcher.active
+                    && self.workspace_switcher.mode
+                        == crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search
+                    && self.workspace_switcher.search_generation == generation
+                {
+                    if available {
+                        self.workspace_switcher.provider_status =
+                            crate::app::workspace_search_provider::SearchProviderStatus::Ready;
+                        self.workspace_switcher.provider_candidates = candidates;
+                    } else {
+                        self.workspace_switcher.provider_status =
+                            crate::app::workspace_search_provider::SearchProviderStatus::Unavailable;
+                        self.workspace_switcher.provider_candidates.clear();
+                    }
+                }
+                Vec::new()
+            }
+            AppEvent::DirectoryPreviewCompleted {
+                generation,
+                shown_path,
+                result,
+            } => {
+                if self.workspace_switcher.active
+                    && self.workspace_switcher.mode
+                        == crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search
+                    && self.workspace_switcher.search_generation == generation
+                {
+                    let state = match result {
+                        Ok(preview) => {
+                            crate::app::workspace_search_provider::DirectoryPreviewState::Ready(
+                                preview,
+                            )
+                        }
+                        Err(_) => {
+                            crate::app::workspace_search_provider::DirectoryPreviewState::Error
+                        }
+                    };
+                    self.workspace_switcher
+                        .directory_preview_cache
+                        .insert(shown_path, state);
+                }
+                Vec::new()
+            }
         }
     }
 

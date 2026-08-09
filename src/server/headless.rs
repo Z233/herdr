@@ -899,6 +899,48 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
         }
 
+        // -- Workspace Switcher Search provider controller (headless) --
+
+        if self.app.state.workspace_switcher.search_started {
+            self.app.state.workspace_switcher.search_started = false;
+            self.app.start_zoxide_query();
+            needs_render = true;
+        }
+
+        if let Some(shown_path) = self.app.state.workspace_switcher.preview_request.take() {
+            self.app.start_directory_preview(shown_path);
+            needs_render = true;
+        }
+
+        if let Some(pending) = self.app.state.workspace_switcher.pending_directory.clone() {
+            self.app.state.workspace_switcher.pending_directory = None;
+            let response = self.headless_workspace_create(
+                "headless.workspace.create_cwd",
+                Some(pending.shown_path.display().to_string()),
+                None,
+            );
+            if response.is_ok() {
+                self.app.state.workspace_switcher.active = false;
+                self.app.state.mode = app::Mode::Terminal;
+            } else {
+                if let Err(error) = &response {
+                    tracing::error!(
+                        code = %error.code,
+                        message = %error.message,
+                        "failed to create workspace at directory"
+                    );
+                }
+                self.app.state.workspace_switcher.search_error =
+                    Some(format!("Could not open {}", pending.shown_path.display()));
+                self.app.state.workspace_switcher.preview =
+                    crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Empty {
+                        message: format!("Could not open {}", pending.shown_path.display()),
+                    };
+            }
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_directory_accept");
+        }
+
         if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
             let response = self.headless_workspace_create(
                 "headless.workspace.create_cwd",
