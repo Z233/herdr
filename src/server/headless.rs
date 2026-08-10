@@ -737,6 +737,18 @@ impl HeadlessServer {
                     crate::render_prof::event("full_render.invoke");
                     self.render_and_stream();
                 }
+                // After the frame is streamed to clients, mark the Opening…
+                // preview as rendered so the deferred create can fire on
+                // the next iteration.
+                if self
+                    .app
+                    .state
+                    .workspace_switcher
+                    .pending_directory
+                    .is_some()
+                {
+                    self.app.state.workspace_switcher.pending_directory_rendered = true;
+                }
                 self.app.last_render_at = Some(now);
                 needs_render = false;
                 needs_full_render = false;

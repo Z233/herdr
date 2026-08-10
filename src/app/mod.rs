@@ -1167,6 +1167,13 @@ impl App {
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
                 }
+                // After the frame is drawn, mark the Opening… preview as
+                // rendered so the deferred create can fire on the next
+                // run-loop iteration. This guarantees at least one visible
+                // Opening frame before workspace.create runs.
+                if self.state.workspace_switcher.pending_directory.is_some() {
+                    self.state.workspace_switcher.pending_directory_rendered = true;
+                }
                 self.last_render_at = Some(now);
                 needs_render = false;
                 continue;
@@ -1662,10 +1669,11 @@ impl App {
     /// Spawn the background zoxide query for the current Search session.
     /// Called when the `search_started` flag is set. The background thread
     /// attempts to spawn zoxide; if the spawn succeeds it emits
-    /// `ZoxideQueryStarted` (so the UI shows Loading only after a confirmed
-    /// spawn), then reads output and emits `ZoxideQueryCompleted`. If the
-    /// spawn fails it emits only `ZoxideQueryCompleted { available: false }`,
-    /// so there is no Loading flash for a missing or non-executable binary.
+    /// `ZoxideQueryStarted` immediately (mid-query, so the UI shows Loading
+    /// while the query runs), then reads output and emits
+    /// `ZoxideQueryCompleted`. If the spawn fails it emits only
+    /// `ZoxideQueryCompleted { available: false }`, so there is no Loading
+    /// flash for a missing or non-executable binary.
     pub(crate) fn start_zoxide_query(&mut self) {
         let generation = self.state.workspace_switcher.search_generation;
         let event_tx = self.event_tx.clone();
@@ -1673,11 +1681,11 @@ impl App {
             let result = crate::app::workspace_search_provider::run_zoxide_query(
                 "zoxide",
                 std::time::Duration::from_secs(2),
+                || {
+                    let _ = event_tx
+                        .blocking_send(crate::events::AppEvent::ZoxideQueryStarted { generation });
+                },
             );
-            if result.available {
-                let _ = event_tx
-                    .blocking_send(crate::events::AppEvent::ZoxideQueryStarted { generation });
-            }
             let _ = event_tx.blocking_send(crate::events::AppEvent::ZoxideQueryCompleted {
                 generation,
                 available: result.available,
@@ -6778,5 +6786,158 @@ last_pane = "prefix+tab"
             &input[events[1].start..events[1].start + events[1].len],
             b"a"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Correction 4: Controller focus/failure path tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recheck_directory_focus_focuses_already_open_workspace() {
+        use crate::ui::workspace_switcher::PendingDirectoryAccept;
+        use crate::workspace::Workspace;
+
+        let dir = unique_temp_path("recheck-focus");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let canonical = std::fs::canonicalize(&dir).expect("canonicalize");
+
+        let mut app = test_app();
+        let mut ws = Workspace::test_new("test-ws");
+        ws.identity_cwd = canonical.clone();
+        ws.cached_identity_cwd = canonical.clone();
+        app.state.workspaces.push(ws);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        // Open the switcher and enter search so state is set up.
+        let tr = crate::terminal::TerminalRuntimeRegistry::new();
+        app.state.open_workspace_switcher_from(&tr);
+        app.state.enter_workspace_switcher_search_from(&tr);
+        app.refresh_workspace_canonical_snapshot();
+
+        let pending = PendingDirectoryAccept {
+            shown_path: canonical.clone(),
+            canonical_path: canonical,
+        };
+        let focused = app.recheck_directory_focus(&pending);
+        assert!(focused);
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        // Clean up the runtime.
+        if let Some(tid) = app.state.workspaces[0]
+            .terminal_id(app.state.workspaces[0].tabs[0].root_pane)
+            .cloned()
+        {
+            app.shutdown_terminal_runtime(tid);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recheck_directory_focus_returns_false_for_unopened_path() {
+        use crate::ui::workspace_switcher::PendingDirectoryAccept;
+
+        let dir = unique_temp_path("recheck-nofocus");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let canonical = std::fs::canonicalize(&dir).expect("canonicalize");
+
+        let mut app = test_app();
+        // No workspaces at all, so nothing can match.
+        let tr = crate::terminal::TerminalRuntimeRegistry::new();
+        app.state.open_workspace_switcher_from(&tr);
+        app.state.enter_workspace_switcher_search_from(&tr);
+        app.refresh_workspace_canonical_snapshot();
+
+        let pending = PendingDirectoryAccept {
+            shown_path: canonical.clone(),
+            canonical_path: canonical,
+        };
+        let focused = app.recheck_directory_focus(&pending);
+        assert!(!focused);
+        // Search stays open.
+        assert!(app.state.workspace_switcher.active);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_directory_acceptance_success_closes_search() {
+        use crate::ui::workspace_switcher::PendingDirectoryAccept;
+
+        let dir = unique_temp_path("finalize-ok");
+        let canonical = std::path::PathBuf::from(&dir);
+
+        let mut app = test_app();
+        app.state.workspace_switcher.active = true;
+        app.state.workspace_switcher.mode =
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search;
+        app.state.workspace_switcher.provider_candidates = vec![
+            crate::app::workspace_search_provider::SearchProviderCandidate {
+                shown_path: canonical.clone(),
+                canonical_path: canonical.clone(),
+                score: 10.0,
+            },
+        ];
+
+        let pending = PendingDirectoryAccept {
+            shown_path: canonical.clone(),
+            canonical_path: canonical,
+        };
+        app.finalize_directory_acceptance(&pending, true);
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn finalize_directory_acceptance_failure_removes_candidate_and_shows_error() {
+        use crate::ui::workspace_switcher::PendingDirectoryAccept;
+
+        let bad_dir = unique_temp_path("finalize-bad");
+        let bad_canonical = std::path::PathBuf::from(&bad_dir);
+        let good_dir = unique_temp_path("finalize-good");
+        let good_canonical = std::path::PathBuf::from(&good_dir);
+
+        let mut app = test_app();
+        app.state.workspace_switcher.active = true;
+        app.state.mode = Mode::Terminal;
+        app.state.workspace_switcher.mode =
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search;
+        app.state.workspace_switcher.provider_candidates = vec![
+            crate::app::workspace_search_provider::SearchProviderCandidate {
+                shown_path: bad_canonical.clone(),
+                canonical_path: bad_canonical.clone(),
+                score: 10.0,
+            },
+            crate::app::workspace_search_provider::SearchProviderCandidate {
+                shown_path: good_canonical.clone(),
+                canonical_path: good_canonical.clone(),
+                score: 5.0,
+            },
+        ];
+
+        let pending = PendingDirectoryAccept {
+            shown_path: bad_canonical.clone(),
+            canonical_path: bad_canonical,
+        };
+        app.finalize_directory_acceptance(&pending, false);
+
+        // Search stays open.
+        assert!(app.state.workspace_switcher.active);
+        // The failed candidate is removed.
+        assert_eq!(app.state.workspace_switcher.provider_candidates.len(), 1);
+        assert_eq!(
+            app.state.workspace_switcher.provider_candidates[0].canonical_path,
+            good_canonical
+        );
+        // Inline error is set.
+        assert!(app.state.workspace_switcher.search_error.is_some());
+        assert!(app
+            .state
+            .workspace_switcher
+            .search_error
+            .as_ref()
+            .unwrap()
+            .contains("Could not open"));
     }
 }

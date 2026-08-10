@@ -226,18 +226,7 @@ impl AppState {
                 let Some(ws) = self.workspaces.get(ws_idx) else {
                     continue;
                 };
-                let label = {
-                    let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
-                    if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
-                        crate::ui::sidebar::grouped_child_display_label(
-                            &raw,
-                            ws.branch().as_deref(),
-                            ws.custom_name.is_some(),
-                        )
-                    } else {
-                        raw
-                    }
-                };
+                let label = self.workspace_label(ws_idx, terminal_runtimes);
                 let expanded =
                     include_tabs && self.workspace_switcher.expanded_workspaces.contains(&ws.id);
                 rows.push((
@@ -258,21 +247,7 @@ impl AppState {
         // Search mode with empty query: only workspace MRU rows, no tabs.
         if query.is_empty() {
             for ws_idx in workspace_indices.into_iter() {
-                let Some(ws) = self.workspaces.get(ws_idx) else {
-                    continue;
-                };
-                let label = {
-                    let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
-                    if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
-                        crate::ui::sidebar::grouped_child_display_label(
-                            &raw,
-                            ws.branch().as_deref(),
-                            ws.custom_name.is_some(),
-                        )
-                    } else {
-                        raw
-                    }
-                };
+                let label = self.workspace_label(ws_idx, terminal_runtimes);
                 rows.push((
                     self.workspace_switcher_workspace_row(ws_idx, label, false),
                     (0u8, 0usize),
@@ -351,21 +326,10 @@ impl AppState {
 
         // Workspace rows (optionally enriched with zoxide path matching).
         for (order, &ws_idx) in workspace_indices.iter().enumerate() {
-            let Some(ws) = self.workspaces.get(ws_idx) else {
+            if self.workspaces.get(ws_idx).is_none() {
                 continue;
-            };
-            let label = {
-                let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
-                if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
-                    crate::ui::sidebar::grouped_child_display_label(
-                        &raw,
-                        ws.branch().as_deref(),
-                        ws.custom_name.is_some(),
-                    )
-                } else {
-                    raw
-                }
-            };
+            }
+            let label = self.workspace_label(ws_idx, terminal_runtimes);
 
             // Match workspace name.
             let mut best_rank = workspace_switcher_match_rank(query, &label);
@@ -467,6 +431,29 @@ impl AppState {
             is_directory: true,
             state: crate::detect::AgentState::Idle,
             seen: false,
+        }
+    }
+
+    /// Compute the display label for a workspace, applying grouped-child
+    /// worktree formatting when applicable. Shared by QuickSwitch, empty-query,
+    /// and Search row builders.
+    fn workspace_label(
+        &self,
+        ws_idx: usize,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> String {
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return String::new();
+        };
+        let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
+        if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
+            crate::ui::sidebar::grouped_child_display_label(
+                &raw,
+                ws.branch().as_deref(),
+                ws.custom_name.is_some(),
+            )
+        } else {
+            raw
         }
     }
 
@@ -842,9 +829,10 @@ impl AppState {
             self.workspace_switcher.preview = WorkspaceSwitcherPreview::Opening {
                 shown_path: pending.shown_path.clone(),
             };
-            // Mark as rendered so the App controller knows it can proceed
-            // with workspace.create on the next run-loop turn.
-            self.workspace_switcher.pending_directory_rendered = true;
+            // Note: pending_directory_rendered is NOT set here. It is set
+            // by the App controller only after an actual frame draw
+            // completes, so the user sees at least one Opening frame before
+            // workspace.create fires.
             return;
         }
 
@@ -3570,7 +3558,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_accept_focuses_when_now_open() {
+    fn directory_accept_records_pending_target() {
         let dir = std::env::temp_dir().join(format!("herdr-switcher-focus-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create dir");
@@ -3590,15 +3578,17 @@ mod tests {
         state.enter_workspace_switcher_search_from(&terminal_runtimes);
 
         // In the new architecture, accept_directory_from records the pending
-        // target only — it does NOT perform the canonical recheck. The App
-        // controller's recheck_directory_focus does that.
+        // target only — it does NOT perform the canonical recheck or set
+        // pending_directory_rendered. The App controller does that after
+        // a render boundary.
         let accepted =
             state.accept_directory_from(&terminal_runtimes, canonical.clone(), canonical.clone());
         assert!(accepted);
         // Switcher stays open; pending_directory is set.
         assert!(state.workspace_switcher.active);
         assert!(state.workspace_switcher.pending_directory.is_some());
-        assert!(state.workspace_switcher.pending_directory_rendered);
+        // The rendered flag is NOT set yet (only set after a frame draw).
+        assert!(!state.workspace_switcher.pending_directory_rendered);
         // The preview shows Opening…
         assert!(matches!(
             state.workspace_switcher.preview,
@@ -3958,7 +3948,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn opening_preview_sets_rendered_flag() {
+    fn opening_preview_deferred_until_after_render_boundary() {
         let mut state = app_with_workspaces(&["main"]);
         enter_search(&mut state);
         state.workspace_switcher.provider_candidates =
@@ -3967,7 +3957,6 @@ mod tests {
         set_query(&mut state, "somedir");
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        // Select the directory row and accept.
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
         let dir_idx = rows.iter().position(|r| r.is_directory).expect("dir row");
         state.workspace_switcher.selected = dir_idx;
@@ -3976,14 +3965,23 @@ mod tests {
 
         assert!(accepted);
         assert!(state.workspace_switcher.pending_directory.is_some());
-        // The refresh_workspace_switcher_preview_from call inside
-        // accept_directory_from sets the Opening… preview and the
-        // pending_directory_rendered flag.
-        assert!(state.workspace_switcher.pending_directory_rendered);
+        // After accept, the preview shows Opening… but the rendered flag
+        // is NOT set yet — it must only be set after an actual frame draw
+        // (which the App controller does after terminal.draw).
+        assert!(!state.workspace_switcher.pending_directory_rendered);
         assert!(matches!(
             state.workspace_switcher.preview,
             crate::ui::workspace_switcher::WorkspaceSwitcherPreview::Opening { .. }
         ));
+
+        // Simulate a render boundary: the controller sets the flag after
+        // the frame is drawn.
+        state.workspace_switcher.pending_directory_rendered = true;
+        // Now the deferred create block would fire on the next iteration.
+        // The flag is consumed and reset by the controller.
+        state.workspace_switcher.pending_directory = None;
+        state.workspace_switcher.pending_directory_rendered = false;
+        assert!(state.workspace_switcher.pending_directory.is_none());
     }
 
     #[test]

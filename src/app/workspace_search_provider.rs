@@ -104,19 +104,22 @@ pub(crate) fn abbreviate_home(path: &Path) -> String {
 
 /// Best-effort home directory resolution. Uses the `HOME` environment
 /// variable on Unix and `USERPROFILE` (falling back to `HOMEDRIVE` +
-/// `HOMEPATH`) on Windows.
+/// `HOMEPATH`) on Windows. Split into cfg-gated bodies to avoid using
+/// `cfg!(windows)` for control flow (AGENTS.md policy).
+#[cfg(not(windows))]
 fn home_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        if let Some(profile) = std::env::var_os("USERPROFILE") {
-            return Some(PathBuf::from(profile));
-        }
-        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
-            return Some(PathBuf::from(format!("{drive}{path}")));
-        }
-        None
-    } else {
-        std::env::var_os("HOME").map(PathBuf::from)
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return Some(PathBuf::from(profile));
     }
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        return Some(PathBuf::from(format!("{drive}{path}")));
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +277,12 @@ pub(crate) struct ZoxideQueryResult {
 /// Tests pass a controlled executable path so they never touch the
 /// developer's zoxide database.
 ///
+/// `on_spawned` is invoked once immediately after a successful spawn,
+/// before polling/draining begins. This lets the caller emit a
+/// `ZoxideQueryStarted` event so the UI shows a Loading state while the
+/// query runs. If the spawn fails, `on_spawned` is never called and the
+/// caller should emit only `ZoxideQueryCompleted { available: false }`.
+///
 /// Returns `available: false` when the binary cannot be spawned. Returns
 /// `available: true` with an empty candidate list on timeout, non-zero
 /// exit, or malformed output — contributing no rows and no error.
@@ -281,7 +290,14 @@ pub(crate) struct ZoxideQueryResult {
 /// Stdout is drained concurrently while waiting for the process to exit,
 /// preventing a pipe-buffer deadlock when the provider emits more data than
 /// the OS pipe capacity.
-pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryResult {
+pub(crate) fn run_zoxide_query<F>(
+    program: &str,
+    timeout: Duration,
+    on_spawned: F,
+) -> ZoxideQueryResult
+where
+    F: FnOnce(),
+{
     let mut child = match crate::noninteractive_process::command(program)
         .args(["query", "--list", "--score"])
         .stdout(Stdio::piped())
@@ -297,6 +313,10 @@ pub(crate) fn run_zoxide_query(program: &str, timeout: Duration) -> ZoxideQueryR
             }
         }
     };
+
+    // Notify the caller that the process spawned successfully, so Loading
+    // can be shown while the query runs.
+    on_spawned();
 
     // Drain stdout in a separate thread so the child cannot block on a
     // full pipe buffer while we are polling for exit.
@@ -623,7 +643,7 @@ mod tests {
         );
         let fake = write_fake_zoxide("valid", &script);
 
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(result.available);
         assert_eq!(result.candidates.len(), 2);
         // The existing directory is canonicalized; the stale one keeps its path.
@@ -641,7 +661,7 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("herdr-zoxide-missing-{}", std::process::id()));
         let _ = fs::remove_file(&missing);
-        let result = run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(!result.available);
         assert!(result.candidates.is_empty());
     }
@@ -654,7 +674,7 @@ mod tests {
         let fake = dir.path().join("not-zoxide");
         fs::write(&fake, "#!/bin/sh\necho should-not-run\n").expect("write fake");
         // Leave permissions as 0o644 (not executable).
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(!result.available);
         assert!(result.candidates.is_empty());
     }
@@ -665,7 +685,7 @@ mod tests {
         // A script that sleeps longer than the timeout.
         let fake = write_fake_zoxide("slow", "sleep 10");
         let start = Instant::now();
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_millis(200));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_millis(200), || {});
         let elapsed = start.elapsed();
         assert!(result.available);
         assert!(result.candidates.is_empty());
@@ -677,7 +697,7 @@ mod tests {
     #[test]
     fn run_zoxide_query_returns_empty_on_nonzero_exit() {
         let fake = write_fake_zoxide("fail", "echo '100.0 /should-not-appear' >&2; exit 1");
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(result.available);
         assert!(result.candidates.is_empty());
     }
@@ -686,7 +706,7 @@ mod tests {
     #[test]
     fn run_zoxide_query_returns_empty_on_malformed_output() {
         let fake = write_fake_zoxide("malformed", "printf 'garbage no score\nbroken\n'");
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(result.available);
         assert!(result.candidates.is_empty());
     }
@@ -711,7 +731,7 @@ mod tests {
         );
         let fake = write_fake_zoxide("dedup", &script);
 
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
         assert!(result.available);
         assert_eq!(result.candidates.len(), 1);
         // Highest-score alias wins.
@@ -737,7 +757,7 @@ mod tests {
         let fake = write_fake_zoxide("large", &script);
 
         let start = Instant::now();
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(10));
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(10), || {});
         let elapsed = start.elapsed();
 
         assert!(result.available);
@@ -747,5 +767,38 @@ mod tests {
         assert_eq!(result.candidates[0].canonical_path, canonical);
         // Must finish well before the timeout — no deadlock.
         assert!(elapsed < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_zoxide_query_calls_on_spawned_after_successful_spawn() {
+        let dir = TestDir::new("zoxide-callback");
+        let real = dir.path().join("real");
+        fs::create_dir(&real).expect("mkdir real");
+        let script = format!("printf '100.0 {}\n'", real.display());
+        let fake = write_fake_zoxide("callback", &script);
+
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawned_clone = spawned.clone();
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {
+            spawned_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(result.available);
+        assert!(spawned.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_zoxide_query_does_not_call_on_spawned_for_missing_binary() {
+        let missing =
+            std::env::temp_dir().join(format!("herdr-zoxide-missing-cb-{}", std::process::id()));
+        let _ = fs::remove_file(&missing);
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawned_clone = spawned.clone();
+        let result = run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5), || {
+            spawned_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(!result.available);
+        assert!(!spawned.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
