@@ -9058,7 +9058,13 @@ next_tab = ""
                 .enter_workspace_switcher_search_from(&server.app.terminal_runtimes);
         }
 
-        let expected_preview = "SELECTED_PREVIEW";
+        // QuickSwitch selects the first non-active workspace; Search resets
+        // to the first row (the active workspace).
+        let expected_preview = if matches!(mode, WorkspaceSwitcherTestMode::Search) {
+            "ACTIVE_SNAPSHOT"
+        } else {
+            "SELECTED_PREVIEW"
+        };
         let mut decoder = StreamedFrameDecoder::default();
         server.render_and_stream();
         let initial = decoder.decode(

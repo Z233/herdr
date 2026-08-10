@@ -682,6 +682,8 @@ impl AppState {
             self.workspace_switcher.search_generation.wrapping_add(1);
         self.reset_search_provider_state();
         self.workspace_switcher.search_started = true;
+        self.workspace_switcher.selected = 0;
+        self.workspace_switcher.scroll = 0;
         self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
 
@@ -4157,5 +4159,20 @@ mod tests {
             assert!(dir_row.meta.starts_with('~'));
             assert!(dir_row.meta.contains("projects/myapp"));
         }
+    }
+
+    #[test]
+    fn entering_search_resets_selection_to_first_item() {
+        let mut state = app_with_workspaces(&["main", "issue", "docs"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+
+        // QuickSwitch opens on the first non-active workspace, not row 0.
+        assert_ne!(state.workspace_switcher.selected, 0);
+
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+
+        assert_eq!(state.workspace_switcher.selected, 0);
+        assert_eq!(state.workspace_switcher.scroll, 0);
     }
 }
