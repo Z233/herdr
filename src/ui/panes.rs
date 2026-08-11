@@ -17,6 +17,12 @@ use crate::layout::PaneInfo;
 use crate::popup_size::resolve_popup_geometry;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneRenderMode {
+    Interactive,
+    Preview,
+}
+
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
     rt.scroll_metrics()
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
@@ -226,14 +232,38 @@ pub(super) fn compute_pane_infos(
     let Some(ws_idx) = app.active else {
         return Vec::new();
     };
-    let Some(ws) = app.workspaces.get(ws_idx) else {
+    let Some(tab) = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(crate::workspace::Workspace::active_tab)
+    else {
         return Vec::new();
     };
 
-    let multi_pane = ws.layout.pane_count() > 1;
+    compute_tab_pane_infos(
+        app,
+        terminal_runtimes,
+        ws_idx,
+        tab,
+        area,
+        resize_panes,
+        cell_size,
+    )
+}
 
-    if ws.zoomed {
-        let focused_id = ws.layout.focused();
+pub(super) fn compute_tab_pane_infos(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    ws_idx: usize,
+    tab: &crate::workspace::Tab,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> Vec<PaneInfo> {
+    let multi_pane = tab.layout.pane_count() > 1;
+
+    if tab.zoomed {
+        let focused_id = tab.layout.focused();
         let borders = if multi_pane && app.pane_borders {
             Borders::ALL
         } else {
@@ -246,7 +276,7 @@ pub(super) fn compute_pane_infos(
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
             if resize_panes
-                && ws.terminal_id(focused_id).is_some_and(|terminal_id| {
+                && tab.terminal_id(focused_id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })
             {
@@ -268,7 +298,7 @@ pub(super) fn compute_pane_infos(
         }];
     }
 
-    let mut pane_infos = apply_pane_chrome(ws.layout.panes(area), app.pane_borders, app.pane_gaps);
+    let mut pane_infos = apply_pane_chrome(tab.layout.panes(area), app.pane_borders, app.pane_gaps);
 
     for info in &mut pane_infos {
         let pane_inner = pane_inner_rect(info.rect, info.borders);
@@ -279,7 +309,7 @@ pub(super) fn compute_pane_infos(
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
             if resize_panes
-                && ws.terminal_id(info.id).is_some_and(|terminal_id| {
+                && tab.terminal_id(info.id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })
             {
@@ -312,25 +342,63 @@ pub(super) fn render_panes(
     let Some(ws) = app.workspaces.get(ws_idx) else {
         return;
     };
+    let Some(tab) = ws.active_tab() else {
+        return;
+    };
 
-    let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
+    render_tab_panes(
+        app,
+        terminal_runtimes,
+        frame,
+        ws_idx,
+        tab,
+        pane_infos,
+        split_borders,
+        PaneRenderMode::Interactive,
+    );
+}
+
+// Interactive and preview surfaces share this dispatch to keep pane rendering identical.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_tab_panes(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    ws_idx: usize,
+    tab: &crate::workspace::Tab,
+    pane_infos: &[PaneInfo],
+    split_borders: &[crate::layout::SplitBorder],
+    mode: PaneRenderMode,
+) {
+    let Some(ws) = app.workspaces.get(ws_idx) else {
+        return;
+    };
+
+    let interactive = mode == PaneRenderMode::Interactive;
+    let multi_pane = tab.layout.pane_count() > 1;
+    let terminal_active = interactive && app.mode == Mode::Terminal;
 
     for info in pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            let show_cursor = info.is_focused
+            let show_cursor = interactive
+                && info.is_focused
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
-            rt.render(frame, info.inner_rect, show_cursor);
+            if interactive {
+                rt.render(frame, info.inner_rect, show_cursor);
+            } else {
+                rt.render_bottom_aligned(frame, info.inner_rect);
+            }
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = (!info.is_focused && multi_pane && !terminal_active)
-                || (info.is_focused
-                    && app.mode == Mode::Copy
-                    && app.copy_mode.as_ref().is_some_and(|copy_mode| {
-                        copy_mode.pane_id == info.id && app.fork_features.easymotion.is_some()
-                    }));
+            let should_dim = interactive
+                && ((!info.is_focused && multi_pane && !terminal_active)
+                    || (info.is_focused
+                        && app.mode == Mode::Copy
+                        && app.copy_mode.as_ref().is_some_and(|copy_mode| {
+                            copy_mode.pane_id == info.id && app.fork_features.easymotion.is_some()
+                        })));
             if should_dim {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();
@@ -340,6 +408,10 @@ pub(super) fn render_panes(
                         cell.set_style(cell.style().add_modifier(Modifier::DIM));
                     }
                 }
+            }
+
+            if !interactive {
+                continue;
             }
 
             let (copy_search_top, copy_search_bottom, copy_search_matches) =

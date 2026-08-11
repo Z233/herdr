@@ -3894,21 +3894,22 @@ impl HeadlessServer {
         {
             return true;
         }
-        let Some(workspace) = self
+        if self
             .app
             .state
-            .active
-            .and_then(|ws_idx| self.app.state.workspaces.get(ws_idx))
-        else {
-            return false;
-        };
-        let Some(tab) = workspace.active_tab() else {
-            return false;
-        };
-        if !tab.panes.contains_key(&pane_id) {
-            return false;
+            .workspace_switcher_preview_contains_pane(pane_id)
+        {
+            return true;
         }
-        !tab.zoomed || tab.layout.focused() == pane_id
+        let Some(ws_idx) = self.app.state.active else {
+            return false;
+        };
+        let Some(workspace) = self.app.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        self.app
+            .state
+            .tab_surface_contains_pane(ws_idx, workspace.active_tab_index(), pane_id)
     }
 
     fn render_retained_pty_update_and_stream(&mut self) -> bool {
@@ -9031,19 +9032,440 @@ next_tab = ""
         Search,
     }
 
+    fn assert_workspace_switcher_renders_selected_split_tab_surface(
+        render_encoding: RenderEncoding,
+    ) {
+        let (mut server, client_rx, _) =
+            retained_test_server_with_encoding(b"ACTIVE_SURFACE", render_encoding);
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let left_pane = preview_workspace
+            .focused_pane_id()
+            .expect("left preview pane");
+        let right_pane = preview_workspace.test_split(ratatui::layout::Direction::Horizontal);
+        preview_workspace.insert_test_runtime(
+            left_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"\x1b[24;1HLEFT_A"),
+        );
+        preview_workspace.insert_test_runtime(
+            right_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"\x1b[24;1HRIGHT_B"),
+        );
+        let original_sizes = [
+            preview_workspace.test_runtimes[&left_pane].current_size(),
+            preview_workspace.test_runtimes[&right_pane].current_size(),
+        ];
+        server.app.state.workspaces.push(preview_workspace);
+
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        let mut decoder = StreamedFrameDecoder::default();
+        server.render_and_stream();
+
+        let frame = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("split preview frame"),
+        );
+        let preview = server.app.state.workspace_switcher_preview_rect();
+        let preview_text = frame_rect_text(&frame, preview);
+        assert!(preview_text.contains("LEFT_A"), "preview: {preview_text:?}");
+        assert!(
+            preview_text.contains("RIGHT_B"),
+            "preview: {preview_text:?}"
+        );
+
+        let preview_workspace = &server.app.state.workspaces[1];
+        assert_eq!(
+            [
+                preview_workspace.test_runtimes[&left_pane].current_size(),
+                preview_workspace.test_runtimes[&right_pane].current_size(),
+            ],
+            original_sizes,
+            "rendering the preview must not resize live PTYs"
+        );
+
+        server
+            .app
+            .state
+            .cycle_workspace_switcher_from(&server.app.terminal_runtimes, -1);
+        server.render_and_stream();
+        let _ = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("cycled active workspace frame"),
+        );
+        server
+            .app
+            .state
+            .cycle_workspace_switcher_from(&server.app.terminal_runtimes, 1);
+        server.render_and_stream();
+        let _ = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("cycled preview workspace frame"),
+        );
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut server.app.state,
+            &server.app.terminal_runtimes,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, KeyModifiers::NONE),
+        );
+        server.render_and_stream();
+        let _ = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("closed split preview frame"),
+        );
+
+        let preview_workspace = &server.app.state.workspaces[1];
+        assert_eq!(
+            [
+                preview_workspace.test_runtimes[&left_pane].current_size(),
+                preview_workspace.test_runtimes[&right_pane].current_size(),
+            ],
+            original_sizes,
+            "opening, cycling, and closing the preview must not resize live PTYs"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_renders_selected_split_tab_surface() {
+        assert_workspace_switcher_renders_selected_split_tab_surface(RenderEncoding::SemanticFrame);
+    }
+
+    #[tokio::test]
+    async fn terminal_ansi_workspace_switcher_renders_selected_split_tab_surface() {
+        assert_workspace_switcher_renders_selected_split_tab_surface(RenderEncoding::TerminalAnsi);
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_preview_bottom_anchors_and_left_crops() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let pane_id = preview_workspace.focused_pane_id().expect("preview pane");
+        preview_workspace.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[1;1HTOP_ROW\x1b[24;1HBOTTOM_LEFT\x1b[38;2;1;2;3m\xe7\x95\x8c\x1b[0m\x1b[24;70HRIGHT_EDGE",
+            ),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        server.render_and_stream();
+
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("bottom-anchored preview frame"),
+        );
+        let preview_text =
+            frame_rect_text(&frame, server.app.state.workspace_switcher_preview_rect());
+        assert!(
+            preview_text.contains("BOTTOM_LEFT"),
+            "preview: {preview_text:?}"
+        );
+        assert!(
+            !preview_text.contains("TOP_ROW"),
+            "preview: {preview_text:?}"
+        );
+        assert!(
+            !preview_text.contains("RIGHT_EDGE"),
+            "preview: {preview_text:?}"
+        );
+        assert!(preview_text.contains('界'), "preview: {preview_text:?}");
+        let styled_wide_cell = frame
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == "界")
+            .expect("styled wide preview cell");
+        let mut expected_cell = ratatui::buffer::Cell::default();
+        expected_cell.set_fg(ratatui::style::Color::Rgb(1, 2, 3));
+        assert_eq!(
+            styled_wide_cell.fg,
+            crate::protocol::CellData::from_ratatui_cell(&expected_cell).fg,
+            "preview must preserve terminal cell style"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_preview_pane_output_triggers_live_frame() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let pane_id = preview_workspace.focused_pane_id().expect("preview pane");
+        preview_workspace.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"\x1b[24;1HBEFORE"),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+
+        let mut decoder = StreamedFrameDecoder::default();
+        server.render_and_stream();
+        let initial = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial preview frame"),
+        );
+        let preview = server.app.state.workspace_switcher_preview_rect();
+        assert!(frame_rect_text(&initial, preview).contains("BEFORE"));
+
+        server.app.state.workspaces[1].test_runtimes[&pane_id]
+            .test_process_pty_bytes(b"\x1b[24;1HLIVE_UPDATE");
+        assert!(server.app.render_dirty.request_pty(pane_id));
+        let request = server.app.render_dirty.take();
+        assert!(
+            server.pty_sources_visible_to_any_render_target(&request.pty_sources),
+            "the selected preview pane is a rendered surface"
+        );
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        server.render_and_stream();
+        let updated = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("updated preview frame"),
+        );
+        assert!(frame_rect_text(&updated, preview).contains("LIVE_UPDATE"));
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_preview_preserves_nested_layout_and_zoom() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let left_pane = preview_workspace
+            .focused_pane_id()
+            .expect("left preview pane");
+        let right_top = preview_workspace.test_split(ratatui::layout::Direction::Horizontal);
+        assert!(preview_workspace.layout.set_ratio_at(&[], 0.35));
+        let right_bottom = preview_workspace.test_split(ratatui::layout::Direction::Vertical);
+        for (pane_id, marker) in [
+            (left_pane, b"LEFT_A".as_slice()),
+            (right_top, b"TOP_B".as_slice()),
+            (right_bottom, b"BOTTOM_C".as_slice()),
+        ] {
+            let mut screen = b"\x1b[24;1H".to_vec();
+            screen.extend_from_slice(marker);
+            preview_workspace.insert_test_runtime(
+                pane_id,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, &screen),
+            );
+        }
+        server.app.state.workspaces.push(preview_workspace);
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+
+        let mut decoder = StreamedFrameDecoder::default();
+        server.render_and_stream();
+        let frame = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("nested preview frame"),
+        );
+        let preview = server.app.state.workspace_switcher_preview_rect();
+        let preview_text = frame_rect_text(&frame, preview);
+        let marker_position = |marker: &str| {
+            preview_text
+                .lines()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    line.find(marker)
+                        .map(|byte| (line[..byte].chars().count(), y))
+                })
+                .unwrap_or_else(|| panic!("missing {marker:?} in preview: {preview_text:?}"))
+        };
+        let left = marker_position("LEFT_A");
+        let top = marker_position("TOP_B");
+        let bottom = marker_position("BOTTOM_C");
+        assert!(
+            left.0 < top.0,
+            "horizontal split positions: {preview_text:?}"
+        );
+        assert_eq!(top.0, bottom.0, "nested split positions: {preview_text:?}");
+        assert!(
+            top.1 < bottom.1,
+            "vertical split positions: {preview_text:?}"
+        );
+        let right_start_ratio = top.0 as f32 / preview.width as f32;
+        assert!(
+            (0.30..=0.40).contains(&right_start_ratio),
+            "split ratio {right_start_ratio}: {preview_text:?}"
+        );
+
+        server.app.state.workspaces[1].zoomed = true;
+        server.render_and_stream();
+        let zoomed = decoder.decode(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("zoomed preview frame"),
+        );
+        let zoomed_text = frame_rect_text(&zoomed, preview);
+        assert!(!zoomed_text.contains("LEFT_A"), "preview: {zoomed_text:?}");
+        assert!(!zoomed_text.contains("TOP_B"), "preview: {zoomed_text:?}");
+        assert!(zoomed_text.contains("BOTTOM_C"), "preview: {zoomed_text:?}");
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_preview_leaves_missing_runtime_tile_blank() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("preview"));
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+
+        server.render_and_stream();
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("missing runtime preview frame"),
+        );
+        let preview = server.app.state.workspace_switcher_preview_rect();
+        let content = Rect::new(
+            preview.x,
+            preview.y.saturating_add(2),
+            preview.width,
+            preview.height.saturating_sub(2),
+        );
+        assert!(
+            frame_rect_text(&frame, content).trim().is_empty(),
+            "missing runtime tile must remain blank"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_expanded_tab_row_previews_that_tab() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let first_tab_pane = preview_workspace.focused_pane_id().expect("first tab pane");
+        let second_tab = preview_workspace.test_add_tab(Some("logs"));
+        let second_tab_pane = preview_workspace.tabs[second_tab].root_pane;
+        preview_workspace.insert_test_runtime(
+            first_tab_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HWORKSPACE_TAB",
+            ),
+        );
+        preview_workspace.insert_test_runtime(
+            second_tab_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HTAB_TARGET",
+            ),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        server
+            .app
+            .state
+            .expand_selected_workspace_switcher_workspace_from(&server.app.terminal_runtimes);
+        server
+            .app
+            .state
+            .move_workspace_switcher_selection_from(&server.app.terminal_runtimes, 2);
+
+        server.render_and_stream();
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("tab row preview frame"),
+        );
+        let preview_text =
+            frame_rect_text(&frame, server.app.state.workspace_switcher_preview_rect());
+        assert!(
+            preview_text.contains("TAB_TARGET"),
+            "preview: {preview_text:?}"
+        );
+        assert!(
+            !preview_text.contains("WORKSPACE_TAB"),
+            "preview: {preview_text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_removed_target_clamps_to_valid_preview() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("removed"));
+        let mut next_workspace = crate::workspace::Workspace::test_new("next");
+        let next_pane = next_workspace.focused_pane_id().expect("next pane");
+        next_workspace.insert_test_runtime(
+            next_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HNEXT_TARGET",
+            ),
+        );
+        server.app.state.workspaces.push(next_workspace);
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+
+        server.app.state.workspaces.remove(1);
+        server
+            .app
+            .state
+            .clamp_workspace_switcher_selection_from(&server.app.terminal_runtimes);
+        server.render_and_stream();
+
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("clamped preview frame"),
+        );
+        let preview_text =
+            frame_rect_text(&frame, server.app.state.workspace_switcher_preview_rect());
+        assert!(
+            preview_text.contains("NEXT_TARGET"),
+            "preview: {preview_text:?}"
+        );
+    }
+
     fn assert_workspace_switcher_isolates_live_terminal_updates(
         render_encoding: RenderEncoding,
         mode: WorkspaceSwitcherTestMode,
     ) {
-        let (mut server, client_rx, pane_id) =
-            retained_test_server_with_encoding(b"ACTIVE_SNAPSHOT", render_encoding);
+        let (mut server, client_rx, pane_id) = retained_test_server_with_encoding(
+            b"ACTIVE_SNAPSHOT\x1b[24;1HACTIVE_SNAPSHOT",
+            render_encoding,
+        );
         let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
         let preview_pane_id = preview_workspace
             .focused_pane_id()
             .expect("preview focused pane");
         preview_workspace.insert_test_runtime(
             preview_pane_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"SELECTED_PREVIEW"),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HSELECTED_PREVIEW",
+            ),
         );
         server.app.state.workspaces.push(preview_workspace);
 
@@ -9096,15 +9518,17 @@ next_tab = ""
         );
 
         let outside_marker = "OUTSIDE_UPDATE";
-        let outside_x = pane.x.saturating_add(1);
+        let outside_x = pane.x.saturating_add(22);
         let outside_y = pane.y.saturating_add(pane.height).saturating_sub(1);
         assert!(outside_y >= popup.y.saturating_add(popup.height));
         assert!(outside_x.saturating_add(outside_marker.len() as u16) < pane.x + pane.width);
 
+        let preview_marker = "PREVIEW_UPDATE";
         let update = format!(
-            "\x1b[{};{}H{outside_marker}\x1b[{};{}H{panel_marker}",
+            "\x1b[{};{}H{outside_marker}\x1b[{};1H{preview_marker}\x1b[{};{}H{panel_marker}",
             outside_y.saturating_sub(pane.y).saturating_add(1),
             outside_x.saturating_sub(pane.x).saturating_add(1),
+            pane.height,
             panel_y.saturating_sub(pane.y).saturating_add(1),
             panel_x.saturating_sub(pane.x).saturating_add(1),
         );
@@ -9124,8 +9548,14 @@ next_tab = ""
                 .expect("updated switcher frame"),
         );
         assert!(!frame_text(&updated).contains(panel_marker));
+        let updated_preview = frame_rect_text(&updated, preview);
+        if matches!(mode, WorkspaceSwitcherTestMode::Search) {
+            assert!(updated_preview.contains(preview_marker));
+        } else {
+            assert!(!updated_preview.contains(preview_marker));
+            assert!(updated_preview.contains(expected_preview));
+        }
         assert!(frame_text(&updated).contains(outside_marker));
-        assert!(frame_rect_text(&updated, preview).contains(expected_preview));
         assert!(!updated.cursor.as_ref().is_some_and(|cursor| cursor.visible));
 
         crate::ui::workspace_switcher::handle_workspace_switcher_key(

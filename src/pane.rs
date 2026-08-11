@@ -2661,6 +2661,10 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
+        self.terminal.render_bottom_aligned(frame, area);
+    }
+
     pub(crate) fn collect_dirty_patch(
         &self,
         area_width: u16,

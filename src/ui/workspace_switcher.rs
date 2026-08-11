@@ -21,7 +21,6 @@ use crate::{
     },
     config::key_event_matches_combo,
     input::TerminalKey,
-    layout::PaneId,
     terminal::TerminalRuntimeRegistry,
 };
 
@@ -72,9 +71,8 @@ pub(crate) enum WorkspaceSwitcherPreview {
     Empty {
         message: String,
     },
-    Content {
-        pane_id: PaneId,
-        text: String,
+    TabSurface {
+        target: WorkspaceSwitcherTarget,
     },
     Directory {
         shown_path: std::path::PathBuf,
@@ -109,7 +107,6 @@ pub(crate) struct WorkspaceSwitcherState {
     pub selected_target: Option<WorkspaceSwitcherTarget>,
     pub scroll: usize,
     pub preview: WorkspaceSwitcherPreview,
-    pub preview_ws_idx: Option<usize>,
     pub expanded_workspaces: std::collections::HashSet<String>,
     // -- Search provider session state (plain data, no handles or I/O) --
     /// Increments each time Search mode is entered; used to discard stale
@@ -840,14 +837,12 @@ impl AppState {
 
         // If there is an inline error, show it.
         if let Some(error) = self.workspace_switcher.search_error.clone() {
-            self.workspace_switcher.preview_ws_idx = None;
             self.workspace_switcher.preview = WorkspaceSwitcherPreview::Empty { message: error };
             return;
         }
 
         let rows = self.workspace_switcher_rows_from(terminal_runtimes);
         let Some(row) = rows.get(self.workspace_switcher.selected) else {
-            self.workspace_switcher.preview_ws_idx = None;
             self.workspace_switcher.preview = WorkspaceSwitcherPreview::Empty {
                 message: if self.workspaces.is_empty() {
                     "no workspaces".to_string()
@@ -860,7 +855,6 @@ impl AppState {
 
         // Directory row: show directory preview (cached, loading, or request).
         if row.is_directory {
-            self.workspace_switcher.preview_ws_idx = None;
             let shown_path = match &row.target {
                 WorkspaceSwitcherTarget::Directory { shown_path, .. } => shown_path.clone(),
                 _ => return,
@@ -870,9 +864,8 @@ impl AppState {
         }
 
         // Workspace or tab row: terminal preview.
-        self.workspace_switcher.preview_ws_idx = Some(row.ws_idx);
         self.workspace_switcher.preview =
-            self.workspace_switcher_preview_for_target_from(terminal_runtimes, row.target.clone());
+            self.workspace_switcher_preview_for_target(row.target.clone());
     }
 
     /// Build the preview for a directory shown path, using the cache or
@@ -923,102 +916,83 @@ impl AppState {
             .map(|row| row.ws_idx)
     }
 
-    fn workspace_switcher_preview_for_target_from(
+    fn workspace_switcher_preview_for_target(
         &self,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         target: WorkspaceSwitcherTarget,
     ) -> WorkspaceSwitcherPreview {
-        let (ws_idx, pane_id) = match target {
+        if self
+            .workspace_switcher_target_tab_indices(&target)
+            .is_some()
+        {
+            return WorkspaceSwitcherPreview::TabSurface { target };
+        }
+
+        let message = match target {
+            WorkspaceSwitcherTarget::Workspace { .. } => "workspace unavailable",
+            WorkspaceSwitcherTarget::Tab { .. } => "tab unavailable",
+            WorkspaceSwitcherTarget::Directory { .. } => "",
+        };
+        WorkspaceSwitcherPreview::Empty {
+            message: message.to_string(),
+        }
+    }
+
+    fn workspace_switcher_target_tab_indices(
+        &self,
+        target: &WorkspaceSwitcherTarget,
+    ) -> Option<(usize, usize)> {
+        match target {
             WorkspaceSwitcherTarget::Workspace { workspace_id } => {
-                let Some(ws_idx) = self
+                let ws_idx = self
                     .workspaces
                     .iter()
-                    .position(|workspace| workspace.id == workspace_id)
-                else {
-                    return WorkspaceSwitcherPreview::Empty {
-                        message: "workspace unavailable".to_string(),
-                    };
-                };
-                let Some(ws) = self.workspaces.get(ws_idx) else {
-                    return WorkspaceSwitcherPreview::Empty {
-                        message: "workspace unavailable".to_string(),
-                    };
-                };
-                let Some(pane_id) = ws.focused_pane_id() else {
-                    return WorkspaceSwitcherPreview::Empty {
-                        message: "no pane content".to_string(),
-                    };
-                };
-                (ws_idx, pane_id)
+                    .position(|workspace| &workspace.id == workspace_id)?;
+                let workspace = self.workspaces.get(ws_idx)?;
+                let tab_idx = workspace.active_tab_index();
+                workspace.tabs.get(tab_idx)?;
+                Some((ws_idx, tab_idx))
             }
             WorkspaceSwitcherTarget::Tab { tab_id } => {
-                let Some((ws_idx, tab_idx)) =
-                    self.workspaces
-                        .iter()
-                        .enumerate()
-                        .find_map(|(ws_idx, workspace)| {
-                            workspace
-                                .tabs
-                                .iter()
-                                .enumerate()
-                                .find_map(|(tab_idx, tab)| {
-                                    (crate::workspace::public_tab_id_for_number(
-                                        &workspace.id,
-                                        tab.number,
-                                    ) == tab_id)
-                                        .then_some((ws_idx, tab_idx))
-                                })
-                        })
-                else {
-                    return WorkspaceSwitcherPreview::Empty {
-                        message: "tab unavailable".to_string(),
-                    };
-                };
-                let Some(tab) = self
-                    .workspaces
-                    .get(ws_idx)
-                    .and_then(|ws| ws.tabs.get(tab_idx))
-                else {
-                    return WorkspaceSwitcherPreview::Empty {
-                        message: "tab unavailable".to_string(),
-                    };
-                };
-                (ws_idx, tab.layout.focused())
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ws_idx, workspace)| {
+                        workspace
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .find_map(|(tab_idx, tab)| {
+                                (crate::workspace::public_tab_id_for_number(
+                                    &workspace.id,
+                                    tab.number,
+                                ) == *tab_id)
+                                    .then_some((ws_idx, tab_idx))
+                            })
+                    })
             }
-            // Directory targets use a separate preview path; this arm is
-            // unreachable but required for exhaustiveness.
-            WorkspaceSwitcherTarget::Directory { .. } => {
-                return WorkspaceSwitcherPreview::Empty {
-                    message: String::new(),
-                };
-            }
-        };
-        let Some(ws) = self.workspaces.get(ws_idx) else {
-            return WorkspaceSwitcherPreview::Empty {
-                message: "workspace unavailable".to_string(),
-            };
-        };
-        if ws.find_tab_index_for_pane(pane_id).is_none() {
-            return WorkspaceSwitcherPreview::Empty {
-                message: "no pane content".to_string(),
-            };
+            WorkspaceSwitcherTarget::Directory { .. } => None,
         }
+    }
 
-        // Mirrors pane.read with ReadSource::Visible and ReadFormat::Ansi.
-        let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+    pub(crate) fn workspace_switcher_preview_tab_indices(&self) -> Option<(usize, usize)> {
+        if !self.workspace_switcher.active {
+            return None;
+        }
+        let WorkspaceSwitcherPreview::TabSurface { target } = &self.workspace_switcher.preview
         else {
-            return WorkspaceSwitcherPreview::Empty {
-                message: "no pane content".to_string(),
-            };
+            return None;
         };
-        let text = runtime.visible_ansi();
-        if text.trim().is_empty() {
-            return WorkspaceSwitcherPreview::Empty {
-                message: "no pane content".to_string(),
-            };
-        }
+        self.workspace_switcher_target_tab_indices(target)
+    }
 
-        WorkspaceSwitcherPreview::Content { pane_id, text }
+    pub(crate) fn workspace_switcher_preview_contains_pane(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> bool {
+        let Some((ws_idx, tab_idx)) = self.workspace_switcher_preview_tab_indices() else {
+            return false;
+        };
+        self.tab_surface_contains_pane(ws_idx, tab_idx, pane_id)
     }
 
     pub(crate) fn workspace_mru_indices(&self) -> Vec<usize> {
@@ -1852,8 +1826,17 @@ fn render_preview(
     }
 
     match &app.workspace_switcher.preview {
-        WorkspaceSwitcherPreview::Content { text, .. } => {
-            frame.render_widget(Paragraph::new(ansi_to_text(text)), content);
+        WorkspaceSwitcherPreview::TabSurface { .. } => {
+            if let Some((ws_idx, tab_idx)) = app.workspace_switcher_preview_tab_indices() {
+                super::tab_surface::render_tab_surface_preview(
+                    app,
+                    terminal_runtimes,
+                    ws_idx,
+                    tab_idx,
+                    content,
+                    frame,
+                );
+            }
         }
         WorkspaceSwitcherPreview::Empty { message } => {
             frame.render_widget(
@@ -1981,190 +1964,6 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     }
     let prefix: String = text.chars().take(max_width.saturating_sub(1)).collect();
     format!("{prefix}…")
-}
-
-fn ansi_to_text(input: &str) -> Text<'static> {
-    let mut lines = Vec::new();
-    let mut spans = Vec::new();
-    let mut buf = String::new();
-    let mut style = Style::default();
-    let mut i = 0usize;
-
-    while i < input.len() {
-        let rest = &input[i..];
-        if let Some(after_escape) = rest.strip_prefix("\x1b[") {
-            flush_span(&mut spans, &mut buf, style);
-            if let Some((offset, final_byte)) = csi_final_byte(after_escape) {
-                let params = &after_escape[..offset];
-                if final_byte == 'm' {
-                    apply_sgr(params, &mut style);
-                }
-                i += 2 + offset + final_byte.len_utf8();
-                continue;
-            }
-        }
-
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-        i += ch.len_utf8();
-        match ch {
-            '\n' => {
-                flush_span(&mut spans, &mut buf, style);
-                lines.push(Line::from(std::mem::take(&mut spans)));
-            }
-            '\r' => {}
-            _ => buf.push(ch),
-        }
-    }
-
-    flush_span(&mut spans, &mut buf, style);
-    lines.push(Line::from(spans));
-    Text::from(lines)
-}
-
-fn flush_span(spans: &mut Vec<Span<'static>>, buf: &mut String, style: Style) {
-    if buf.is_empty() {
-        return;
-    }
-    spans.push(Span::styled(std::mem::take(buf), style));
-}
-
-fn csi_final_byte(input: &str) -> Option<(usize, char)> {
-    for (idx, ch) in input.char_indices() {
-        if ('@'..='~').contains(&ch) {
-            return Some((idx, ch));
-        }
-    }
-    None
-}
-
-fn apply_sgr(params: &str, style: &mut Style) {
-    let params = if params.is_empty() { "0" } else { params };
-    let values = params
-        .split(';')
-        .map(|part| part.parse::<u16>().ok())
-        .collect::<Vec<_>>();
-    let mut i = 0usize;
-    while i < values.len() {
-        let value = values[i].unwrap_or(0);
-        match value {
-            0 => *style = Style::default(),
-            1 => *style = style.add_modifier(Modifier::BOLD),
-            2 => *style = style.add_modifier(Modifier::DIM),
-            3 => *style = style.add_modifier(Modifier::ITALIC),
-            4 => *style = style.add_modifier(Modifier::UNDERLINED),
-            7 => *style = style.add_modifier(Modifier::REVERSED),
-            9 => *style = style.add_modifier(Modifier::CROSSED_OUT),
-            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
-            23 => *style = style.remove_modifier(Modifier::ITALIC),
-            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
-            27 => *style = style.remove_modifier(Modifier::REVERSED),
-            29 => *style = style.remove_modifier(Modifier::CROSSED_OUT),
-            30..=37 => *style = style.fg(basic_ansi_color(value - 30, false)),
-            39 => *style = style.fg(Color::Reset),
-            40..=47 => *style = style.bg(basic_ansi_color(value - 40, false)),
-            49 => *style = style.bg(Color::Reset),
-            90..=97 => *style = style.fg(basic_ansi_color(value - 90, true)),
-            100..=107 => *style = style.bg(basic_ansi_color(value - 100, true)),
-            38 | 48 => {
-                if let Some((color, consumed)) = extended_ansi_color(&values[i + 1..]) {
-                    if value == 38 {
-                        *style = style.fg(color);
-                    } else {
-                        *style = style.bg(color);
-                    }
-                    i += consumed;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-}
-
-fn extended_ansi_color(values: &[Option<u16>]) -> Option<(Color, usize)> {
-    match values.first().copied().flatten()? {
-        2 => {
-            let r = values.get(1).copied().flatten()? as u8;
-            let g = values.get(2).copied().flatten()? as u8;
-            let b = values.get(3).copied().flatten()? as u8;
-            Some((Color::Rgb(r, g, b), 4))
-        }
-        5 => {
-            let idx = values.get(1).copied().flatten()? as u8;
-            Some((indexed_ansi_color(idx), 2))
-        }
-        _ => None,
-    }
-}
-
-fn basic_ansi_color(idx: u16, bright: bool) -> Color {
-    match (idx, bright) {
-        (0, false) => Color::Black,
-        (1, false) => Color::Red,
-        (2, false) => Color::Green,
-        (3, false) => Color::Yellow,
-        (4, false) => Color::Blue,
-        (5, false) => Color::Magenta,
-        (6, false) => Color::Cyan,
-        (7, false) => Color::Gray,
-        (0, true) => Color::DarkGray,
-        (1, true) => Color::LightRed,
-        (2, true) => Color::LightGreen,
-        (3, true) => Color::LightYellow,
-        (4, true) => Color::LightBlue,
-        (5, true) => Color::LightMagenta,
-        (6, true) => Color::LightCyan,
-        (7, true) => Color::White,
-        _ => Color::Reset,
-    }
-}
-
-fn indexed_ansi_color(idx: u8) -> Color {
-    if idx < 16 {
-        return match idx {
-            0 => Color::Black,
-            1 => Color::Red,
-            2 => Color::Green,
-            3 => Color::Yellow,
-            4 => Color::Blue,
-            5 => Color::Magenta,
-            6 => Color::Cyan,
-            7 => Color::Gray,
-            8 => Color::DarkGray,
-            9 => Color::LightRed,
-            10 => Color::LightGreen,
-            11 => Color::LightYellow,
-            12 => Color::LightBlue,
-            13 => Color::LightMagenta,
-            14 => Color::LightCyan,
-            _ => Color::White,
-        };
-    }
-
-    if idx <= 231 {
-        let idx = idx - 16;
-        let r = (idx / 36) % 6;
-        let g = (idx / 6) % 6;
-        let b = idx % 6;
-        return Color::Rgb(
-            color_cube_value(r),
-            color_cube_value(g),
-            color_cube_value(b),
-        );
-    }
-
-    let level = 8 + (idx - 232).saturating_mul(10);
-    Color::Rgb(level, level, level)
-}
-
-fn color_cube_value(value: u8) -> u8 {
-    if value == 0 {
-        0
-    } else {
-        55 + value.saturating_mul(40)
-    }
 }
 
 #[cfg(test)]
@@ -2337,17 +2136,6 @@ mod tests {
         assert!(matches!(
             state.workspace_switcher.preview,
             WorkspaceSwitcherPreview::Empty { ref message } if message == "no workspaces"
-        ));
-    }
-    #[test]
-    fn workspace_switcher_preview_handles_missing_runtime() {
-        let mut state = app_with_workspaces(&["one"]);
-
-        state.open_workspace_switcher();
-
-        assert!(matches!(
-            state.workspace_switcher.preview,
-            WorkspaceSwitcherPreview::Empty { ref message } if message == "no pane content"
         ));
     }
     #[test]
@@ -3179,29 +2967,6 @@ mod tests {
         // Workspace switcher row, depth=1: "   ▸ ● ws"
         // Position 3 is caret "▸" (after leading space + 2-char indent)
         assert_eq!(buf[(3, 0)].symbol(), "▸");
-    }
-
-    #[test]
-    fn ansi_to_text_preserves_sgr_styles() {
-        let text = ansi_to_text("plain \x1b[31;1mred\x1b[0m\n\x1b[38;2;1;2;3mtrue");
-
-        assert_eq!(text.lines.len(), 2);
-        assert_eq!(text.lines[0].spans[0].content.as_ref(), "plain ");
-        assert_eq!(text.lines[0].spans[1].content.as_ref(), "red");
-        assert_eq!(text.lines[0].spans[1].style.fg, Some(Color::Red));
-        assert!(text.lines[0].spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert_eq!(text.lines[1].spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
-    }
-
-    #[test]
-    fn ansi_to_text_ignores_non_sgr_csi() {
-        let text = ansi_to_text("a\x1b[2Kb");
-
-        assert_eq!(text.lines[0].spans[0].content.as_ref(), "a");
-        assert_eq!(text.lines[0].spans[1].content.as_ref(), "b");
     }
 
     // -----------------------------------------------------------------------

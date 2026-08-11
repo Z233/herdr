@@ -437,6 +437,10 @@ impl PaneTerminal {
         self.ghostty.render(frame, area, show_cursor);
     }
 
+    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
+        self.ghostty.render_bottom_aligned(frame, area);
+    }
+
     pub fn collect_dirty_patch(
         &self,
         area_width: u16,
@@ -1913,6 +1917,20 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.render_aligned(frame, area, show_cursor, false);
+    }
+
+    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
+        self.render_aligned(frame, area, false, true);
+    }
+
+    fn render_aligned(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        bottom_aligned: bool,
+    ) {
         let Ok(mut core) = self.core.lock() else {
             return;
         };
@@ -1936,6 +1954,18 @@ impl GhosttyPaneTerminal {
         let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
         let resolved_bg = colors.map(|c| ghostty_color(c.background));
         let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
+        let source_rows = render_state.rows().unwrap_or(area.height);
+        let rendered_rows = source_rows.min(area.height);
+        let row_offset = if bottom_aligned {
+            source_rows.saturating_sub(rendered_rows)
+        } else {
+            0
+        };
+        let destination_y = if bottom_aligned {
+            area.height.saturating_sub(rendered_rows)
+        } else {
+            0
+        };
 
         let mut row_iterator = match crate::ghostty::RowIterator::new() {
             Ok(iterator) => iterator,
@@ -1954,6 +1984,18 @@ impl GhosttyPaneTerminal {
             let mut grapheme_bytes = Vec::new();
             let mut symbol_scratch = String::new();
             let mut y = 0u16;
+            while y < destination_y {
+                for x in 0..area.width {
+                    let cell = &mut buf[(area.x + x, area.y + y)];
+                    ghostty_reset_cell(cell, default_fg, default_bg);
+                }
+                y += 1;
+            }
+            for _ in 0..row_offset {
+                if !rows.next() {
+                    break;
+                }
+            }
             while y < area.height && rows.next() {
                 let mut cells = match rows.populate_cells(&mut row_cells) {
                     Ok(cells) => cells,
@@ -2006,7 +2048,12 @@ impl GhosttyPaneTerminal {
             }
         }
 
-        ghostty_clear_render_dirty(render_state, area.height);
+        // Keep cropped rows dirty because this surface did not paint them.
+        ghostty_clear_render_dirty(
+            render_state,
+            row_offset,
+            area.height.saturating_sub(destination_y),
+        );
 
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
@@ -2118,13 +2165,22 @@ fn cursor_state_from_render_state(
 
 type VisibleHyperlinks = Vec<((u16, u16), String, String)>;
 
-fn ghostty_clear_render_dirty(render_state: &mut crate::ghostty::RenderState, area_height: u16) {
+fn ghostty_clear_render_dirty(
+    render_state: &mut crate::ghostty::RenderState,
+    row_offset: u16,
+    area_height: u16,
+) {
     let Ok(mut row_iterator) = crate::ghostty::RowIterator::new() else {
         return;
     };
     let Ok(mut rows) = render_state.populate_row_iterator(&mut row_iterator) else {
         return;
     };
+    for _ in 0..row_offset {
+        if !rows.next() {
+            return;
+        }
+    }
     let mut y = 0u16;
     while y < area_height && rows.next() {
         let _ = rows.clear_dirty();

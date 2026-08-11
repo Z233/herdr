@@ -1,15 +1,36 @@
 use ratatui::{layout::Rect, Frame};
 
-use super::panes::{compute_pane_infos, render_panes, resize_tab_panes};
+use super::panes::{
+    compute_pane_infos, compute_tab_pane_infos, render_panes, render_tab_panes, resize_tab_panes,
+    PaneRenderMode,
+};
 use crate::app::state::ViewState;
 use crate::app::{AppState, Mode};
-use crate::layout::{PaneInfo, SplitBorder};
+use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::protocol::CursorState;
 use crate::terminal::TerminalRuntimeRegistry;
 
 pub(crate) struct TabSurfaceLayout {
     pub(crate) pane_infos: Vec<PaneInfo>,
     pub(crate) split_borders: Vec<SplitBorder>,
+}
+
+impl AppState {
+    pub(crate) fn tab_surface_contains_pane(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: PaneId,
+    ) -> bool {
+        let Some(tab) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.tabs.get(tab_idx))
+        else {
+            return false;
+        };
+        tab.panes.contains_key(&pane_id) && (!tab.zoomed || tab.layout.focused() == pane_id)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -34,23 +55,63 @@ pub(crate) fn compute_tab_surface(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> TabSurfaceLayout {
-    let split_borders = app
-        .active
-        .and_then(|i| app.workspaces.get(i))
-        .map(|ws| {
-            if ws.zoomed {
-                Vec::new()
-            } else {
-                ws.layout.splits(area)
-            }
-        })
-        .unwrap_or_default();
+    let split_borders =
+        app.active
+            .and_then(|i| app.workspaces.get(i))
+            .map_or_else(Vec::new, |ws| {
+                if ws.zoomed {
+                    Vec::new()
+                } else {
+                    ws.layout.splits(area)
+                }
+            });
     let pane_infos = compute_pane_infos(app, terminal_runtimes, area, resize_panes, cell_size);
 
     TabSurfaceLayout {
         pane_infos,
         split_borders,
     }
+}
+
+pub(crate) fn render_tab_surface_preview(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    ws_idx: usize,
+    tab_idx: usize,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    let Some(tab) = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(|workspace| workspace.tabs.get(tab_idx))
+    else {
+        return;
+    };
+    let split_borders = if tab.zoomed {
+        Vec::new()
+    } else {
+        tab.layout.splits(area)
+    };
+    let pane_infos = compute_tab_pane_infos(
+        app,
+        terminal_runtimes,
+        ws_idx,
+        tab,
+        area,
+        false,
+        crate::kitty_graphics::HostCellSize::default(),
+    );
+    render_tab_panes(
+        app,
+        terminal_runtimes,
+        frame,
+        ws_idx,
+        tab,
+        &pane_infos,
+        &split_borders,
+        PaneRenderMode::Preview,
+    );
 }
 
 pub(crate) fn resize_tab_surface(
