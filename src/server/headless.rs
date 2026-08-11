@@ -9149,7 +9149,7 @@ next_tab = ""
             crate::terminal::TerminalRuntime::test_with_screen_bytes(
                 80,
                 24,
-                b"\x1b[1;1HTOP_ROW\x1b[24;1HBOTTOM_LEFT\x1b[38;2;1;2;3m\xe7\x95\x8c\x1b[0m\x1b[24;70HRIGHT_EDGE",
+                b"\x1b[1;1HTOP_ROW\x1b[24;1HBOTTOM_LEFT\x1b[38;2;1;2;3;48;2;4;5;6m\xe7\x95\x8c\x1b[0m\x1b[24;70HRIGHT_EDGE",
             ),
         );
         server.app.state.workspaces.push(preview_workspace);
@@ -9187,10 +9187,110 @@ next_tab = ""
             .expect("styled wide preview cell");
         let mut expected_cell = ratatui::buffer::Cell::default();
         expected_cell.set_fg(ratatui::style::Color::Rgb(1, 2, 3));
+        expected_cell.set_bg(ratatui::style::Color::Rgb(4, 5, 6));
         assert_eq!(
             styled_wide_cell.fg,
             crate::protocol::CellData::from_ratatui_cell(&expected_cell).fg,
             "preview must preserve terminal cell style"
+        );
+        assert_eq!(
+            styled_wide_cell.bg,
+            crate::protocol::CellData::from_ratatui_cell(&expected_cell).bg,
+            "preview must preserve explicit terminal backgrounds"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_preview_uses_panel_background_for_default_cells() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let white_host = crate::terminal_theme::TerminalTheme::default().with_color(
+            crate::terminal_theme::DefaultColorKind::Background,
+            crate::terminal_theme::RgbColor {
+                r: 255,
+                g: 255,
+                b: 255,
+            },
+        );
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client")
+            .host_terminal_theme = white_host;
+        let panel_background = server.app.state.palette.panel_bg;
+
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let pane_id = preview_workspace.focused_pane_id().expect("preview pane");
+        preview_workspace.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HPREVIEW_BACKGROUND",
+            ),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+        server.sync_foreground_client_state();
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        server.render_and_stream();
+
+        let frame = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("themed preview frame"),
+        );
+        let marker_cell = frame
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == "P")
+            .expect("preview marker cell");
+        let mut expected = ratatui::buffer::Cell::default();
+        expected.set_bg(panel_background);
+        assert_eq!(
+            marker_cell.bg,
+            crate::protocol::CellData::from_ratatui_cell(&expected).bg,
+            "default terminal cells must blend with the switcher panel background"
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_workspace_switcher_opening_does_not_wait_for_busy_preview_pane() {
+        let (mut server, client_rx, _) = retained_test_server(b"ACTIVE_SURFACE");
+        let mut preview_workspace = crate::workspace::Workspace::test_new("preview");
+        let preview_pane = preview_workspace.focused_pane_id().expect("preview pane");
+        preview_workspace.insert_test_runtime(
+            preview_pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"\x1b[24;1HPREVIEW_SURFACE",
+            ),
+        );
+        server.app.state.workspaces.push(preview_workspace);
+        server
+            .app
+            .state
+            .open_workspace_switcher_from(&server.app.terminal_runtimes);
+        let (locked, holder) = server.app.state.workspaces[1].test_runtimes[&preview_pane]
+            .test_hold_terminal_lock(Duration::from_millis(300));
+        locked
+            .recv_timeout(Duration::from_millis(100))
+            .expect("preview terminal lock");
+
+        let started = std::time::Instant::now();
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("switcher opening frame");
+        let elapsed = started.elapsed();
+        holder.join().expect("preview terminal lock holder");
+
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "switcher opening waited for a busy preview pane: {:?}",
+            elapsed
         );
     }
 

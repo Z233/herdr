@@ -394,8 +394,22 @@ impl TerminalRuntime {
         self.0.render(frame, area, show_cursor);
     }
 
-    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
-        self.0.render_bottom_aligned(frame, area);
+    pub fn render_bottom_aligned(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        default_background: ratatui::style::Color,
+    ) {
+        self.0
+            .render_bottom_aligned(frame, area, default_background);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_hold_terminal_lock(
+        &self,
+        duration: std::time::Duration,
+    ) -> (std::sync::mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+        self.0.test_hold_terminal_lock(duration)
     }
 
     pub(crate) fn collect_dirty_patch(

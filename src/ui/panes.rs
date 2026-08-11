@@ -248,6 +248,7 @@ pub(super) fn compute_pane_infos(
         area,
         resize_panes,
         cell_size,
+        PaneRenderMode::Interactive,
     )
 }
 
@@ -259,6 +260,7 @@ pub(super) fn compute_tab_pane_infos(
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
+    mode: PaneRenderMode,
 ) -> Vec<PaneInfo> {
     let multi_pane = tab.layout.pane_count() > 1;
 
@@ -273,8 +275,10 @@ pub(super) fn compute_tab_pane_infos(
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
-            (inner_rect, scrollbar_rect) =
-                stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
+            if mode == PaneRenderMode::Interactive {
+                (inner_rect, scrollbar_rect) =
+                    stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
+            }
             if resize_panes
                 && tab.terminal_id(focused_id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
@@ -306,8 +310,10 @@ pub(super) fn compute_tab_pane_infos(
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            (inner_rect, scrollbar_rect) =
-                stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
+            if mode == PaneRenderMode::Interactive {
+                (inner_rect, scrollbar_rect) =
+                    stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
+            }
             if resize_panes
                 && tab.terminal_id(info.id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
@@ -388,9 +394,11 @@ pub(super) fn render_tab_panes(
             if interactive {
                 rt.render(frame, info.inner_rect, show_cursor);
             } else {
-                rt.render_bottom_aligned(frame, info.inner_rect);
+                rt.render_bottom_aligned(frame, info.inner_rect, app.palette.panel_bg);
             }
-            render_pane_scrollbar(app, frame, info, rt);
+            if interactive {
+                render_pane_scrollbar(app, frame, info, rt);
+            }
 
             let should_dim = interactive
                 && ((!info.is_focused && multi_pane && !terminal_active)

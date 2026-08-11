@@ -101,6 +101,7 @@ pub(crate) fn render_tab_surface_preview(
         area,
         false,
         crate::kitty_graphics::HostCellSize::default(),
+        PaneRenderMode::Preview,
     );
     render_tab_panes(
         app,

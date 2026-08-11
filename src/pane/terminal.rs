@@ -437,8 +437,9 @@ impl PaneTerminal {
         self.ghostty.render(frame, area, show_cursor);
     }
 
-    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
-        self.ghostty.render_bottom_aligned(frame, area);
+    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect, default_background: Color) {
+        self.ghostty
+            .render_bottom_aligned(frame, area, default_background);
     }
 
     pub fn collect_dirty_patch(
@@ -1917,23 +1918,34 @@ impl GhosttyPaneTerminal {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
-        self.render_aligned(frame, area, show_cursor, false);
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        Self::render_aligned(&mut core, frame, area, show_cursor, false, None);
     }
 
-    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect) {
-        self.render_aligned(frame, area, false, true);
+    pub fn render_bottom_aligned(&self, frame: &mut Frame, area: Rect, default_background: Color) {
+        let Ok(mut core) = self.core.try_lock() else {
+            return;
+        };
+        Self::render_aligned(
+            &mut core,
+            frame,
+            area,
+            false,
+            true,
+            Some(default_background),
+        );
     }
 
     fn render_aligned(
-        &self,
+        core: &mut GhosttyPaneCore,
         frame: &mut Frame,
         area: Rect,
         show_cursor: bool,
         bottom_aligned: bool,
+        default_background: Option<Color>,
     ) {
-        let Ok(mut core) = self.core.lock() else {
-            return;
-        };
         let host_theme = core.host_terminal_theme;
         let initial_default_foreground = core.initial_default_foreground;
         let initial_default_background = core.initial_default_background;
@@ -1948,7 +1960,8 @@ impl GhosttyPaneTerminal {
         }
         let colors = render_state.colors().ok();
         let default_bg = colors
-            .and_then(|c| ghostty_default_bg(c.background, host_theme, initial_default_background));
+            .and_then(|c| ghostty_default_bg(c.background, host_theme, initial_default_background))
+            .or(default_background);
         let default_fg = colors
             .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
         let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
@@ -2058,7 +2071,7 @@ impl GhosttyPaneTerminal {
         let current_cursor = cursor_state_from_render_state(render_state, decscusr_tracker);
         if show_cursor {
             if let Some(cursor) =
-                effective_cursor_state(&mut core, current_cursor).filter(|cursor| cursor.visible)
+                effective_cursor_state(core, current_cursor).filter(|cursor| cursor.visible)
             {
                 if cursor.x < area.width && cursor.y < area.height {
                     frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
