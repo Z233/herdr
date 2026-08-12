@@ -458,7 +458,7 @@ impl AppState {
             raw
         };
         match managed_worktree_repo_name(ws) {
-            Some(repo) => SwitcherLabel::composite(existing_label, repo.to_string()),
+            Some(repo) => SwitcherLabel::composite(repo.to_string(), existing_label),
             None => SwitcherLabel::plain(existing_label),
         }
     }
@@ -2012,8 +2012,10 @@ impl SwitcherLabel {
         }
     }
 
-    /// Create a composite label from an existing label and repository name.
-    fn composite(existing: String, repo: String) -> Self {
+    /// Create a composite label from a repository name and existing label.
+    /// Argument order matches [`Self::compose`] and [`Self::parts`]:
+    /// `(repo, existing)`.
+    fn composite(repo: String, existing: String) -> Self {
         Self {
             existing,
             repo: Some(repo),
@@ -2048,16 +2050,21 @@ fn managed_worktree_repo_name(ws: &crate::workspace::Workspace) -> Option<&str> 
 }
 
 /// Truncate a composite label (`repo / existing-label`) so that both parts
-/// retain at least one visible character when the separator fits.
+/// retain at least one visible character whenever the separator fits.
 ///
 /// When the full composite fits in `max_width`, it is returned unchanged.
-/// When there is room for the separator plus at least one visible character
-/// (plus `…`) for each part, each part is truncated independently using
-/// [`truncate_text`] and the budgets are balanced (leftover space from a
-/// part that fits is given to the other).
 ///
-/// When even that minimum is impossible, the function falls back to plain
-/// end-truncation of the full composite string via [`truncate_text`].
+/// When `max_width` is at least `sep_len + 1 + 1` (5 for the 3-char
+/// separator), each part keeps at least one visible character and the
+/// separator is preserved. Budgets are balanced (leftover space from a
+/// part that fits is given to the other). When a part's budget is ≥ 2,
+/// [`truncate_text`] is used so the truncation is marked with `…`;
+/// when a part's budget is exactly 1, the single character is used as-is
+/// (no ellipsis substitution for the sole identity character).
+///
+/// When `max_width` is below that minimum (less than 5), the function
+/// falls back to plain end-truncation of the full composite string via
+/// [`truncate_text`].
 fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> String {
     let sep_len = COMPOSITE_SEPARATOR.chars().count();
     let full_len = repo.chars().count() + sep_len + existing.chars().count();
@@ -2066,8 +2073,9 @@ fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> Str
         return SwitcherLabel::compose(repo, existing);
     }
 
-    // Minimum for balanced truncation: separator + 2 (1 char + …) per part.
-    if max_width < sep_len + 2 + 2 {
+    // Minimum for preserving both identities: separator + 1 char per part.
+    let min_balanced = sep_len + 1 + 1;
+    if max_width < min_balanced {
         let full = SwitcherLabel::compose(repo, existing);
         return truncate_text(&full, max_width);
     }
@@ -2086,9 +2094,23 @@ fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> Str
         (repo_share, existing_share)
     };
 
-    let repo_part = truncate_text(repo, repo_budget);
-    let existing_part = truncate_text(existing, existing_budget);
+    let repo_part = truncate_identity_part(repo, repo_budget);
+    let existing_part = truncate_identity_part(existing, existing_budget);
     SwitcherLabel::compose(&repo_part, &existing_part)
+}
+
+/// Truncate a single identity part to `budget` characters. When `budget`
+/// is 0, returns an empty string. When `budget` is 1, returns the first
+/// character as-is (no ellipsis substitution for the sole identity
+/// character). When `budget` ≥ 2, uses [`truncate_text`] which appends `…`.
+fn truncate_identity_part(s: &str, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    if budget == 1 {
+        return s.chars().next().map(|c| c.to_string()).unwrap_or_default();
+    }
+    truncate_text(s, budget)
 }
 
 #[cfg(test)]
@@ -4137,6 +4159,27 @@ mod tests {
     }
 
     #[test]
+    fn standalone_linked_worktree_with_custom_name_shows_composite_label() {
+        // A standalone managed linked worktree (no grouped parent) with a
+        // custom name should render `<repo> / <custom name>` — no branch
+        // substitution, but repo context is still prepended.
+        let mut state = app_with_workspaces(&["other", "my-workspace"]);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = Some("custom-name".into());
+        state.workspaces[1].cached_git_branch = Some("worktree/some-branch".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child.label.parts().0, Some("myrepo"));
+        assert_eq!(child.label.display(), "myrepo / custom-name");
+        // The branch name must not appear — custom name is authoritative.
+        assert!(!child.label.display().contains("some-branch"));
+    }
+
+    #[test]
     fn unmanaged_workspace_has_no_composite_label() {
         let mut state = app_with_workspaces(&["main", "feature"]);
         // No worktree_space at all — completely unmanaged.
@@ -4323,6 +4366,36 @@ mod tests {
     }
 
     #[test]
+    fn truncate_composite_width_5_preserves_both_identities() {
+        // Budget 5 = sep(3) + 1 char per part. No ellipsis.
+        let result = truncate_composite_label("repo", "label", 5);
+        assert_eq!(result, "r / l");
+    }
+
+    #[test]
+    fn truncate_composite_width_6_preserves_both_identities() {
+        // Budget 6 = sep(3) + 3 chars. repo_share = 1, existing_share = 2.
+        // repo gets 1 char (no ellipsis), existing gets 2 chars (1 + …).
+        let result = truncate_composite_label("repo", "label", 6);
+        assert!(
+            result.contains(" / "),
+            "separator must be visible: {result}"
+        );
+        let parts: Vec<&str> = result.split(" / ").collect();
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].is_empty(), "repo part must have a character");
+        assert!(!parts[1].is_empty(), "label part must have a character");
+    }
+
+    #[test]
+    fn truncate_composite_width_4_falls_back_to_end_truncation() {
+        // Budget 4 < 5 (sep + 1 + 1) → end-truncation fallback.
+        let result = truncate_composite_label("repo", "label", 4);
+        // End-truncation: first 3 chars + …
+        assert_eq!(result, "rep…");
+    }
+
+    #[test]
     fn truncate_composite_gives_leftover_to_shorter_part() {
         // repo fits in its share, leftover goes to label.
         // "ab / verylonglabel" = 18 chars, budget 12.
@@ -4336,10 +4409,10 @@ mod tests {
 
     #[test]
     fn truncate_composite_falls_back_to_end_truncation_when_too_narrow() {
-        // Budget < 7 (sep 3 + 2 + 2) → end-truncation fallback.
-        let result = truncate_composite_label("repo", "label", 5);
-        // End-truncation: first 4 chars + …
-        assert_eq!(result, "repo…");
+        // Budget 3 < 5 (sep + 1 + 1) → end-truncation fallback.
+        let result = truncate_composite_label("repo", "label", 3);
+        // End-truncation: first 2 chars + …
+        assert_eq!(result, "re…");
     }
 
     #[test]
@@ -4357,7 +4430,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: SwitcherLabel::composite("longlabel".to_string(), "longrepo".to_string()),
+            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
             meta: "".to_string(),
             is_current: false,
             expanded: false,
@@ -4382,6 +4455,80 @@ mod tests {
         assert!(
             rendered.contains(" / "),
             "narrow composite row should preserve the separator: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn render_composite_row_at_width_5_preserves_both_identities() {
+        let app = AppState::test_new();
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
+                workspace_id: String::new(),
+            },
+            ws_idx: 0,
+            depth: 0,
+            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            is_directory: false,
+            state: crate::detect::AgentState::Idle,
+            seen: false,
+        };
+        // Width 10: fixed prefix " \u{25b8} \u{25cb} " (5 chars), no meta,
+        // title_budget = 10 - 0 - 5 - 1 = 4 — too narrow for balanced (need 5).
+        // But we want to test budget 5, so use width 11: budget = 11 - 0 - 5 - 1 = 5.
+        let area = Rect::new(0, 0, 11, 1);
+        let mut terminal = Terminal::new(TestBackend::new(11, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..11)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains(" / "),
+            "width-5 budget should preserve separator: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn render_composite_row_at_width_6_preserves_both_identities() {
+        let app = AppState::test_new();
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
+                workspace_id: String::new(),
+            },
+            ws_idx: 0,
+            depth: 0,
+            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            is_directory: false,
+            state: crate::detect::AgentState::Idle,
+            seen: false,
+        };
+        // Width 12: fixed prefix 5 chars, title_budget = 12 - 0 - 5 - 1 = 6.
+        let area = Rect::new(0, 0, 12, 1);
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..12)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains(" / "),
+            "width-6 budget should preserve separator: {rendered:?}"
         );
     }
 

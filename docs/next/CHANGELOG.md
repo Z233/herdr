@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Workspace Switcher now shows repository-qualified labels (`repo / label`) for Herdr-managed linked worktrees.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added
