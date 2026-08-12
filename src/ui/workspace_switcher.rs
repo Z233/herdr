@@ -64,6 +64,10 @@ pub(crate) struct WorkspaceSwitcherRow {
     pub is_directory: bool,
     pub state: crate::detect::AgentState,
     pub seen: bool,
+    /// Repository name for managed linked worktrees, used for composite
+    /// label rendering (`repo / existing-label`). `None` for non-composite
+    /// rows (parents, standalone, tabs, directories).
+    pub repo_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,22 +432,43 @@ impl AppState {
             is_directory: true,
             state: crate::detect::AgentState::Idle,
             seen: false,
+            repo_name: None,
         }
     }
 
     /// Compute the display label for a workspace, applying grouped-child
-    /// worktree formatting when applicable. Shared by QuickSwitch, empty-query,
-    /// and Search row builders.
+    /// worktree formatting and repository-name composition when applicable.
+    /// Shared by QuickSwitch, empty-query, and Search row builders.
+    ///
+    /// For managed linked worktrees with a non-empty repository name, the
+    /// label is `<repo> / <existing-label>`. All other workspaces keep their
+    /// existing label unchanged.
     fn workspace_label(
         &self,
         ws_idx: usize,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> String {
+        let (repo_name, existing_label) = self.workspace_label_parts(ws_idx, terminal_runtimes);
+        match repo_name {
+            Some(repo) if !repo.is_empty() => format!("{repo} / {existing_label}"),
+            _ => existing_label,
+        }
+    }
+
+    /// Returns `(repo_name, existing_label)` for a workspace, where
+    /// `repo_name` is `Some` only for managed linked worktrees.
+    /// `existing_label` applies the same grouped-child and display-name rules
+    /// as the sidebar.
+    fn workspace_label_parts(
+        &self,
+        ws_idx: usize,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> (Option<String>, String) {
         let Some(ws) = self.workspaces.get(ws_idx) else {
-            return String::new();
+            return (None, String::new());
         };
         let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
-        if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
+        let existing_label = if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
             crate::ui::sidebar::grouped_child_display_label(
                 &raw,
                 ws.branch().as_deref(),
@@ -451,7 +476,12 @@ impl AppState {
             )
         } else {
             raw
-        }
+        };
+        let repo_name = ws
+            .worktree_space()
+            .filter(|s| s.is_linked_worktree)
+            .map(|s| s.label.clone());
+        (repo_name, existing_label)
     }
 
     fn workspace_switcher_workspace_row(
@@ -473,6 +503,11 @@ impl AppState {
             meta.push_str(&activity);
         }
         let (state, seen) = ws.aggregate_state(&self.terminals);
+        let repo_name = ws
+            .worktree_space()
+            .filter(|s| s.is_linked_worktree)
+            .map(|s| s.label.clone())
+            .filter(|s| !s.is_empty());
 
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -488,6 +523,7 @@ impl AppState {
             is_directory: false,
             state,
             seen,
+            repo_name,
         }
     }
 
@@ -519,6 +555,7 @@ impl AppState {
                     is_directory: false,
                     state,
                     seen,
+                    repo_name: None,
                 }
             })
             .collect()
@@ -1709,7 +1746,14 @@ fn render_row(
         .saturating_sub(meta_width)
         .saturating_sub(fixed_width)
         .saturating_sub(1) as usize;
-    let title = truncate_text(&row.label, title_budget);
+    let title = match row.repo_name.as_deref() {
+        Some(repo) if !repo.is_empty() => {
+            let prefix = format!("{repo}{COMPOSITE_SEPARATOR}");
+            let existing = row.label.strip_prefix(&prefix).unwrap_or(&row.label);
+            truncate_composite_label(repo, existing, title_budget)
+        }
+        _ => truncate_text(&row.label, title_budget),
+    };
     spans.push(Span::styled(title, text_style));
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), rect);
@@ -1966,6 +2010,53 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+/// Separator used between the repository name and the existing workspace
+/// label in a composite switcher row.
+const COMPOSITE_SEPARATOR: &str = " / ";
+
+/// Truncate a composite label (`repo / existing-label`) so that both parts
+/// retain at least one visible character when the separator fits.
+///
+/// When the full composite fits in `max_width`, it is returned unchanged.
+/// When there is room for the separator plus at least one visible character
+/// (plus `…`) for each part, each part is truncated independently using
+/// [`truncate_text`] and the budgets are balanced (leftover space from a
+/// part that fits is given to the other).
+///
+/// When even that minimum is impossible, the function falls back to plain
+/// end-truncation of the full composite string via [`truncate_text`].
+fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> String {
+    let sep_len = COMPOSITE_SEPARATOR.chars().count();
+    let full = format!("{repo}{COMPOSITE_SEPARATOR}{existing}");
+
+    if full.chars().count() <= max_width {
+        return full;
+    }
+
+    // Minimum for balanced truncation: separator + 2 (1 char + …) per part.
+    if max_width < sep_len + 2 + 2 {
+        return truncate_text(&full, max_width);
+    }
+
+    let available = max_width - sep_len;
+    let repo_len = repo.chars().count();
+    let existing_len = existing.chars().count();
+    let repo_share = available / 2;
+    let existing_share = available - repo_share;
+
+    let (repo_budget, existing_budget) = if repo_len <= repo_share {
+        (repo_len, available - repo_len)
+    } else if existing_len <= existing_share {
+        (available - existing_len, existing_len)
+    } else {
+        (repo_share, existing_share)
+    };
+
+    let repo_part = truncate_text(repo, repo_budget);
+    let existing_part = truncate_text(existing, existing_budget);
+    format!("{repo_part}{COMPOSITE_SEPARATOR}{existing_part}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2000,9 +2091,13 @@ mod tests {
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {
+        mark_linked_worktree_with_repo(state, ws_idx, "herdr");
+    }
+
+    fn mark_linked_worktree_with_repo(state: &mut AppState, ws_idx: usize, repo: &str) {
         state.workspaces[ws_idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
-            label: "herdr".into(),
+            label: repo.into(),
             repo_root: "/repo/herdr".into(),
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: true,
@@ -2151,10 +2246,15 @@ mod tests {
         state.open_workspace_switcher();
         let rows = state.workspace_switcher_rows();
 
-        // The grouped child should display the branch name (without "worktree/" prefix),
-        // matching the sidebar's grouped_child_display_label behavior.
+        // The grouped child is a managed linked worktree, so it shows the
+        // composite label: repo name + branch substitution (without "worktree/" prefix).
         let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child_row.label, "issue-137");
+        assert_eq!(child_row.label, "herdr / issue-137");
+        assert_eq!(child_row.repo_name.as_deref(), Some("herdr"));
+
+        // The parent is not a linked worktree — no composite label.
+        let parent_row = rows.iter().find(|r| r.ws_idx == 0).unwrap();
+        assert_eq!(parent_row.repo_name, None);
     }
     #[test]
     fn workspace_switcher_shows_cwd_name_for_standalone_workspace() {
@@ -2185,8 +2285,11 @@ mod tests {
         state.open_workspace_switcher();
         let rows = state.workspace_switcher_rows();
 
+        // Custom name remains authoritative for the existing-label portion;
+        // the repository name is still prepended.
         let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child_row.label, "my-custom-name");
+        assert_eq!(child_row.label, "herdr / my-custom-name");
+        assert_eq!(child_row.repo_name.as_deref(), Some("herdr"));
     }
     #[test]
     fn workspace_switcher_shows_cwd_name_for_linked_only_group() {
@@ -2207,13 +2310,14 @@ mod tests {
         let rows = state.workspace_switcher_rows();
 
         // Without a parent worktree, these are not grouped children —
-        // the CWD-derived name should be used unchanged.
+        // the CWD-derived name is used for the existing-label portion, and
+        // the repo name is prepended because they are linked worktrees.
         let row0 = rows.iter().find(|r| r.ws_idx == 0).unwrap();
-        assert_eq!(row0.label, raw0);
-        assert_ne!(row0.label, "issue-137");
+        assert_eq!(row0.label, format!("herdr / {raw0}"));
+        assert_ne!(row0.label, "herdr / issue-137");
         let row1 = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(row1.label, raw1);
-        assert_ne!(row1.label, "review-42");
+        assert_eq!(row1.label, format!("herdr / {raw1}"));
+        assert_ne!(row1.label, "herdr / review-42");
     }
     #[test]
     fn quick_switch_uses_observed_mru_order_and_preselects_previous_workspace() {
@@ -2896,6 +3000,7 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Blocked,
             seen: false,
+            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -2925,6 +3030,7 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Idle,
             seen: true,
+            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -2955,6 +3061,7 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Working,
             seen: false,
+            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -3939,5 +4046,352 @@ mod tests {
 
         assert_eq!(state.workspace_switcher.selected, 0);
         assert_eq!(state.workspace_switcher.scroll, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Repository-label composite tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composite_label_shown_for_managed_linked_worktree_in_quick_switch() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child.repo_name.as_deref(), Some("myrepo"));
+        // Composite label includes repo name and the branch-derived label.
+        assert!(child.label.starts_with("myrepo / "));
+        assert!(child.label.contains("feature-x"));
+    }
+
+    #[test]
+    fn composite_label_shown_for_custom_named_linked_worktree() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = Some("custom-name".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child.repo_name.as_deref(), Some("myrepo"));
+        assert!(child.label.starts_with("myrepo / "));
+        assert!(child.label.contains("custom-name"));
+    }
+
+    #[test]
+    fn parent_workspace_has_no_composite_label() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree(&mut state, 1);
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let parent = rows.iter().find(|r| r.ws_idx == 0).unwrap();
+        assert_eq!(parent.repo_name, None);
+        assert!(!parent.label.contains(" / "));
+    }
+
+    #[test]
+    fn unmanaged_workspace_has_no_composite_label() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        // No worktree_space at all — completely unmanaged.
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        for row in &rows {
+            assert_eq!(row.repo_name, None);
+            assert!(!row.label.contains(" / "));
+        }
+    }
+
+    #[test]
+    fn empty_repo_name_falls_back_to_existing_label() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        // Empty repo name → no composite, no separator, no placeholder.
+        assert_eq!(child.repo_name, None);
+        assert!(!child.label.contains(" / "));
+        // The existing label (branch substitution) is still present.
+        assert_eq!(child.label, "feature-x");
+    }
+
+    #[test]
+    fn composite_label_consistent_across_quick_switch_empty_query_and_search() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        // QuickSwitch mode.
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let qs_label = state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .iter()
+            .find(|r| r.ws_idx == 1)
+            .map(|r| r.label.clone())
+            .unwrap();
+
+        // Search mode with empty query.
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        let empty_label = state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .iter()
+            .find(|r| r.ws_idx == 1)
+            .map(|r| r.label.clone())
+            .unwrap();
+
+        // Search mode with a query that matches the row.
+        state.workspace_switcher.query = "myrepo".into();
+        let search_label = state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .iter()
+            .find(|r| r.ws_idx == 1)
+            .map(|r| r.label.clone())
+            .unwrap();
+
+        assert_eq!(qs_label, empty_label);
+        assert_eq!(qs_label, search_label);
+        assert!(qs_label.starts_with("myrepo / "));
+    }
+
+    #[test]
+    fn search_matches_repo_name_only() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        state.workspace_switcher.query = "myrepo".into();
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let child = rows.iter().find(|r| r.ws_idx == 1);
+        assert!(child.is_some(), "repo-name-only query should find the row");
+    }
+
+    #[test]
+    fn search_matches_existing_label_only() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        state.workspace_switcher.query = "feature".into();
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let child = rows.iter().find(|r| r.ws_idx == 1);
+        assert!(child.is_some(), "label-only query should find the row");
+    }
+
+    #[test]
+    fn search_matches_combined_repo_and_label_terms() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        state.workspace_switcher.query = "myrepo feature".into();
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let child = rows.iter().find(|r| r.ws_idx == 1);
+        assert!(
+            child.is_some(),
+            "combined repo+label query should find the row"
+        );
+    }
+
+    #[test]
+    fn composite_row_preserves_pane_metadata() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        // The meta field should still contain the pane count.
+        assert!(child.meta.contains("pane"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Balanced truncation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_composite_fits_without_truncation() {
+        let result = truncate_composite_label("repo", "label", 20);
+        assert_eq!(result, "repo / label");
+    }
+
+    #[test]
+    fn truncate_composite_preserves_both_parts_when_separator_fits() {
+        // "longrepo / longlabel" = 20 chars, budget 12.
+        // Separator is 3, available = 9, each part gets 4 (floor) and 5.
+        let result = truncate_composite_label("longrepo", "longlabel", 12);
+        assert!(result.contains(" / "), "separator must be visible");
+        // Both parts must have at least one visible character.
+        let parts: Vec<&str> = result.split(" / ").collect();
+        assert_eq!(parts.len(), 2);
+        assert!(
+            parts[0].chars().count() >= 2,
+            "repo part needs >= 1 visible char + …"
+        );
+        assert!(
+            parts[1].chars().count() >= 2,
+            "label part needs >= 1 visible char + …"
+        );
+        assert!(parts[0].ends_with('…'));
+        assert!(parts[1].ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_composite_gives_leftover_to_shorter_part() {
+        // repo fits in its share, leftover goes to label.
+        // "ab / verylonglabel" = 18 chars, budget 12.
+        // Separator 3, available 9, repo_share 4. repo_len 2 <= 4,
+        // so repo_budget=2, label_budget=7.
+        let result = truncate_composite_label("ab", "verylonglabel", 12);
+        assert!(result.starts_with("ab / "));
+        assert!(result.ends_with('…'));
+        assert!(!result.starts_with("ab…"));
+    }
+
+    #[test]
+    fn truncate_composite_falls_back_to_end_truncation_when_too_narrow() {
+        // Budget < 7 (sep 3 + 2 + 2) → end-truncation fallback.
+        let result = truncate_composite_label("repo", "label", 5);
+        // End-truncation: first 4 chars + …
+        assert_eq!(result, "repo…");
+    }
+
+    #[test]
+    fn truncate_composite_zero_width_returns_empty() {
+        let result = truncate_composite_label("repo", "label", 0);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn render_narrow_composite_row_preserves_both_parts() {
+        let app = AppState::test_new();
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
+                workspace_id: String::new(),
+            },
+            ws_idx: 0,
+            depth: 0,
+            label: "longrepo / longlabel".to_string(),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            is_directory: false,
+            state: crate::detect::AgentState::Idle,
+            seen: false,
+            repo_name: Some("longrepo".to_string()),
+        };
+        // Width 25: fixed prefix is " ▸ ○ " (5 chars), no meta, budget ~19.
+        // Full label is 20 chars, so it will be truncated.
+        let area = Rect::new(0, 0, 25, 1);
+        let mut terminal = Terminal::new(TestBackend::new(25, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..25)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains(" / "),
+            "narrow composite row should preserve the separator: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn render_non_composite_row_uses_end_truncation() {
+        let app = AppState::test_new();
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
+                workspace_id: String::new(),
+            },
+            ws_idx: 0,
+            depth: 0,
+            label: "verylongworkspacename".to_string(),
+            meta: "".to_string(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            is_directory: false,
+            state: crate::detect::AgentState::Idle,
+            seen: false,
+            repo_name: None,
+        };
+        // Width 20: fixed prefix " ▸ ○ " (5 chars), budget ~14.
+        let area = Rect::new(0, 0, 20, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..20)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        // End-truncated: should end with … and not contain separator.
+        assert!(
+            rendered.contains('…'),
+            "non-composite row should use end-truncation: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(" / "),
+            "non-composite row should not have separator: {rendered:?}"
+        );
     }
 }
