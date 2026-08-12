@@ -56,7 +56,7 @@ pub(crate) struct WorkspaceSwitcherRow {
     pub target: WorkspaceSwitcherTarget,
     pub ws_idx: usize,
     pub depth: u8,
-    pub label: String,
+    pub label: SwitcherLabel,
     pub meta: String,
     pub is_current: bool,
     pub expanded: bool,
@@ -64,10 +64,6 @@ pub(crate) struct WorkspaceSwitcherRow {
     pub is_directory: bool,
     pub state: crate::detect::AgentState,
     pub seen: bool,
-    /// Repository name for managed linked worktrees, used for composite
-    /// label rendering (`repo / existing-label`). `None` for non-composite
-    /// rows (parents, standalone, tabs, directories).
-    pub repo_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,9 +327,10 @@ impl AppState {
                 continue;
             }
             let label = self.workspace_label(ws_idx, terminal_runtimes);
+            let label_text = label.display();
 
             // Match workspace name.
-            let mut best_rank = workspace_switcher_match_rank(query, &label);
+            let mut best_rank = workspace_switcher_match_rank(query, &label_text);
 
             // If this workspace is the enriched one for its canonical path,
             // also match against the zoxide candidate using the candidate's
@@ -415,7 +412,7 @@ impl AppState {
         &self,
         candidate: &crate::app::workspace_search_provider::SearchProviderCandidate,
     ) -> WorkspaceSwitcherRow {
-        let label = candidate.basename();
+        let label = SwitcherLabel::plain(candidate.basename());
         let meta = candidate.abbreviated_path();
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Directory {
@@ -432,7 +429,6 @@ impl AppState {
             is_directory: true,
             state: crate::detect::AgentState::Idle,
             seen: false,
-            repo_name: None,
         }
     }
 
@@ -441,15 +437,15 @@ impl AppState {
     /// Shared by QuickSwitch, empty-query, and Search row builders.
     ///
     /// For managed linked worktrees with a non-empty repository name, the
-    /// label is `<repo>` + `COMPOSITE_SEPARATOR` + `<existing-label>`.
-    /// All other workspaces keep their existing label unchanged.
+    /// returned [`SwitcherLabel`] carries the repo and existing-label as
+    /// separate structured parts. All other workspaces return a plain label.
     fn workspace_label(
         &self,
         ws_idx: usize,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) -> String {
+    ) -> SwitcherLabel {
         let Some(ws) = self.workspaces.get(ws_idx) else {
-            return String::new();
+            return SwitcherLabel::default();
         };
         let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
         let existing_label = if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
@@ -462,15 +458,15 @@ impl AppState {
             raw
         };
         match managed_worktree_repo_name(ws) {
-            Some(repo) => format!("{repo}{COMPOSITE_SEPARATOR}{existing_label}"),
-            None => existing_label,
+            Some(repo) => SwitcherLabel::composite(existing_label, repo.to_string()),
+            None => SwitcherLabel::plain(existing_label),
         }
     }
 
     fn workspace_switcher_workspace_row(
         &self,
         ws_idx: usize,
-        label: String,
+        label: SwitcherLabel,
         expanded: bool,
     ) -> WorkspaceSwitcherRow {
         let ws = &self.workspaces[ws_idx];
@@ -486,7 +482,6 @@ impl AppState {
             meta.push_str(&activity);
         }
         let (state, seen) = ws.aggregate_state(&self.terminals);
-        let repo_name = managed_worktree_repo_name(ws).map(str::to_string);
 
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -502,7 +497,6 @@ impl AppState {
             is_directory: false,
             state,
             seen,
-            repo_name,
         }
     }
 
@@ -522,7 +516,7 @@ impl AppState {
                     },
                     ws_idx,
                     depth: 1,
-                    label: tab.display_name(),
+                    label: SwitcherLabel::plain(tab.display_name()),
                     meta: if pane_count == 1 {
                         "1 pane".to_string()
                     } else {
@@ -534,7 +528,6 @@ impl AppState {
                     is_directory: false,
                     state,
                     seen,
-                    repo_name: None,
                 }
             })
             .collect()
@@ -1687,7 +1680,7 @@ fn render_row(
             .saturating_sub(meta_width)
             .saturating_sub(fixed_width)
             .saturating_sub(1) as usize;
-        let title = truncate_text(&row.label, title_budget);
+        let title = truncate_text(row.label.parts().1, title_budget);
         spans.push(Span::styled(title, dir_text_style));
         frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), rect);
         if meta_width > 0 {
@@ -1725,13 +1718,9 @@ fn render_row(
         .saturating_sub(meta_width)
         .saturating_sub(fixed_width)
         .saturating_sub(1) as usize;
-    let title = match row.repo_name.as_deref() {
-        Some(repo) if !repo.is_empty() => {
-            let prefix = format!("{repo}{COMPOSITE_SEPARATOR}");
-            let existing = row.label.strip_prefix(&prefix).unwrap_or(&row.label);
-            truncate_composite_label(repo, existing, title_budget)
-        }
-        _ => truncate_text(&row.label, title_budget),
+    let title = match row.label.parts() {
+        (Some(repo), existing) => truncate_composite_label(repo, existing, title_budget),
+        (None, existing) => truncate_text(existing, title_budget),
     };
     spans.push(Span::styled(title, text_style));
 
@@ -1817,7 +1806,7 @@ fn render_preview(
     let selected_label = app
         .workspace_switcher_rows_from(terminal_runtimes)
         .get(app.workspace_switcher.selected)
-        .map(|row| row.label.clone())
+        .map(|row| row.label.display())
         .unwrap_or_else(|| "preview".to_string());
     let title = truncate_text(
         &format!(" preview: {selected_label}"),
@@ -1993,12 +1982,64 @@ fn truncate_text(text: &str, max_width: usize) -> String {
 /// label in a composite switcher row.
 const COMPOSITE_SEPARATOR: &str = " / ";
 
+/// Structured label for a switcher row. Carries the repository name and
+/// existing workspace label as separate parts so rendering and truncation
+/// never parse a display string. Composite display construction is
+/// centralized in [`SwitcherLabel::compose`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SwitcherLabel {
+    /// The existing workspace label (after grouped-child substitution).
+    existing: String,
+    /// Repository name for managed linked worktrees. When present, the
+    /// display string is `compose(repo, existing)`.
+    repo: Option<String>,
+}
+
+impl SwitcherLabel {
+    /// Compose the display string from repository and existing-label parts.
+    /// This is the single production path for composite label construction;
+    /// all callers that need the composite string go through here or
+    /// [`Self::display`].
+    fn compose(repo: &str, existing: &str) -> String {
+        format!("{repo}{COMPOSITE_SEPARATOR}{existing}")
+    }
+
+    /// Create a plain (non-composite) label.
+    fn plain(existing: String) -> Self {
+        Self {
+            existing,
+            repo: None,
+        }
+    }
+
+    /// Create a composite label from an existing label and repository name.
+    fn composite(existing: String, repo: String) -> Self {
+        Self {
+            existing,
+            repo: Some(repo),
+        }
+    }
+
+    /// Full display string for search matching and preview titles.
+    fn display(&self) -> String {
+        match &self.repo {
+            Some(r) => Self::compose(r, &self.existing),
+            None => self.existing.clone(),
+        }
+    }
+
+    /// Returns `(repo, existing)` parts for rendering and truncation.
+    /// `repo` is `None` for non-composite labels.
+    fn parts(&self) -> (Option<&str>, &str) {
+        (self.repo.as_deref(), &self.existing)
+    }
+}
+
 /// Returns the non-empty repository name for a Herdr-managed linked
 /// worktree, or `None` for non-linked or empty-name workspaces.
 ///
 /// This is the single source of truth for the repo-name portion of a
-/// composite switcher label, used by both label construction and row
-/// construction.
+/// composite switcher label, used by label construction.
 fn managed_worktree_repo_name(ws: &crate::workspace::Workspace) -> Option<&str> {
     ws.worktree_space()
         .filter(|s| s.is_linked_worktree)
@@ -2019,14 +2060,15 @@ fn managed_worktree_repo_name(ws: &crate::workspace::Workspace) -> Option<&str> 
 /// end-truncation of the full composite string via [`truncate_text`].
 fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> String {
     let sep_len = COMPOSITE_SEPARATOR.chars().count();
-    let full = format!("{repo}{COMPOSITE_SEPARATOR}{existing}");
+    let full_len = repo.chars().count() + sep_len + existing.chars().count();
 
-    if full.chars().count() <= max_width {
-        return full;
+    if full_len <= max_width {
+        return SwitcherLabel::compose(repo, existing);
     }
 
     // Minimum for balanced truncation: separator + 2 (1 char + …) per part.
     if max_width < sep_len + 2 + 2 {
+        let full = SwitcherLabel::compose(repo, existing);
         return truncate_text(&full, max_width);
     }
 
@@ -2046,7 +2088,7 @@ fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> Str
 
     let repo_part = truncate_text(repo, repo_budget);
     let existing_part = truncate_text(existing, existing_budget);
-    format!("{repo_part}{COMPOSITE_SEPARATOR}{existing_part}")
+    SwitcherLabel::compose(&repo_part, &existing_part)
 }
 
 #[cfg(test)]
@@ -2241,12 +2283,12 @@ mod tests {
         // The grouped child is a managed linked worktree, so it shows the
         // composite label: repo name + branch substitution (without "worktree/" prefix).
         let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child_row.label, "herdr / issue-137");
-        assert_eq!(child_row.repo_name.as_deref(), Some("herdr"));
+        assert_eq!(child_row.label.display(), "herdr / issue-137");
+        assert_eq!(child_row.label.parts().0, Some("herdr"));
 
         // The parent is not a linked worktree — no composite label.
         let parent_row = rows.iter().find(|r| r.ws_idx == 0).unwrap();
-        assert_eq!(parent_row.repo_name, None);
+        assert_eq!(parent_row.label.parts().0, None);
     }
     #[test]
     fn workspace_switcher_shows_cwd_name_for_standalone_workspace() {
@@ -2263,8 +2305,8 @@ mod tests {
 
         // Standalone workspace — no branch substitution, label is CWD-derived.
         let row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(row.label, raw_label);
-        assert_ne!(row.label, "issue-137");
+        assert_eq!(row.label.display(), raw_label);
+        assert_ne!(row.label.display(), "issue-137");
     }
     #[test]
     fn workspace_switcher_keeps_custom_name_for_grouped_child() {
@@ -2280,8 +2322,8 @@ mod tests {
         // Custom name remains authoritative for the existing-label portion;
         // the repository name is still prepended.
         let child_row = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child_row.label, "herdr / my-custom-name");
-        assert_eq!(child_row.repo_name.as_deref(), Some("herdr"));
+        assert_eq!(child_row.label.display(), "herdr / my-custom-name");
+        assert_eq!(child_row.label.parts().0, Some("herdr"));
     }
     #[test]
     fn workspace_switcher_shows_cwd_name_for_linked_only_group() {
@@ -2305,11 +2347,11 @@ mod tests {
         // the CWD-derived name is used for the existing-label portion, and
         // the repo name is prepended because they are linked worktrees.
         let row0 = rows.iter().find(|r| r.ws_idx == 0).unwrap();
-        assert_eq!(row0.label, format!("herdr / {raw0}"));
-        assert_ne!(row0.label, "herdr / issue-137");
+        assert_eq!(row0.label.display(), format!("herdr / {raw0}"));
+        assert_ne!(row0.label.display(), "herdr / issue-137");
         let row1 = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(row1.label, format!("herdr / {raw1}"));
-        assert_ne!(row1.label, "herdr / review-42");
+        assert_eq!(row1.label.display(), format!("herdr / {raw1}"));
+        assert_ne!(row1.label.display(), "herdr / review-42");
     }
     #[test]
     fn quick_switch_uses_observed_mru_order_and_preselects_previous_workspace() {
@@ -2476,7 +2518,7 @@ mod tests {
         assert!(state
             .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
-            .any(|row| row.ws_idx == 1 && row.is_tab && row.label == "logs"));
+            .any(|row| row.ws_idx == 1 && row.is_tab && row.label.display() == "logs"));
 
         handle_workspace_switcher_key(
             &mut state,
@@ -2600,7 +2642,9 @@ mod tests {
                 state
                     .workspace_switcher_rows_from(&terminal_runtimes)
                     .iter()
-                    .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
+                    .any(|row| row.ws_idx == initial_ws
+                        && row.is_tab
+                        && row.label.display() == "logs"),
                 "{binding} should expand with the configured modifier"
             );
 
@@ -2760,7 +2804,7 @@ mod tests {
             state
                 .workspace_switcher_rows_from(&terminal_runtimes)
                 .iter()
-                .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label == "logs"),
+                .any(|row| row.ws_idx == initial_ws && row.is_tab && row.label.display() == "logs"),
             "expand command should work when Shift is held alongside modifier"
         );
 
@@ -2984,7 +3028,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: "test".to_string(),
+            label: SwitcherLabel::plain("test".to_string()),
             meta: "".to_string(),
             is_current: true,
             expanded: false,
@@ -2992,7 +3036,6 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Blocked,
             seen: false,
-            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -3014,7 +3057,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: "test".to_string(),
+            label: SwitcherLabel::plain("test".to_string()),
             meta: "".to_string(),
             is_current: false,
             expanded: false,
@@ -3022,7 +3065,6 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Idle,
             seen: true,
-            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -3045,7 +3087,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 1,
-            label: "ws".to_string(),
+            label: SwitcherLabel::plain("ws".to_string()),
             meta: "".to_string(),
             is_current: false,
             expanded: false,
@@ -3053,7 +3095,6 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Working,
             seen: false,
-            repo_name: None,
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
@@ -3148,7 +3189,7 @@ mod tests {
         let rows = state.workspace_switcher_rows();
         let dir_rows: Vec<_> = rows.iter().filter(|r| r.is_directory).collect();
         assert_eq!(dir_rows.len(), 1);
-        assert_eq!(dir_rows[0].label, "myproject");
+        assert_eq!(dir_rows[0].label.display(), "myproject");
     }
 
     #[test]
@@ -3167,7 +3208,7 @@ mod tests {
         let dir_rows: Vec<_> = rows.iter().filter(|r| r.is_directory).collect();
         assert_eq!(dir_rows.len(), 2);
         // Basename match (tier 0) should rank before path match.
-        assert_eq!(dir_rows[0].label, "alpha");
+        assert_eq!(dir_rows[0].label.display(), "alpha");
     }
 
     #[test]
@@ -3182,7 +3223,7 @@ mod tests {
         let rows = state.workspace_switcher_rows();
         // Workspace should come before directory on equal match quality.
         assert!(!rows[0].is_directory);
-        assert!(rows[0].label == "alpha");
+        assert!(rows[0].label.display() == "alpha");
     }
 
     #[test]
@@ -3200,9 +3241,9 @@ mod tests {
         let all_rows = state.workspace_switcher_rows();
         let dir_rows: Vec<_> = all_rows.iter().filter(|r| r.is_directory).collect();
         assert_eq!(dir_rows.len(), 3);
-        assert_eq!(dir_rows[0].label, "foo-high");
-        assert_eq!(dir_rows[1].label, "foo-mid");
-        assert_eq!(dir_rows[2].label, "foo-low");
+        assert_eq!(dir_rows[0].label.display(), "foo-high");
+        assert_eq!(dir_rows[1].label.display(), "foo-mid");
+        assert_eq!(dir_rows[2].label.display(), "foo-low");
     }
 
     #[test]
@@ -3766,8 +3807,8 @@ mod tests {
         assert_eq!(rows.len(), 2);
         // A (path-only match, quality 0) ranks before B (basename contains,
         // quality 1) even though B has a higher score.
-        assert_eq!(rows[0].label, "bar");
-        assert_eq!(rows[1].label, "xfoo");
+        assert_eq!(rows[0].label.display(), "bar");
+        assert_eq!(rows[1].label.display(), "xfoo");
     }
 
     // -----------------------------------------------------------------------
@@ -4057,10 +4098,10 @@ mod tests {
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
 
         let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child.repo_name.as_deref(), Some("myrepo"));
+        assert_eq!(child.label.parts().0, Some("myrepo"));
         // Composite label includes repo name and the branch-derived label.
-        assert!(child.label.starts_with("myrepo / "));
-        assert!(child.label.contains("feature-x"));
+        assert!(child.label.display().starts_with("myrepo / "));
+        assert!(child.label.display().contains("feature-x"));
     }
 
     #[test]
@@ -4075,9 +4116,9 @@ mod tests {
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
 
         let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        assert_eq!(child.repo_name.as_deref(), Some("myrepo"));
-        assert!(child.label.starts_with("myrepo / "));
-        assert!(child.label.contains("custom-name"));
+        assert_eq!(child.label.parts().0, Some("myrepo"));
+        assert!(child.label.display().starts_with("myrepo / "));
+        assert!(child.label.display().contains("custom-name"));
     }
 
     #[test]
@@ -4091,8 +4132,8 @@ mod tests {
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
 
         let parent = rows.iter().find(|r| r.ws_idx == 0).unwrap();
-        assert_eq!(parent.repo_name, None);
-        assert!(!parent.label.contains(" / "));
+        assert_eq!(parent.label.parts().0, None);
+        assert!(!parent.label.display().contains(" / "));
     }
 
     #[test]
@@ -4105,8 +4146,8 @@ mod tests {
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
 
         for row in &rows {
-            assert_eq!(row.repo_name, None);
-            assert!(!row.label.contains(" / "));
+            assert_eq!(row.label.parts().0, None);
+            assert!(!row.label.display().contains(" / "));
         }
     }
 
@@ -4124,10 +4165,10 @@ mod tests {
 
         let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
         // Empty repo name → no composite, no separator, no placeholder.
-        assert_eq!(child.repo_name, None);
-        assert!(!child.label.contains(" / "));
+        assert_eq!(child.label.parts().0, None);
+        assert!(!child.label.display().contains(" / "));
         // The existing label (branch substitution) is still present.
-        assert_eq!(child.label, "feature-x");
+        assert_eq!(child.label.display(), "feature-x");
     }
 
     #[test]
@@ -4146,7 +4187,7 @@ mod tests {
             .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
             .find(|r| r.ws_idx == 1)
-            .map(|r| r.label.clone())
+            .map(|r| r.label.display())
             .unwrap();
 
         // Search mode with empty query.
@@ -4156,7 +4197,7 @@ mod tests {
             .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
             .find(|r| r.ws_idx == 1)
-            .map(|r| r.label.clone())
+            .map(|r| r.label.display())
             .unwrap();
 
         // Search mode with a query that matches the row.
@@ -4165,7 +4206,7 @@ mod tests {
             .workspace_switcher_rows_from(&terminal_runtimes)
             .iter()
             .find(|r| r.ws_idx == 1)
-            .map(|r| r.label.clone())
+            .map(|r| r.label.display())
             .unwrap();
 
         assert_eq!(qs_label, empty_label);
@@ -4316,7 +4357,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: "longrepo / longlabel".to_string(),
+            label: SwitcherLabel::composite("longlabel".to_string(), "longrepo".to_string()),
             meta: "".to_string(),
             is_current: false,
             expanded: false,
@@ -4324,7 +4365,6 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Idle,
             seen: false,
-            repo_name: Some("longrepo".to_string()),
         };
         // Width 25: fixed prefix is " ▸ ○ " (5 chars), no meta, budget ~19.
         // Full label is 20 chars, so it will be truncated.
@@ -4354,7 +4394,7 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: "verylongworkspacename".to_string(),
+            label: SwitcherLabel::plain("verylongworkspacename".to_string()),
             meta: "".to_string(),
             is_current: false,
             expanded: false,
@@ -4362,7 +4402,6 @@ mod tests {
             is_directory: false,
             state: crate::detect::AgentState::Idle,
             seen: false,
-            repo_name: None,
         };
         // Width 20: fixed prefix " ▸ ○ " (5 chars), budget ~14.
         let area = Rect::new(0, 0, 20, 1);
