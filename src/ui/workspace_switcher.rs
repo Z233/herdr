@@ -441,31 +441,15 @@ impl AppState {
     /// Shared by QuickSwitch, empty-query, and Search row builders.
     ///
     /// For managed linked worktrees with a non-empty repository name, the
-    /// label is `<repo> / <existing-label>`. All other workspaces keep their
-    /// existing label unchanged.
+    /// label is `<repo>` + `COMPOSITE_SEPARATOR` + `<existing-label>`.
+    /// All other workspaces keep their existing label unchanged.
     fn workspace_label(
         &self,
         ws_idx: usize,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> String {
-        let (repo_name, existing_label) = self.workspace_label_parts(ws_idx, terminal_runtimes);
-        match repo_name {
-            Some(repo) if !repo.is_empty() => format!("{repo} / {existing_label}"),
-            _ => existing_label,
-        }
-    }
-
-    /// Returns `(repo_name, existing_label)` for a workspace, where
-    /// `repo_name` is `Some` only for managed linked worktrees.
-    /// `existing_label` applies the same grouped-child and display-name rules
-    /// as the sidebar.
-    fn workspace_label_parts(
-        &self,
-        ws_idx: usize,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-    ) -> (Option<String>, String) {
         let Some(ws) = self.workspaces.get(ws_idx) else {
-            return (None, String::new());
+            return String::new();
         };
         let raw = ws.display_name_from(&self.terminals, terminal_runtimes);
         let existing_label = if crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) {
@@ -477,11 +461,10 @@ impl AppState {
         } else {
             raw
         };
-        let repo_name = ws
-            .worktree_space()
-            .filter(|s| s.is_linked_worktree)
-            .map(|s| s.label.clone());
-        (repo_name, existing_label)
+        match managed_worktree_repo_name(ws) {
+            Some(repo) => format!("{repo}{COMPOSITE_SEPARATOR}{existing_label}"),
+            None => existing_label,
+        }
     }
 
     fn workspace_switcher_workspace_row(
@@ -503,11 +486,7 @@ impl AppState {
             meta.push_str(&activity);
         }
         let (state, seen) = ws.aggregate_state(&self.terminals);
-        let repo_name = ws
-            .worktree_space()
-            .filter(|s| s.is_linked_worktree)
-            .map(|s| s.label.clone())
-            .filter(|s| !s.is_empty());
+        let repo_name = managed_worktree_repo_name(ws).map(str::to_string);
 
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -2013,6 +1992,19 @@ fn truncate_text(text: &str, max_width: usize) -> String {
 /// Separator used between the repository name and the existing workspace
 /// label in a composite switcher row.
 const COMPOSITE_SEPARATOR: &str = " / ";
+
+/// Returns the non-empty repository name for a Herdr-managed linked
+/// worktree, or `None` for non-linked or empty-name workspaces.
+///
+/// This is the single source of truth for the repo-name portion of a
+/// composite switcher label, used by both label construction and row
+/// construction.
+fn managed_worktree_repo_name(ws: &crate::workspace::Workspace) -> Option<&str> {
+    ws.worktree_space()
+        .filter(|s| s.is_linked_worktree)
+        .map(|s| s.label.as_str())
+        .filter(|s| !s.is_empty())
+}
 
 /// Truncate a composite label (`repo / existing-label`) so that both parts
 /// retain at least one visible character when the separator fits.
