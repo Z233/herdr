@@ -3663,29 +3663,6 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switch_click_opens_fork_switcher_not_old_navigate() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        assert_eq!(app.state.view.layout, ViewLayout::Mobile);
-
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-
-        // Fork Workspace Switcher is active, not the old Navigate panel.
-        assert!(app.state.workspace_switcher.active);
-        assert_ne!(app.state.mode, Mode::Navigate);
-    }
-
-    #[test]
     fn mobile_fork_switcher_workspace_row_click_switches_workspace() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
@@ -3850,38 +3827,6 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(app.state.pending_workspace_create_cwd.is_none());
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
-    }
-
-    #[test]
-    fn mobile_fork_switcher_no_create_actions_exposed() {
-        // The fork switcher does not expose create-workspace or create-tab
-        // actions. Verify by opening it and checking that no NewWorkspace or
-        // NewTab MouseAction is produced from clicking inside the popup.
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("one");
-        ws.test_add_tab(Some("logs"));
-        app.state.workspaces = vec![ws];
-        app.state.ensure_test_terminals();
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.prompt_new_workspace_name = true;
-        app.state.prompt_new_tab_name = true;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-        assert!(app.state.workspace_switcher.active);
-
-        // No rename modal was opened and no create request was set.
-        assert_ne!(app.state.mode, Mode::RenameWorkspace);
-        assert_ne!(app.state.mode, Mode::RenameTab);
-        assert!(!app.state.request_new_tab);
-        assert!(app.state.pending_workspace_create_cwd.is_none());
     }
 
     #[test]

@@ -219,6 +219,14 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    // Reset the zero-workspace auto-open latch whenever workspaces exist,
+    // regardless of layout (mobile or desktop). This ensures a stale latch
+    // from a prior mobile zero-workspace session does not suppress a fresh
+    // auto-open after a layout transition through desktop.
+    if !app.workspaces.is_empty() {
+        app.mobile_zero_workspace_switcher_shown = false;
+    }
+
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -388,9 +396,7 @@ fn compute_mobile_view(
     // When mobile enters the zero-workspace Navigate state, auto-open the
     // fork Workspace Switcher once so the user sees the "no workspaces"
     // state instead of an empty shell. The flag prevents reopening after Esc.
-    if !app.workspaces.is_empty() {
-        app.mobile_zero_workspace_switcher_shown = false;
-    } else if app.mode == Mode::Navigate
+    if app.mode == Mode::Navigate
         && !app.workspace_switcher.active
         && !app.mobile_zero_workspace_switcher_shown
     {
@@ -456,6 +462,10 @@ pub fn render_with_runtime_registry(
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
+        // Mobile Navigate intentionally leaves the shell empty (header +
+        // terminal only). The old full-screen Mobile Navigation Panel is
+        // retained as source but no longer rendered; the fork Workspace
+        // Switcher overlay renders independently afterward when active.
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {}
         Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
         Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
@@ -1688,6 +1698,56 @@ switch_workspace = "ctrl+1..9"
         assert!(
             app.workspace_switcher.active,
             "switcher should auto-open again after a fresh zero-workspace entry"
+        );
+    }
+
+    #[test]
+    fn desktop_non_empty_compute_resets_zero_workspace_latch() {
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 64;
+        app.mode = Mode::Navigate;
+        app.active = None;
+
+        // Mobile zero-workspace auto-opens and sets the latch.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(app.workspace_switcher.active);
+        assert!(app.mobile_zero_workspace_switcher_shown);
+
+        // Esc closes the switcher; the latch stays set.
+        let runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app,
+            &runtimes,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+        );
+        assert!(!app.workspace_switcher.active);
+        assert!(app.mobile_zero_workspace_switcher_shown);
+
+        // Resize to desktop, create a workspace, and compute desktop.
+        // The latch must reset even though we are NOT in mobile layout.
+        app.workspaces.push(Workspace::test_new("desktop-ws"));
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        compute_view(&mut app, Rect::new(0, 0, 120, 30));
+        assert_eq!(app.view.layout, ViewLayout::Desktop);
+        assert!(
+            !app.mobile_zero_workspace_switcher_shown,
+            "desktop non-empty compute must reset the latch"
+        );
+
+        // Close the workspace on desktop, return to mobile zero-workspace.
+        app.workspaces.clear();
+        app.active = None;
+        app.mode = Mode::Navigate;
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert!(
+            app.workspace_switcher.active,
+            "fresh mobile zero-workspace must auto-open after desktop latch reset"
         );
     }
 

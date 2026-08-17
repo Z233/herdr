@@ -130,6 +130,7 @@ pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
     mobile_switcher_max_scroll_for_height(app, mobile_switcher_areas(app).viewport.height)
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 pub(crate) fn mobile_switcher_target_at(
     app: &AppState,
@@ -280,6 +281,7 @@ pub(crate) fn render_mobile_toast_banner(
     );
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 pub(crate) fn render_mobile_panel(
     app: &AppState,
@@ -420,6 +422,7 @@ fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_close_button(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -472,6 +475,7 @@ fn mobile_switcher_content_height(app: &AppState) -> usize {
     spaces_h + tabs_h + agents_h + menu_h
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_mobile_switcher_content(
     app: &AppState,
@@ -743,6 +747,7 @@ fn render_mobile_switcher_content(
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
@@ -764,6 +769,7 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     format!("  {}", parts.join(" · "))
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_section_title_at(
     frame: &mut Frame,
@@ -785,6 +791,7 @@ fn render_section_title_at(
     );
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_action_row_at(
     frame: &mut Frame,
@@ -801,6 +808,7 @@ fn render_action_row_at(
     render_action_row(frame, Rect::new(content.x, y, content.width, 1), label, p);
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_one_line_item(
     frame: &mut Frame,
@@ -828,6 +836,7 @@ fn render_one_line_item(
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_two_line_item(
     frame: &mut Frame,
@@ -863,12 +872,14 @@ fn render_two_line_item(
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn visible_y(viewport: Rect, scroll: usize, doc_y: usize) -> Option<u16> {
     let offset = doc_y.checked_sub(scroll)?;
     (offset < viewport.height as usize).then_some(viewport.y + offset as u16)
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn fill_visible_doc_rect(
     frame: &mut Frame,
@@ -886,6 +897,7 @@ fn fill_visible_doc_rect(
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn mobile_item_bg(selected: bool, active: bool, p: &Palette) -> ratatui::style::Color {
     if selected {
@@ -897,6 +909,7 @@ fn mobile_item_bg(selected: bool, active: bool, p: &Palette) -> ratatui::style::
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn inset_for_left_scrollbar(area: Rect) -> Rect {
     if area.width <= 1 {
@@ -905,6 +918,7 @@ fn inset_for_left_scrollbar(area: Rect) -> Rect {
     Rect::new(area.x + 1, area.y, area.width - 1, area.height)
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_left_scrollbar(
     frame: &mut Frame,
@@ -938,6 +952,7 @@ fn render_left_scrollbar(
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_section_title(frame: &mut Frame, area: Rect, title: &str, p: &Palette) {
     frame.render_widget(
@@ -951,6 +966,7 @@ fn render_section_title(frame: &mut Frame, area: Rect, title: &str, p: &Palette)
     );
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn render_action_row(frame: &mut Frame, area: Rect, label: &str, p: &Palette) {
     if area.width == 0 || area.height == 0 {
@@ -967,6 +983,7 @@ fn render_action_row(frame: &mut Frame, area: Rect, label: &str, p: &Palette) {
     );
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     rect.width > 0
@@ -1155,6 +1172,7 @@ fn fill_rect(frame: &mut Frame, area: Rect, style: Style) {
     }
 }
 
+// Retained old Mobile Navigation Panel — no longer reached by production routing.
 #[allow(dead_code)]
 fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
     if area.width == 0 || area.height == 0 {
