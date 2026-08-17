@@ -393,10 +393,13 @@ fn compute_mobile_view(
     };
     app.sync_copy_mode_search_geometry();
 
-    // When mobile enters the zero-workspace Navigate state, auto-open the
-    // fork Workspace Switcher once so the user sees the "no workspaces"
-    // state instead of an empty shell. The flag prevents reopening after Esc.
-    if app.mode == Mode::Navigate
+    // Auto-open the fork Workspace Switcher ONLY for the mobile
+    // zero-workspace Navigate state, so the user sees the "no workspaces"
+    // state instead of an empty shell. With one or more workspaces, Navigate
+    // renders the normal mobile header/shell and the switcher stays closed
+    // unless explicitly opened. The flag prevents reopening after Esc.
+    if app.workspaces.is_empty()
+        && app.mode == Mode::Navigate
         && !app.workspace_switcher.active
         && !app.mobile_zero_workspace_switcher_shown
     {
@@ -1698,6 +1701,27 @@ switch_workspace = "ctrl+1..9"
         assert!(
             app.workspace_switcher.active,
             "switcher should auto-open again after a fresh zero-workspace entry"
+        );
+    }
+
+    #[test]
+    fn mobile_nonempty_navigate_does_not_auto_open_switcher() {
+        // With one or more workspaces, mobile Mode::Navigate must NOT
+        // auto-open the fork Workspace Switcher. The switcher stays closed
+        // unless explicitly opened; the old panel is not rendered.
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Navigate;
+        app.mobile_width_threshold = 64;
+
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert!(
+            !app.workspace_switcher.active,
+            "switcher must not auto-open when workspaces are non-empty"
         );
     }
 
