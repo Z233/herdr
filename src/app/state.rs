@@ -1512,6 +1512,10 @@ pub struct AppState {
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
+    /// TUI presentation-only flag: tracks whether the fork Workspace Switcher
+    /// has been auto-opened once for the current mobile zero-workspace
+    /// Navigate state, so Esc does not immediately reopen it.
+    pub mobile_zero_workspace_switcher_shown: bool,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -1878,6 +1882,7 @@ impl AppState {
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
+            mobile_zero_workspace_switcher_shown: false,
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),

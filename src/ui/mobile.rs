@@ -28,10 +28,16 @@ pub(crate) struct MobileHeaderHitAreas {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MobileSwitcherAreas {
+    // Retained Mobile Navigation Panel field; only read by retained tests.
+    #[allow(dead_code)]
     pub close: Rect,
     pub viewport: Rect,
 }
 
+// Retained Mobile Navigation Panel source — production render and mouse
+// routing no longer reach these items, but the source and its direct unit
+// tests remain per the fork feature boundary.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     NewWorkspace,
@@ -124,6 +130,7 @@ pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
     mobile_switcher_max_scroll_for_height(app, mobile_switcher_areas(app).viewport.height)
 }
 
+#[allow(dead_code)]
 pub(crate) fn mobile_switcher_target_at(
     app: &AppState,
     col: u16,
@@ -273,6 +280,7 @@ pub(crate) fn render_mobile_toast_banner(
     );
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_mobile_panel(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -412,6 +420,7 @@ fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
     }
 }
 
+#[allow(dead_code)]
 fn render_close_button(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -463,6 +472,7 @@ fn mobile_switcher_content_height(app: &AppState) -> usize {
     spaces_h + tabs_h + agents_h + menu_h
 }
 
+#[allow(dead_code)]
 fn render_mobile_switcher_content(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -733,6 +743,7 @@ fn render_mobile_switcher_content(
     }
 }
 
+#[allow(dead_code)]
 fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     let mut parts = Vec::new();
     if let Some(tab_label) = entry.primary_tab_label.as_deref() {
@@ -753,6 +764,7 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
     format!("  {}", parts.join(" · "))
 }
 
+#[allow(dead_code)]
 fn render_section_title_at(
     frame: &mut Frame,
     viewport: Rect,
@@ -773,6 +785,7 @@ fn render_section_title_at(
     );
 }
 
+#[allow(dead_code)]
 fn render_action_row_at(
     frame: &mut Frame,
     viewport: Rect,
@@ -788,6 +801,7 @@ fn render_action_row_at(
     render_action_row(frame, Rect::new(content.x, y, content.width, 1), label, p);
 }
 
+#[allow(dead_code)]
 fn render_one_line_item(
     frame: &mut Frame,
     viewport: Rect,
@@ -814,6 +828,7 @@ fn render_one_line_item(
     }
 }
 
+#[allow(dead_code)]
 fn render_two_line_item(
     frame: &mut Frame,
     viewport: Rect,
@@ -848,11 +863,13 @@ fn render_two_line_item(
     }
 }
 
+#[allow(dead_code)]
 fn visible_y(viewport: Rect, scroll: usize, doc_y: usize) -> Option<u16> {
     let offset = doc_y.checked_sub(scroll)?;
     (offset < viewport.height as usize).then_some(viewport.y + offset as u16)
 }
 
+#[allow(dead_code)]
 fn fill_visible_doc_rect(
     frame: &mut Frame,
     viewport: Rect,
@@ -869,6 +886,7 @@ fn fill_visible_doc_rect(
     }
 }
 
+#[allow(dead_code)]
 fn mobile_item_bg(selected: bool, active: bool, p: &Palette) -> ratatui::style::Color {
     if selected {
         p.surface0
@@ -879,6 +897,7 @@ fn mobile_item_bg(selected: bool, active: bool, p: &Palette) -> ratatui::style::
     }
 }
 
+#[allow(dead_code)]
 fn inset_for_left_scrollbar(area: Rect) -> Rect {
     if area.width <= 1 {
         return Rect::default();
@@ -886,6 +905,7 @@ fn inset_for_left_scrollbar(area: Rect) -> Rect {
     Rect::new(area.x + 1, area.y, area.width - 1, area.height)
 }
 
+#[allow(dead_code)]
 fn render_left_scrollbar(
     frame: &mut Frame,
     area: Rect,
@@ -918,6 +938,7 @@ fn render_left_scrollbar(
     }
 }
 
+#[allow(dead_code)]
 fn render_section_title(frame: &mut Frame, area: Rect, title: &str, p: &Palette) {
     frame.render_widget(
         Paragraph::new(format!(" {title} ")).style(
@@ -930,6 +951,7 @@ fn render_section_title(frame: &mut Frame, area: Rect, title: &str, p: &Palette)
     );
 }
 
+#[allow(dead_code)]
 fn render_action_row(frame: &mut Frame, area: Rect, label: &str, p: &Palette) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -945,6 +967,7 @@ fn render_action_row(frame: &mut Frame, area: Rect, label: &str, p: &Palette) {
     );
 }
 
+#[allow(dead_code)]
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     rect.width > 0
         && rect.height > 0
@@ -1132,6 +1155,7 @@ fn fill_rect(frame: &mut Frame, area: Rect, style: Style) {
     }
 }
 
+#[allow(dead_code)]
 fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
     if area.width == 0 || area.height == 0 {
         return;

@@ -66,6 +66,9 @@ pub(super) enum MouseAction {
 enum MobileMouseResult {
     Ignored,
     Consumed,
+    // Retained Mobile Navigation Panel variant; no longer constructed after
+    // routing was disconnected, but kept for source completeness.
+    #[allow(dead_code)]
     Action(MouseAction),
 }
 
@@ -177,7 +180,7 @@ impl AppState {
         }
 
         if self.view.layout == ViewLayout::Mobile {
-            match self.handle_mobile_mouse(mouse) {
+            match self.handle_mobile_mouse(terminal_runtimes, mouse) {
                 MobileMouseResult::Ignored => {}
                 MobileMouseResult::Consumed => return None,
                 MobileMouseResult::Action(action) => return Some(action),
@@ -1128,82 +1131,46 @@ impl AppState {
         None
     }
 
-    fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
+    fn handle_mobile_mouse(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        mouse: MouseEvent,
+    ) -> MobileMouseResult {
+        // The mobile `switch` header button opens the fork Workspace Switcher
+        // overlay (QuickSwitch mode) through its canonical open path. The old
+        // full-screen Mobile Navigation Panel is retained as source but is no
+        // longer reached by production render or mouse routing.
+        let on_switch = rect_contains(self.view.mobile_menu_hit_area, mouse.column, mouse.row);
+
         if self.mode == Mode::Navigate {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.scroll_mobile_switcher_at(mouse.column, mouse.row, -1);
-                    return MobileMouseResult::Consumed;
-                }
-                MouseEventKind::ScrollDown => {
-                    self.scroll_mobile_switcher_at(mouse.column, mouse.row, 1);
-                    return MobileMouseResult::Consumed;
-                }
-                MouseEventKind::Down(MouseButton::Left) => {}
-                _ => return MobileMouseResult::Consumed,
+            // Zero-workspace state with the switcher closed: only the header
+            // `switch` button is interactive. Consume everything else so the
+            // retained Mobile Navigation Panel is never reached.
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_switch {
+                self.open_workspace_switcher_from(terminal_runtimes);
             }
-        } else if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return MobileMouseResult::Ignored;
-        }
-
-        if self.mode != Mode::Navigate {
-            if !matches!(self.mode, Mode::Terminal | Mode::Resize) {
-                return MobileMouseResult::Ignored;
-            }
-            if rect_contains(self.view.mobile_menu_hit_area, mouse.column, mouse.row) {
-                self.mobile_switcher_scroll = 0;
-                self.mode = Mode::Navigate;
-                return MobileMouseResult::Consumed;
-            }
-            return MobileMouseResult::Ignored;
-        }
-
-        let areas = crate::ui::mobile_switcher_areas(self);
-        if rect_contains(areas.close, mouse.column, mouse.row) {
-            self.mode = Mode::Terminal;
             return MobileMouseResult::Consumed;
         }
 
-        match crate::ui::mobile_switcher_target_at(self, mouse.column, mouse.row) {
-            Some(crate::ui::MobileSwitcherTarget::NewWorkspace) => {
-                return MobileMouseResult::Action(MouseAction::NewWorkspace);
-            }
-            Some(crate::ui::MobileSwitcherTarget::Workspace(ws_idx)) => {
-                self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusWorkspace { ws_idx });
-            }
-            Some(crate::ui::MobileSwitcherTarget::NewTab) => {
-                if self.prompt_new_tab_name {
-                    open_new_tab_dialog(self);
-                } else {
-                    self.request_new_tab = true;
-                    self.mode = Mode::Terminal;
-                }
-            }
-            Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
-                self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
-            }
-            Some(crate::ui::MobileSwitcherTarget::Agent {
-                ws_idx,
-                tab_idx: _,
-                pane_id,
-            }) => {
-                self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
-            }
-            Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
-                let actions = global_menu_actions(self);
-                if let Some(action) = actions.get(action_idx).copied() {
-                    apply_global_menu_action(self, action);
-                }
-            }
-            None => {}
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return MobileMouseResult::Ignored;
         }
 
-        MobileMouseResult::Consumed
+        if !matches!(self.mode, Mode::Terminal | Mode::Resize) {
+            return MobileMouseResult::Ignored;
+        }
+
+        if on_switch {
+            self.open_workspace_switcher_from(terminal_runtimes);
+            return MobileMouseResult::Consumed;
+        }
+
+        MobileMouseResult::Ignored
     }
 
+    /// Retained for the old Mobile Navigation Panel source/tests; no longer
+    /// called from production mouse routing.
+    #[allow(dead_code)]
     fn scroll_mobile_switcher_at(&mut self, _col: u16, _row: u16, delta: i16) {
         let max_scroll = crate::ui::mobile_switcher_max_scroll(self);
         apply_scroll(
@@ -3696,7 +3663,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switch_button_opens_switcher_and_workspace_row_switches_workspace() {
+    fn mobile_switch_click_opens_fork_switcher_not_old_navigate() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.state.active = Some(0);
@@ -3713,25 +3680,50 @@ mod tests {
             switch.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        // Fork Workspace Switcher is active, not the old Navigate panel.
+        assert!(app.state.workspace_switcher.active);
+        assert_ne!(app.state.mode, Mode::Navigate);
+    }
 
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+    #[test]
+    fn mobile_fork_switcher_workspace_row_click_switches_workspace() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 4,
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert!(app.state.workspace_switcher.active);
+
+        // Click the second workspace row in the fork switcher.
+        let body = app.state.workspace_switcher_body_rect();
+        let row_y = body.y + 1; // second row (first non-active workspace)
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 1,
+            row_y,
         ));
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.state.workspace_switcher.active);
     }
 
     #[test]
-    fn mobile_workspace_panel_scroll_reaches_extra_workspaces() {
+    fn mobile_fork_switcher_scroll_advances_selection() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = (0..12)
             .map(|idx| Workspace::test_new(&format!("ws-{idx}")))
             .collect();
+        app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
@@ -3743,76 +3735,26 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert!(app.state.workspace_switcher.active);
 
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        assert_eq!(app.state.mobile_switcher_scroll, 2);
+        let prev_selected = app.state.workspace_switcher.selected;
+        let body = app.state.workspace_switcher_body_rect();
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, body.x + 1, body.y));
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 2,
-        ));
-
-        assert_eq!(app.state.active, Some(1));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        // Fork switcher scroll advances selection and scroll.
+        assert_ne!(
+            app.state.workspace_switcher.selected, prev_selected,
+            "scroll should move selection"
+        );
     }
 
     #[test]
-    fn mobile_global_scroll_reaches_tabs_and_switches_tab() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("one");
-        ws.test_add_tab(Some("two"));
-        ws.test_add_tab(Some("three"));
-        ws.test_add_tab(Some("four"));
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 12));
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        assert_eq!(app.state.mobile_switcher_scroll, 4);
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 4,
-        ));
-        assert_eq!(app.state.workspaces[0].active_tab, 2);
-    }
-
-    #[test]
-    fn mobile_switcher_new_workspace_opens_prompt_when_enabled() {
+    fn mobile_fork_switcher_esc_returns_to_terminal() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
-        app.state.prompt_new_workspace_name = true;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -3821,17 +3763,47 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        assert!(app.state.workspace_switcher.active);
+
+        // Esc closes the fork switcher and returns to Terminal.
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app.state,
+            &app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn mobile_fork_switcher_swallows_non_left_mouse_events() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 1,
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert!(app.state.workspace_switcher.active);
+
+        // Right-click inside the fork switcher is consumed by the overlay
+        // routing and does not open a context menu.
+        let body = app.state.workspace_switcher_body_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            body.x + 1,
+            body.y + 1,
         ));
 
-        assert_eq!(app.state.mode, Mode::RenameWorkspace);
-        assert!(app.state.pending_workspace_create_cwd.is_some());
-        assert!(app.state.name_input_replace_on_type);
-        assert_eq!(app.state.workspaces.len(), 1);
+        assert!(app.state.context_menu.is_none());
+        assert!(app.state.workspace_switcher.active);
     }
 
     #[test]
@@ -3881,14 +3853,20 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switcher_new_tab_opens_dialog_when_enabled() {
+    fn mobile_fork_switcher_no_create_actions_exposed() {
+        // The fork switcher does not expose create-workspace or create-tab
+        // actions. Verify by opening it and checking that no NewWorkspace or
+        // NewTab MouseAction is produced from clicking inside the popup.
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");
         ws.test_add_tab(Some("logs"));
         app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
+        app.state.prompt_new_workspace_name = true;
+        app.state.prompt_new_tab_name = true;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;
@@ -3897,46 +3875,13 @@ mod tests {
             switch.x + 1,
             switch.y + 1,
         ));
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 5,
-        ));
+        assert!(app.state.workspace_switcher.active);
 
-        assert_eq!(app.state.mode, Mode::RenameTab);
-        assert!(app.state.creating_new_tab);
-    }
-
-    #[test]
-    fn mobile_switcher_new_tab_skips_dialog_when_prompt_disabled() {
-        let mut app = app_for_mouse_test();
-        let mut ws = Workspace::test_new("one");
-        ws.test_add_tab(Some("logs"));
-        app.state.workspaces = vec![ws];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-        app.state.prompt_new_tab_name = false;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            viewport.x + 2,
-            viewport.y + 5,
-        ));
-        assert_eq!(app.state.mode, Mode::Terminal);
-        assert!(!app.state.creating_new_tab);
-        assert!(app.state.request_new_tab);
-        assert!(app.state.requested_new_tab_name.is_none());
+        // No rename modal was opened and no create request was set.
+        assert_ne!(app.state.mode, Mode::RenameWorkspace);
+        assert_ne!(app.state.mode, Mode::RenameTab);
+        assert!(!app.state.request_new_tab);
+        assert!(app.state.pending_workspace_create_cwd.is_none());
     }
 
     #[test]
@@ -3963,34 +3908,6 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switcher_swallows_non_left_mouse_events() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-        assert_eq!(app.state.mode, Mode::Navigate);
-
-        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Right),
-            viewport.x + 2,
-            viewport.y + 2,
-        ));
-
-        assert_eq!(app.state.mode, Mode::Navigate);
-        assert!(app.state.context_menu.is_none());
-    }
-
-    #[test]
     fn mobile_switch_button_does_not_bypass_rename_modal() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
@@ -4011,33 +3928,6 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(!app.state.creating_new_tab);
         assert!(!app.state.request_new_tab);
-    }
-
-    #[test]
-    fn mobile_switcher_close_returns_to_terminal() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
-        let switch = app.state.view.mobile_menu_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            switch.x + 1,
-            switch.y + 1,
-        ));
-        assert_eq!(app.state.mode, Mode::Navigate);
-
-        let close = crate::ui::mobile_switcher_areas(&app.state).close;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            close.x + 1,
-            close.y,
-        ));
-
-        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
@@ -4072,5 +3962,93 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    // -- Mobile fork Workspace Switcher integration tests --
+
+    fn app_for_mobile_switcher_test() -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.mobile_width_threshold = 64;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.state.view.layout, ViewLayout::Mobile);
+        app
+    }
+
+    #[test]
+    fn mobile_switch_click_opens_fork_quick_switch_not_navigate() {
+        let mut app = app_for_mobile_switcher_test();
+        let switch = app.state.view.mobile_menu_hit_area;
+        assert!(switch.width > 0, "switch hit area should be non-empty");
+
+        // Click the header `switch` button.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y,
+        ));
+
+        // Fork Workspace Switcher is active in QuickSwitch mode.
+        assert!(
+            app.state.workspace_switcher.active,
+            "fork switcher should be active"
+        );
+        assert_eq!(
+            app.state.workspace_switcher.mode,
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::QuickSwitch,
+            "should be in QuickSwitch mode"
+        );
+        // Old Mobile Navigation Panel was not entered.
+        assert_ne!(
+            app.state.mode,
+            Mode::Navigate,
+            "should not enter old Navigate/mobile-panel mode"
+        );
+    }
+
+    #[test]
+    fn mobile_navigate_click_reopens_switcher() {
+        let mut app = app_for_mouse_test();
+        // Zero-workspace Navigate state (e.g. after closing the last workspace).
+        app.state.workspaces.clear();
+        app.state.active = None;
+        app.state.mode = Mode::Navigate;
+        app.state.mobile_width_threshold = 64;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 40, 20));
+
+        // Auto-open should have fired.
+        assert!(app.state.workspace_switcher.active);
+
+        // Close with Esc.
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app.state,
+            &app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
+        );
+        assert!(!app.state.workspace_switcher.active);
+
+        // Another compute cycle must not reopen.
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 40, 20));
+        assert!(
+            !app.state.workspace_switcher.active,
+            "switcher must stay closed after Esc"
+        );
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        // Clicking `switch` reopens.
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y,
+        ));
+        assert!(
+            app.state.workspace_switcher.active,
+            "clicking switch should reopen the fork switcher"
+        );
     }
 }

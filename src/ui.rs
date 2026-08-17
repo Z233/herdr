@@ -34,8 +34,7 @@ use self::menus::{
 };
 use self::mobile::{
     compute_mobile_header_hit_areas, is_mobile_width, mobile_switcher_max_scroll_for_height,
-    mobile_toast_banner_rect, render_mobile_header, render_mobile_panel,
-    render_mobile_toast_banner,
+    mobile_toast_banner_rect, render_mobile_header, render_mobile_toast_banner,
 };
 use self::navigator::render_navigator_overlay;
 pub(crate) use self::onboarding::onboarding_welcome_continue_rect;
@@ -93,8 +92,7 @@ pub(crate) use self::{
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
-        mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
-        mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
+        mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_workspace_doc_range,
     },
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
@@ -386,6 +384,19 @@ fn compute_mobile_view(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+
+    // When mobile enters the zero-workspace Navigate state, auto-open the
+    // fork Workspace Switcher once so the user sees the "no workspaces"
+    // state instead of an empty shell. The flag prevents reopening after Esc.
+    if !app.workspaces.is_empty() {
+        app.mobile_zero_workspace_switcher_shown = false;
+    } else if app.mode == Mode::Navigate
+        && !app.workspace_switcher.active
+        && !app.mobile_zero_workspace_switcher_shown
+    {
+        app.open_workspace_switcher_from(terminal_runtimes);
+        app.mobile_zero_workspace_switcher_shown = true;
+    }
 }
 
 pub(crate) fn retained_terminal_patch_safe(app: &AppState) -> bool {
@@ -445,9 +456,7 @@ pub fn render_with_runtime_registry(
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
         Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
         Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
-        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            render_mobile_panel(app, terminal_runtimes, frame, frame.area())
-        }
+        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {}
         Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
         Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
         Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
@@ -1573,5 +1582,253 @@ switch_workspace = "ctrl+1..9"
 
         assert_eq!(switch_tab_key, "prefix+1..9 / alt+1..9");
         assert_eq!(switch_workspace_key, "ctrl+1..9");
+    }
+
+    // -- Mobile fork Workspace Switcher integration tests --
+
+    fn buffer_content(backend: &TestBackend) -> String {
+        let buf = backend.buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn mobile_state_with_workspaces() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.mobile_width_threshold = 64;
+        app
+    }
+
+    #[test]
+    fn mobile_zero_workspace_auto_opens_switcher_once() {
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 64;
+        // Simulate the zero-workspace Navigate state (e.g. after closing the
+        // last workspace, which sets mode = Navigate).
+        app.mode = Mode::Navigate;
+        app.active = None;
+
+        // First compute at mobile width: auto-open fires.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert!(
+            app.workspace_switcher.active,
+            "switcher should auto-open on first mobile zero-workspace compute"
+        );
+        assert!(app.mobile_zero_workspace_switcher_shown);
+
+        // Esc closes the switcher; mode stays Navigate (no active workspace).
+        let runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app,
+            &runtimes,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+        );
+        assert!(!app.workspace_switcher.active);
+        assert_eq!(app.mode, Mode::Navigate);
+
+        // Another compute cycle must NOT reopen.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(
+            !app.workspace_switcher.active,
+            "switcher must stay closed after Esc across another compute cycle"
+        );
+    }
+
+    #[test]
+    fn mobile_zero_workspace_auto_open_resets_when_workspaces_added() {
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 64;
+        app.mode = Mode::Navigate;
+        app.active = None;
+
+        // Auto-open fires.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(app.workspace_switcher.active);
+
+        // Esc closes.
+        let runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app,
+            &runtimes,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+        );
+        assert!(!app.workspace_switcher.active);
+
+        // A workspace is created (recovery path) — flag resets.
+        app.workspaces.push(Workspace::test_new("recovered"));
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(!app.mobile_zero_workspace_switcher_shown);
+
+        // Close all workspaces again — auto-open fires anew.
+        app.workspaces.clear();
+        app.active = None;
+        app.mode = Mode::Navigate;
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(
+            app.workspace_switcher.active,
+            "switcher should auto-open again after a fresh zero-workspace entry"
+        );
+    }
+
+    #[test]
+    fn mobile_render_shows_fork_switcher_not_old_panel() {
+        let mut app = mobile_state_with_workspaces();
+        let runtimes = TerminalRuntimeRegistry::new();
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        app.open_workspace_switcher_from(&runtimes);
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_with_runtime_registry(&app, &runtimes, frame))
+            .unwrap();
+
+        let content = buffer_content(terminal.backend());
+
+        // Fork switcher shows workspace rows and footer hints.
+        assert!(
+            content.contains("alpha"),
+            "fork switcher should show workspace name 'alpha'"
+        );
+        assert!(
+            content.contains("enter"),
+            "fork switcher footer hint should be visible"
+        );
+        // Old Mobile Navigation Panel distinctive content is absent.
+        assert!(
+            !content.contains("new workspace"),
+            "old mobile panel '+ new workspace' must not render"
+        );
+        assert!(
+            !content.contains("+ new tab"),
+            "old mobile panel '+ new tab' must not render"
+        );
+    }
+
+    #[test]
+    fn mobile_render_zero_workspace_after_esc_shows_empty_shell() {
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 64;
+        app.mode = Mode::Navigate;
+        app.active = None;
+
+        // Auto-open.
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(app.workspace_switcher.active);
+
+        // Esc closes.
+        let runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut app,
+            &runtimes,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+        );
+        assert!(!app.workspace_switcher.active);
+
+        // Another compute cycle (stays closed).
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(!app.workspace_switcher.active);
+
+        // Render: only header + empty shell, no old panel.
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_with_runtime_registry(&app, &runtimes, frame))
+            .unwrap();
+
+        let content = buffer_content(terminal.backend());
+        assert!(
+            content.contains("switch"),
+            "mobile header switch button should be visible"
+        );
+        assert!(
+            !content.contains("new workspace"),
+            "old mobile panel must not render after Esc"
+        );
+        assert!(
+            !content.contains("new tab"),
+            "old mobile panel must not render after Esc"
+        );
+    }
+
+    #[test]
+    fn mobile_switcher_responsive_list_only_and_preview() {
+        let runtimes = TerminalRuntimeRegistry::new();
+
+        // Very narrow: list-only, no preview.
+        let mut app = mobile_state_with_workspaces();
+        compute_view(&mut app, Rect::new(0, 0, 30, 20));
+        app.open_workspace_switcher_from(&runtimes);
+        let preview_narrow = app.workspace_switcher_preview_rect();
+        assert_eq!(
+            preview_narrow.width, 0,
+            "very narrow width should be list-only"
+        );
+        assert!(app.workspace_switcher_body_rect().width > 0);
+
+        // Near default threshold (60 cols): list + preview.
+        let mut app = mobile_state_with_workspaces();
+        compute_view(&mut app, Rect::new(0, 0, 60, 20));
+        app.open_workspace_switcher_from(&runtimes);
+        let preview_wide = app.workspace_switcher_preview_rect();
+        assert!(
+            preview_wide.width > 0,
+            "wider mobile width should show a preview pane"
+        );
+        assert!(app.workspace_switcher_body_rect().width > 0);
+    }
+
+    #[test]
+    fn desktop_switcher_search_preview_unchanged() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("docs")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        // Desktop layout (width > 64).
+        compute_view(&mut app, Rect::new(0, 0, 120, 30));
+        assert_eq!(app.view.layout, ViewLayout::Desktop);
+
+        let runtimes = TerminalRuntimeRegistry::new();
+        app.open_workspace_switcher_from(&runtimes);
+        assert!(app.workspace_switcher.active);
+        assert!(app.workspace_switcher_preview_rect().width > 0);
+
+        // Enter search mode and filter.
+        app.enter_workspace_switcher_search_from(&runtimes);
+        assert_eq!(
+            app.workspace_switcher.mode,
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search
+        );
+        app.workspace_switcher.query = "main".into();
+        let rows = app.workspace_switcher_rows_from(&runtimes);
+        assert_eq!(rows.len(), 1, "search should filter to matching workspace");
+        assert_eq!(rows[0].ws_idx, 0);
     }
 }
