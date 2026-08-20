@@ -1550,14 +1550,9 @@ impl AppState {
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
-        if self.sidebar_collapsed {
+        let Some(detail_area) = self.interactable_agent_panel_rect() else {
             return;
-        }
-
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
+        };
         self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
             self,
             detail_area,

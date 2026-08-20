@@ -253,14 +253,23 @@ fn compute_view_internal(
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
-        let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
-        app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        let (_, detail_area) = expanded_sidebar_sections(
+            sidebar_area,
+            app.sidebar_section_split,
+            app.sidebar_agents.visible,
+        );
+        if detail_area != Rect::default() {
+            let max_agent_scroll =
+                agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
+            app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
+        }
     } else {
         app.workspace_scroll = app
             .workspace_scroll
             .min(app.workspaces.len().saturating_sub(1));
-        app.agent_panel_scroll = 0;
+        if app.sidebar_agents.visible {
+            app.agent_panel_scroll = 0;
+        }
     }
 
     let workspace_card_areas = if app.sidebar_collapsed {
@@ -1106,11 +1115,28 @@ mod tests {
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        let (ws_area, _, _) = collapsed_sidebar_sections(app.view.sidebar_rect);
+        let (ws_area, _, _) =
+            collapsed_sidebar_sections(app.view.sidebar_rect, app.sidebar_agents.visible);
         let active_row = ws_area.y + 1;
         let active_style = buffer[(ws_area.x, active_row)].style();
 
         assert_eq!(active_style.bg, Some(app.palette.surface_dim));
+    }
+
+    #[test]
+    fn hidden_agents_preserve_scroll_until_visible_bounds_correction() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_agents.visible = false;
+        app.agent_panel_scroll = 5;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.agent_panel_scroll, 5);
+
+        app.sidebar_agents.visible = true;
+        compute_view(&mut app, Rect::new(0, 0, 80, 20));
+        assert_eq!(app.agent_panel_scroll, 0);
     }
 
     #[test]

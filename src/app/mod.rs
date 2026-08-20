@@ -1532,11 +1532,22 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.tab_bar_position = config.ui.tab_bar_position;
-                self.state.agent_panel_sort =
+                let next_agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                let agents_visibility_changed =
+                    self.state.sidebar_agents.visible != config.ui.sidebar.agents.visible;
+                let agent_panel_layout_changed = self.state.sidebar_agents.rows
+                    != config.ui.sidebar.agents.rows
+                    || self.state.sidebar_agents.rows_by_agent
+                        != config.ui.sidebar.agents.rows_by_agent
+                    || self.state.sidebar_agents.row_gap != config.ui.sidebar.agents.row_gap
+                    || self.state.agent_panel_sort != next_agent_panel_sort;
+                self.state.agent_panel_sort = next_agent_panel_sort;
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
-                self.state.agent_panel_scroll = 0;
+                if !agents_visibility_changed || agent_panel_layout_changed {
+                    self.state.agent_panel_scroll = 0;
+                }
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
@@ -3308,6 +3319,78 @@ mod tests {
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
         assert_eq!(app.state.sidebar_agents, previous_agents);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_agents_visibility_without_resetting_panel_state() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-agents-visibility");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        app.state.agent_panel_scroll = 4;
+        app.state.sidebar_section_split = 0.7;
+        app.state.agent_panel_sort = state::AgentPanelSort::Priority;
+
+        std::fs::write(
+            &path,
+            "[ui]\nagent_panel_sort = \"priority\"\n\n[ui.sidebar.agents]\nvisible = false\n",
+        )
+        .unwrap();
+        let hidden = app.reload_config();
+        assert_eq!(hidden.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(!app.state.sidebar_agents.visible);
+        assert_eq!(app.state.agent_panel_scroll, 4);
+        assert_eq!(app.state.sidebar_section_split, 0.7);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+
+        std::fs::write(
+            &path,
+            "[ui]\nagent_panel_sort = \"priority\"\n\n[ui.sidebar.agents]\nvisible = true\n",
+        )
+        .unwrap();
+        let visible = app.reload_config();
+        assert_eq!(visible.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.sidebar_agents.visible);
+        assert_eq!(app.state.agent_panel_scroll, 4);
+        assert_eq!(app.state.sidebar_section_split, 0.7);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_resets_agent_scroll_without_visibility_transition() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-agent-sort-scroll");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        app.state.agent_panel_scroll = 4;
+
+        std::fs::write(&path, "[ui]\nagent_panel_sort = \"priority\"\n").unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(app.state.sidebar_agents.visible);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_scroll, 0);
+
+        app.state.agent_panel_scroll = 4;
+        std::fs::write(
+            &path,
+            "[ui]\nagent_panel_sort = \"priority\"\naccent = \"red\"\n",
+        )
+        .unwrap();
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.agent_panel_scroll, 0);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

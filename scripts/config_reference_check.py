@@ -41,6 +41,7 @@ FORK_CONFIG_REFERENCE_EXCLUSIONS = frozenset(
         "keys.workspace_picker",
         "keys.workspace_switcher",
         "keys.workspace_switcher_backward",
+        "ui.sidebar.agents.visible",
     }
 )
 

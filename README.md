@@ -22,7 +22,7 @@
 
 ## What this fork adds
 
-Six features on top of upstream herdr, all configurable and off-by-default where they change existing behavior.
+Seven features on top of upstream herdr, all configurable and off-by-default where they change existing behavior.
 
 ### Prefix Chord Sequences
 
@@ -89,11 +89,22 @@ Parses and forwards the kitty keyboard protocol's **associated text** field, so 
 
 No configuration needed — active whenever the host terminal supports kitty keyboard protocol.
 
+### Spaces-only Sidebar
+
+Hide the desktop Agents section while keeping the Spaces section and the existing sidebar expand/collapse behavior:
+
+```toml
+[ui.sidebar.agents]
+visible = false
+```
+
+The Spaces section uses the reclaimed height in both expanded and compact collapsed modes. Agent detection, notifications, keyboard navigation, sorting configuration, and the agent-view API continue to operate. The default is `true`, so existing configurations keep the standard Spaces and Agents sections.
+
 ---
 
 ## Configuration
 
-All fork-specific options live under the `[keys]` section of `config.toml`:
+Most fork-specific options live under the `[keys]` section of `config.toml`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -108,6 +119,12 @@ All fork-specific options live under the `[keys]` section of `config.toml`:
 | `copy_mode_scroll_up` | `BindingConfig` | *(empty)* | Enter copy mode and immediately scroll half a page up |
 
 `workspace_switcher` supports modifiers beyond `ctrl` — `cmd`, `alt`, and `super` all work as the hold modifier for quick-switch.
+
+Agents section visibility is a desktop presentation option:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `ui.sidebar.agents.visible` | `bool` | `true` | Show the Agents section; set to `false` for a Spaces-only sidebar |
 
 ---
 

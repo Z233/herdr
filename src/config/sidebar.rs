@@ -372,6 +372,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AgentsSidebarConfig {
+    pub visible: bool,
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: AgentSidebarRows,
     #[serde(default, deserialize_with = "deserialize_rows_by_agent")]
@@ -390,6 +391,7 @@ impl AgentsSidebarConfig {
 impl Default for AgentsSidebarConfig {
     fn default() -> Self {
         Self {
+            visible: true,
             rows: vec![
                 vec![
                     AgentSidebarToken::StateIcon,
@@ -449,6 +451,7 @@ mod tests {
                 vec![AgentSidebarToken::Agent],
             ]
         );
+        assert!(config.agents.visible);
         assert!(config.agents.rows_by_agent.is_empty());
         assert_eq!(config.agents.row_gap, 0);
         assert_eq!(
@@ -459,6 +462,17 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+    }
+
+    #[test]
+    fn agents_visibility_is_backward_compatible_and_can_be_hidden() {
+        let legacy: crate::config::Config =
+            toml::from_str("[ui.sidebar.agents]\nrow_gap = 1\n").expect("legacy agents config");
+        assert!(legacy.ui.sidebar.agents.visible);
+
+        let hidden: crate::config::Config =
+            toml::from_str("[ui.sidebar.agents]\nvisible = false\n").expect("hidden agents config");
+        assert!(!hidden.ui.sidebar.agents.visible);
     }
 
     #[test]
