@@ -30,10 +30,6 @@ fn workspace_switcher_capacity(body_height: u16) -> usize {
     usize::from(body_height / WORKSPACE_SWITCHER_LINES_PER_ITEM)
 }
 
-fn workspace_switcher_page_step(state: &AppState) -> isize {
-    workspace_switcher_capacity(state.workspace_switcher_body_rect().height).max(1) as isize
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSwitcherTarget {
     Workspace {
@@ -1137,16 +1133,10 @@ pub(crate) fn handle_workspace_switcher_key(
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::PageDown => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                workspace_switcher_page_step(state),
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, 1);
         }
         KeyCode::PageUp => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                -workspace_switcher_page_step(state),
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, -1);
         }
         KeyCode::Home => {
             state.workspace_switcher.selected = 0;
@@ -1219,16 +1209,10 @@ fn handle_quick_switch_key(
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::PageDown => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                workspace_switcher_page_step(state),
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, 1);
         }
         KeyCode::PageUp => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                -workspace_switcher_page_step(state),
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, -1);
         }
         KeyCode::Home => {
             state.workspace_switcher.selected = 0;
@@ -1248,6 +1232,18 @@ fn handle_quick_switch_key(
     if state.workspace_switcher.active {
         state.capture_workspace_switcher_target_from(terminal_runtimes);
     }
+}
+
+fn move_workspace_switcher_page(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    direction: isize,
+) {
+    let page = workspace_switcher_capacity(state.workspace_switcher_body_rect().height).max(1);
+    state.move_workspace_switcher_selection_from(
+        terminal_runtimes,
+        (page as isize).saturating_mul(direction),
+    );
 }
 
 fn workspace_switcher_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
@@ -2026,6 +2022,8 @@ fn truncate_text(text: &str, max_width: usize) -> String {
 }
 
 fn workspace_secondary_text(repo: Option<&str>, activity: &str, max_width: usize) -> String {
+    const MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH: usize = 2;
+
     let Some(repo) = repo else {
         return truncate_text(activity, max_width);
     };
@@ -2039,7 +2037,11 @@ fn workspace_secondary_text(repo: Option<&str>, activity: &str, max_width: usize
     if repo_width > max_width {
         return truncate_text(repo, max_width);
     }
-    if repo_width.saturating_add(separator_width).saturating_add(2) > max_width {
+    if repo_width
+        .saturating_add(separator_width)
+        .saturating_add(MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH)
+        > max_width
+    {
         return repo.to_string();
     }
 
