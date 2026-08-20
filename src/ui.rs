@@ -229,6 +229,9 @@ fn compute_view_internal(
 
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
+        if app.workspace_switcher.active {
+            app.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        }
         return;
     }
 
@@ -338,6 +341,9 @@ fn compute_view_internal(
         split_borders,
     };
     app.sync_copy_mode_search_geometry();
+    if app.workspace_switcher.active {
+        app.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+    }
 }
 
 fn compute_mobile_view(
