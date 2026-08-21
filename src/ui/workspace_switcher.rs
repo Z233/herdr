@@ -2366,6 +2366,28 @@ mod tests {
             .collect()
     }
 
+    fn assert_no_preview_text(screen: &[String]) {
+        let joined = screen.join("\n");
+        assert!(
+            !joined.contains("preview:"),
+            "no preview text expected: {joined}"
+        );
+    }
+
+    fn assert_no_preview_divider(screen: &[String], first_row: u16, row_count: u16) {
+        for (row_idx, row) in screen
+            .iter()
+            .enumerate()
+            .skip(first_row as usize)
+            .take(row_count as usize)
+        {
+            assert!(
+                !row.contains('│'),
+                "no preview divider expected on row {row_idx}: {row}"
+            );
+        }
+    }
+
     #[test]
     fn mobile_quick_switch_uses_full_frame_without_footer() {
         let mut state = app_with_workspaces(&["alpha", "beta"]);
@@ -2409,16 +2431,8 @@ mod tests {
         assert!(!screen.join("\n").contains("enter"));
         assert_ne!(screen[0].chars().next(), Some('┌'));
         assert_ne!(screen[19].chars().next(), Some('└'));
-        assert!(
-            !screen.join("\n").contains("preview:"),
-            "mobile must not render preview text: {screen:?}"
-        );
-        for row in screen.iter().skip(1) {
-            assert!(
-                !row.contains('│'),
-                "mobile must not render a preview divider: {row}"
-            );
-        }
+        assert_no_preview_text(&screen);
+        assert_no_preview_divider(&screen, 1, 19);
     }
 
     #[test]
@@ -2455,20 +2469,8 @@ mod tests {
                 );
 
                 let screen = rendered_screen(&state, width, 20);
-                assert!(
-                    !screen.join("\n").contains("preview:"),
-                    "width {width} {mode:?}: no preview text"
-                );
-                for row in screen
-                    .iter()
-                    .skip(content.y as usize)
-                    .take(content.height as usize)
-                {
-                    assert!(
-                        !row.contains('│'),
-                        "width {width} {mode:?}: no divider in content rows: {row}"
-                    );
-                }
+                assert_no_preview_text(&screen);
+                assert_no_preview_divider(&screen, content.y, content.height);
             }
         }
     }
@@ -2491,7 +2493,7 @@ mod tests {
         assert_eq!(state.workspace_switcher_divider_rect(), Rect::default());
         assert_eq!(state.workspace_switcher_preview_rect(), Rect::default());
         let screen = rendered_screen(&state, 5, 3);
-        assert!(!screen.join("\n").contains("preview:"));
+        assert_no_preview_text(&screen);
     }
 
     #[test]
@@ -2522,7 +2524,7 @@ mod tests {
             "content width 47 must stay list-only"
         );
         let screen = rendered_screen(&state, 57, 20);
-        assert!(!screen.join("\n").contains("preview:"));
+        assert_no_preview_text(&screen);
 
         // Terminal width 58 -> popup inner content width 48: list + divider + preview.
         let state = app(58);
@@ -2549,6 +2551,78 @@ mod tests {
             screen.join("\n")
         );
         assert!(screen[3..16].iter().any(|row| row.contains('│')));
+    }
+
+    #[test]
+    fn layout_switch_toggles_mobile_preview_without_reopen() {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 30));
+        state.open_workspace_switcher_from(&terminal_runtimes);
+
+        // Desktop: existing list + divider + preview.
+        assert_eq!(state.view.layout, ViewLayout::Desktop);
+        assert_eq!(
+            state.workspace_switcher_body_rect(),
+            Rect::new(11, 4, 32, 21)
+        );
+        assert_eq!(
+            state.workspace_switcher_divider_rect(),
+            Rect::new(43, 4, 1, 21)
+        );
+        assert_eq!(
+            state.workspace_switcher_preview_rect(),
+            Rect::new(44, 4, 65, 21)
+        );
+        let screen = rendered_screen(&state, 120, 30);
+        assert!(
+            screen.join("\n").contains("preview:"),
+            "{}",
+            screen.join("\n")
+        );
+        assert!(screen[4..25].iter().any(|row| row.contains('│')));
+
+        // Cross into Mobile while open: list fills content, preview hidden.
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        assert_eq!(state.view.layout, ViewLayout::Mobile);
+        assert!(state.workspace_switcher.active);
+        assert_eq!(
+            state.workspace_switcher_content_rect(),
+            Rect::new(0, 1, 60, 19)
+        );
+        assert_eq!(
+            state.workspace_switcher_body_rect(),
+            state.workspace_switcher_content_rect()
+        );
+        assert_eq!(state.workspace_switcher_divider_rect(), Rect::default());
+        assert_eq!(state.workspace_switcher_preview_rect(), Rect::default());
+        let screen = rendered_screen(&state, 60, 20);
+        assert_no_preview_text(&screen);
+        assert_no_preview_divider(&screen, 1, 19);
+
+        // Cross back to Desktop while open: preview restored immediately.
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 30));
+        assert_eq!(state.view.layout, ViewLayout::Desktop);
+        assert!(state.workspace_switcher.active);
+        assert_eq!(
+            state.workspace_switcher_body_rect(),
+            Rect::new(11, 4, 32, 21)
+        );
+        assert_eq!(
+            state.workspace_switcher_divider_rect(),
+            Rect::new(43, 4, 1, 21)
+        );
+        assert_eq!(
+            state.workspace_switcher_preview_rect(),
+            Rect::new(44, 4, 65, 21)
+        );
+        let screen = rendered_screen(&state, 120, 30);
+        assert!(
+            screen.join("\n").contains("preview:"),
+            "{}",
+            screen.join("\n")
+        );
+        assert!(screen[4..25].iter().any(|row| row.contains('│')));
     }
 
     #[test]
@@ -2583,10 +2657,7 @@ mod tests {
             screen[1]
         );
         assert!(!screen[1].contains("workspace switcher"), "{}", screen[1]);
-        assert!(
-            !screen.join("\n").contains("preview:"),
-            "mobile search must not render preview text: {screen:?}"
-        );
+        assert_no_preview_text(&screen);
     }
 
     #[test]
