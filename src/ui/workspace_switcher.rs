@@ -1665,7 +1665,13 @@ pub(super) fn render_workspace_switcher_overlay(
     }
 
     if app.workspace_switcher.mode.search_visible() {
-        render_search(app, terminal_runtimes, frame, layout.search);
+        render_search(
+            app,
+            terminal_runtimes,
+            frame,
+            layout.search,
+            !layout.mobile_fullscreen,
+        );
         render_separator(frame, layout.search_separator, app.palette.surface1);
     }
     render_rows(app, terminal_runtimes, frame, layout.body);
@@ -1726,6 +1732,7 @@ fn render_search(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
+    show_title: bool,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -1734,13 +1741,13 @@ fn render_search(
     let p = &app.palette;
     let rows = app.workspace_switcher_rows_from(terminal_runtimes);
     let query = app.workspace_switcher.query.trim();
-    let mut spans = if app.view.layout == ViewLayout::Mobile {
-        Vec::new()
-    } else {
+    let mut spans = if show_title {
         vec![Span::styled(
             " workspace switcher ",
             Style::default().fg(p.accent),
         )]
+    } else {
+        Vec::new()
     };
     spans.push(Span::styled("/ ", Style::default().fg(p.overlay0)));
     if query.is_empty() {
