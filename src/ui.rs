@@ -1923,30 +1923,33 @@ switch_workspace = "ctrl+1..9"
     }
 
     #[test]
-    fn mobile_switcher_responsive_list_only_and_preview() {
+    fn mobile_switcher_list_fills_content_without_preview() {
         let runtimes = TerminalRuntimeRegistry::new();
 
-        // Very narrow: list-only, no preview.
-        let mut app = mobile_state_with_workspaces();
-        compute_view(&mut app, Rect::new(0, 0, 47, 20));
-        app.open_workspace_switcher_from(&runtimes);
-        let preview_narrow = app.workspace_switcher_preview_rect();
-        assert_eq!(
-            preview_narrow.width, 0,
-            "very narrow width should be list-only"
-        );
-        assert!(app.workspace_switcher_body_rect().width > 0);
-
-        // At the unchanged preview breakpoint: list + preview.
-        let mut app = mobile_state_with_workspaces();
-        compute_view(&mut app, Rect::new(0, 0, 48, 20));
-        app.open_workspace_switcher_from(&runtimes);
-        let preview_wide = app.workspace_switcher_preview_rect();
-        assert!(
-            preview_wide.width > 0,
-            "wider mobile width should show a preview pane"
-        );
-        assert!(app.workspace_switcher_body_rect().width > 0);
+        // Mobile never shows a preview: the list fills the complete content
+        // width below and at/above the old 48-column desktop threshold.
+        for width in [40u16, 47, 48, 60] {
+            let mut app = mobile_state_with_workspaces();
+            compute_view(&mut app, Rect::new(0, 0, width, 20));
+            app.open_workspace_switcher_from(&runtimes);
+            assert_eq!(app.view.layout, ViewLayout::Mobile, "width {width}");
+            let content = app.workspace_switcher_content_rect();
+            assert_eq!(
+                app.workspace_switcher_body_rect(),
+                content,
+                "width {width}: body must fill content"
+            );
+            assert_eq!(
+                app.workspace_switcher_divider_rect(),
+                Rect::default(),
+                "width {width}: divider must be empty"
+            );
+            assert_eq!(
+                app.workspace_switcher_preview_rect(),
+                Rect::default(),
+                "width {width}: preview must be empty"
+            );
+        }
     }
 
     #[test]
