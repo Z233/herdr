@@ -108,6 +108,11 @@ impl App {
                 _ => {}
             }
         }
+        // The open switcher shows branch metadata, so branch refresh stays
+        // demanded while it is open even without a sidebar branch token.
+        if self.state.workspace_switcher.active {
+            demand.branch = true;
+        }
         demand
     }
 
@@ -368,6 +373,24 @@ mod tests {
                 "token: {token:?}"
             );
         }
+    }
+
+    #[test]
+    fn open_switcher_demands_branch_refresh_without_sidebar_branch_token() {
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        let mut app = test_app(&config);
+        app.state.workspaces.push(Workspace::test_new("test"));
+
+        // No sidebar branch token: branch refresh is not demanded.
+        assert!(!app.git_refresh_demand().branch);
+        assert_eq!(app.git_refresh_deadline(), None);
+
+        // An open switcher shows branch metadata, so it demands the
+        // asynchronous Git identity/branch refresh on its own.
+        app.state.open_workspace_switcher();
+        assert!(app.git_refresh_demand().branch);
+        assert!(app.git_refresh_deadline().is_some());
     }
 
     #[test]

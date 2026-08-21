@@ -89,6 +89,12 @@ impl App {
         let changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        // Branch/label changes can change switcher row heights and search
+        // composition; re-anchor the selection by target identity.
+        if changed && self.state.workspace_switcher.active {
+            self.state
+                .reanchor_workspace_switcher_selection_from(&self.terminal_runtimes);
+        }
         if changed {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -298,6 +304,12 @@ impl App {
         for update in &pane_updates {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
+        }
+        // Agent activity changes can change switcher row heights; keep the
+        // selected target visible.
+        if !pane_updates.is_empty() && self.state.workspace_switcher.active {
+            self.state
+                .reanchor_workspace_switcher_selection_from(&self.terminal_runtimes);
         }
         self.sync_agent_metadata_deadline();
         if let Some((
@@ -2348,5 +2360,129 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+
+    fn switcher_reanchor_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        // 16 workspaces with mixed row heights: even rows carry a branch
+        // (2 lines), odd rows have no secondary (1 line). 24 physical lines.
+        for idx in 0..16 {
+            let mut ws = crate::workspace::Workspace::test_new(&format!("ws-{idx}"));
+            ws.cached_git_branch = if idx % 2 == 0 {
+                Some(format!("branch-{idx}"))
+            } else {
+                None
+            };
+            app.state.workspaces.push(ws);
+        }
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 80, 30));
+        app
+    }
+
+    fn open_switcher_at_bottom(app: &mut App) {
+        app.state
+            .open_workspace_switcher_from(&app.terminal_runtimes);
+        app.state.workspace_switcher.selected = 15;
+        // Clamp also captures the selected target identity used by the
+        // re-anchor after asynchronous state changes.
+        app.state
+            .clamp_workspace_switcher_selection_from(&app.terminal_runtimes);
+        // Body is 21 lines; the last window starts at row 2 (prefix 3).
+        assert_eq!(app.state.workspace_switcher.scroll, 2);
+    }
+
+    fn assert_row_15_is_workspace(app: &App, expected_id: &str) {
+        use crate::ui::workspace_switcher::WorkspaceSwitcherTarget;
+        let rows = app
+            .state
+            .workspace_switcher_rows_from(&app.terminal_runtimes);
+        match &rows[15].target {
+            WorkspaceSwitcherTarget::Workspace { workspace_id } => {
+                assert_eq!(workspace_id, expected_id);
+            }
+            other => panic!("expected workspace target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn git_status_refresh_reanchors_open_switcher_selection_by_identity() {
+        let mut app = switcher_reanchor_app();
+        open_switcher_at_bottom(&mut app);
+
+        // The asynchronous refresh clears the branches of the even rows
+        // above the selection, collapsing six 2-line rows to 1 line. The
+        // list now fits in the body, so the stale scroll offset must be
+        // recomputed to keep the selected target visible.
+        let mut results = Vec::new();
+        for idx in (0..16).step_by(2) {
+            let ws = &app.state.workspaces[idx];
+            let cwd = ws.resolved_identity_cwd().unwrap();
+            results.push(crate::workspace::WorkspaceGitStatus {
+                workspace_id: ws.id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: format!("ws-{idx}"),
+                branch: None,
+                ahead_behind: None,
+                space: None,
+            });
+        }
+        app.handle_internal_event(AppEvent::GitStatusRefreshed {
+            results,
+            cache_updates: Vec::new(),
+        });
+
+        assert_eq!(app.state.workspace_switcher.selected, 15);
+        assert_row_15_is_workspace(&app, &app.state.workspaces[15].id);
+        assert_eq!(app.state.workspace_switcher.scroll, 0);
+        assert_eq!(
+            app.state
+                .workspace_switcher_max_scroll_from(&app.terminal_runtimes),
+            0
+        );
+    }
+
+    #[test]
+    fn pane_activity_change_keeps_open_switcher_selection_visible() {
+        let mut app = switcher_reanchor_app();
+        open_switcher_at_bottom(&mut app);
+
+        // Agent activity starts on ws-3, a plain 1-line row above the
+        // selection. Its row grows to 2 lines, shifting the window and
+        // clamping the scroll to the new maximum.
+        app.handle_internal_event(AppEvent::StateChanged {
+            pane_id: app.state.workspaces[3].tabs[0].root_pane,
+            agent: Some(Agent::Codex),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(app.state.workspace_switcher.selected, 15);
+        assert_row_15_is_workspace(&app, &app.state.workspaces[15].id);
+        assert_eq!(app.state.workspace_switcher.scroll, 3);
+        assert_eq!(
+            app.state
+                .workspace_switcher_max_scroll_from(&app.terminal_runtimes),
+            3
+        );
+        // The activity row now renders its secondary line.
+        let row = &app
+            .state
+            .workspace_switcher_rows_from(&app.terminal_runtimes)[3];
+        assert_eq!(row.secondary, vec!["1 working".to_string()]);
     }
 }

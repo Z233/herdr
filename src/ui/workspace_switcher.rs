@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     app::{
-        actions::{tab_aggregate_state, workspace_activity_summary},
+        actions::{tab_activity_summary, tab_aggregate_state, workspace_activity_summary},
         state::{AppState, Mode, ViewLayout},
     },
     config::key_event_matches_combo,
@@ -24,10 +24,174 @@ use crate::{
     terminal::TerminalRuntimeRegistry,
 };
 
-const WORKSPACE_SWITCHER_LINES_PER_ITEM: u16 = 2;
+/// Physical line count consumed by a row: directories always render their
+/// path on the second line, and every other row renders a second line only
+/// when it carries secondary metadata.
+fn switcher_row_height(row: &WorkspaceSwitcherRow) -> usize {
+    if row.is_directory || !row.secondary.is_empty() {
+        2
+    } else {
+        1
+    }
+}
 
-fn workspace_switcher_capacity(body_height: u16) -> usize {
-    usize::from(body_height / WORKSPACE_SWITCHER_LINES_PER_ITEM)
+/// Shared variable-height layout for the switcher list.
+///
+/// One instance computed from the current rows and body height drives every
+/// geometry consumer: render rectangles, capacity, page movement, wheel
+/// movement, maximum scroll, selection visibility, mouse hit-testing,
+/// trailing blank-space handling, and scrollbar metrics.
+#[derive(Debug, Clone)]
+struct SwitcherRowLayout {
+    /// Cumulative physical lines: `prefix[i]` is the line count before row
+    /// `i`; `prefix[rows]` is the total line count.
+    prefix: Vec<usize>,
+    body_height: usize,
+}
+
+impl SwitcherRowLayout {
+    fn new(rows: &[WorkspaceSwitcherRow], body_height: usize) -> Self {
+        let mut prefix = Vec::with_capacity(rows.len() + 1);
+        prefix.push(0);
+        for row in rows {
+            prefix.push(prefix.last().copied().unwrap_or(0) + switcher_row_height(row));
+        }
+        Self {
+            prefix,
+            body_height,
+        }
+    }
+
+    fn rows(&self) -> usize {
+        self.prefix.len().saturating_sub(1)
+    }
+
+    fn total_physical(&self) -> usize {
+        *self.prefix.last().unwrap_or(&0)
+    }
+
+    /// Physical line count consumed by the row.
+    fn height(&self, index: usize) -> usize {
+        self.prefix
+            .get(index + 1)
+            .zip(self.prefix.get(index))
+            .map(|(end, start)| end - start)
+            .unwrap_or(0)
+    }
+
+    /// Physical line offset of a row from the top of the list.
+    fn physical_offset(&self, index: usize) -> usize {
+        self.prefix.get(index).copied().unwrap_or(0)
+    }
+
+    /// Number of rows, starting at `start`, that fit completely in the body.
+    fn visible_count_at(&self, start: usize) -> usize {
+        let rows = self.rows();
+        let start = start.min(rows);
+        if start == rows {
+            return 0;
+        }
+        let limit = self.prefix[start] + self.body_height;
+        let mut lo = start;
+        let mut hi = rows;
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if self.prefix[mid] <= limit {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo - start
+    }
+
+    /// Largest scroll offset that still shows at least the last row.
+    fn max_scroll(&self) -> usize {
+        let rows = self.rows();
+        if rows == 0 {
+            return 0;
+        }
+        let limit = self.total_physical().saturating_sub(self.body_height);
+        let mut lo = 0;
+        let mut hi = rows - 1;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.prefix[mid] >= limit {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
+    }
+
+    /// Scroll offset that keeps `selected` visible. Preserves `scroll`
+    /// while the row is visible, places `selected` on the body's bottom
+    /// edge when scrolling down, and never leaves the row above the top
+    /// edge.
+    fn scroll_to_show(&self, selected: usize, scroll: usize) -> usize {
+        let rows = self.rows();
+        if rows == 0 || self.body_height == 0 {
+            return 0;
+        }
+        let selected = selected.min(rows - 1);
+        let scroll = scroll.min(self.max_scroll());
+        let result = if selected < scroll {
+            selected
+        } else if selected < scroll + self.visible_count_at(scroll) {
+            scroll
+        } else if self.height(selected) > self.body_height {
+            // The selected row cannot fit in the body; keep the window in
+            // place so the trailing-blank message can be shown.
+            scroll
+        } else {
+            // Smallest offset s <= selected such that rows s..=selected fit.
+            let limit = self.prefix[selected + 1].saturating_sub(self.body_height);
+            let mut lo = 0;
+            let mut hi = selected;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if self.prefix[mid] >= limit {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            lo
+        };
+        result.min(self.max_scroll())
+    }
+
+    /// Row at a physical offset inside the body for the window starting at
+    /// `scroll`. Offsets in the trailing blank space past the last fully
+    /// visible row return `None`.
+    fn row_at_physical(&self, physical: usize, scroll: usize) -> Option<usize> {
+        let rows = self.rows();
+        if rows == 0 {
+            return None;
+        }
+        let scroll = scroll.min(rows - 1);
+        let visible = self.visible_count_at(scroll);
+        if visible == 0 {
+            return None;
+        }
+        let base = self.prefix[scroll];
+        let used = self.prefix[scroll + visible] - base;
+        if physical >= used {
+            return None;
+        }
+        let mut lo = scroll;
+        let mut hi = scroll + visible;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.prefix[mid + 1] - base > physical {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        Some(lo)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +227,13 @@ pub(crate) struct WorkspaceSwitcherRow {
     pub ws_idx: usize,
     pub depth: u8,
     pub label: SwitcherLabel,
-    pub meta: String,
-    pub activity: String,
+    /// Present secondary metadata segments, in display order. Workspace
+    /// rows carry Repository Name, Git branch (omitted when the branch is
+    /// already the primary displayed title), and agent activity; tab rows
+    /// carry tab-specific agent activity; directory rows carry the path.
+    /// Empty means no secondary line, so the row consumes one line.
+    /// Directory rows always hold a path segment and consume two lines.
+    pub secondary: Vec<String>,
     pub is_current: bool,
     pub expanded: bool,
     pub is_tab: bool,
@@ -151,6 +320,11 @@ pub(crate) struct WorkspaceSwitcherState {
     /// controller reads and clears this to clamp selection and refresh
     /// preview with terminal runtimes.
     pub needs_provider_refresh: bool,
+    /// Set when the switcher opens. The App controller reads and clears
+    /// this to request the existing asynchronous Git identity/branch
+    /// refresh so branch metadata arrives while the switcher is open,
+    /// even when the sidebar has no branch token.
+    pub branch_refresh_requested: bool,
     /// Set by handle_app_event when a directory preview completes. The App
     /// controller reads and clears this to refresh the preview if the path
     /// is currently selected.
@@ -194,6 +368,9 @@ impl AppState {
         self.workspace_switcher.scroll = 0;
         self.workspace_switcher.expanded_workspaces.clear();
         self.workspace_switcher.active = true;
+        // Cached Git data renders immediately; the App controller consumes
+        // this flag to request the asynchronous Git identity/branch refresh.
+        self.workspace_switcher.branch_refresh_requested = true;
 
         let rows = self.workspace_switcher_rows_from(terminal_runtimes);
         self.workspace_switcher.selected = self
@@ -334,10 +511,22 @@ impl AppState {
                 continue;
             }
             let label = self.workspace_label(ws_idx, terminal_runtimes);
-            let label_text = label.display();
 
-            // Match workspace name.
-            let mut best_rank = workspace_switcher_match_rank(query, &label_text);
+            // Search identity fields: workspace name/primary label,
+            // repository name, and git branch. Agent activity does not
+            // participate in matching. Each field is ranked with the
+            // shared match-rank function and the best rank wins.
+            let mut identity_fields: Vec<String> = vec![label.display()];
+            if let Some(repo) = label.parts().0 {
+                identity_fields.push(repo.to_string());
+            }
+            if let Some(branch) = self.workspaces[ws_idx].branch() {
+                identity_fields.push(branch);
+            }
+            let mut best_rank: Option<(u8, usize)> = identity_fields
+                .iter()
+                .filter_map(|field| workspace_switcher_match_rank(query, field))
+                .min();
 
             // If this workspace is the enriched one for its canonical path,
             // also match against the zoxide candidate using the candidate's
@@ -420,7 +609,6 @@ impl AppState {
         candidate: &crate::app::workspace_search_provider::SearchProviderCandidate,
     ) -> WorkspaceSwitcherRow {
         let label = SwitcherLabel::plain(candidate.basename());
-        let meta = candidate.abbreviated_path();
         WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Directory {
                 shown_path: candidate.shown_path.clone(),
@@ -429,8 +617,7 @@ impl AppState {
             ws_idx: usize::MAX,
             depth: 0,
             label,
-            meta,
-            activity: String::new(),
+            secondary: vec![candidate.abbreviated_path()],
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -478,13 +665,24 @@ impl AppState {
         expanded: bool,
     ) -> WorkspaceSwitcherRow {
         let ws = &self.workspaces[ws_idx];
-        let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
-        let meta = if pane_count == 1 {
-            "1 pane".to_string()
-        } else {
-            format!("{pane_count} panes")
-        };
+        let (repo, existing) = label.parts();
+        let mut secondary: Vec<String> = Vec::new();
+        if let Some(repo) = repo {
+            secondary.push(repo.to_string());
+        }
+        // Omit the branch when it is already the primary displayed title,
+        // which happens for normal grouped linked-worktree children. A
+        // custom primary name does not suppress a different branch.
+        if let Some(branch) = ws
+            .branch()
+            .filter(|branch| !branch_matches_primary_label(branch, existing))
+        {
+            secondary.push(branch);
+        }
         let activity = workspace_activity_summary(ws, &self.terminals);
+        if !activity.is_empty() {
+            secondary.push(activity);
+        }
         let (state, seen) = ws.aggregate_state(&self.terminals);
 
         WorkspaceSwitcherRow {
@@ -494,8 +692,7 @@ impl AppState {
             ws_idx,
             depth: 0,
             label,
-            meta,
-            activity,
+            secondary,
             is_current: self.active == Some(ws_idx),
             expanded,
             is_tab: false,
@@ -513,8 +710,12 @@ impl AppState {
             .iter()
             .enumerate()
             .map(|(tab_idx, tab)| {
-                let pane_count = tab.panes.len();
                 let (state, seen) = tab_aggregate_state(tab, &self.terminals);
+                let activity = tab_activity_summary(tab, &self.terminals);
+                let mut secondary = Vec::new();
+                if !activity.is_empty() {
+                    secondary.push(activity);
+                }
                 WorkspaceSwitcherRow {
                     target: WorkspaceSwitcherTarget::Tab {
                         tab_id: crate::workspace::public_tab_id_for_number(&ws.id, tab.number),
@@ -522,12 +723,7 @@ impl AppState {
                     ws_idx,
                     depth: 1,
                     label: SwitcherLabel::plain(tab.display_name()),
-                    meta: if pane_count == 1 {
-                        "1 pane".to_string()
-                    } else {
-                        format!("{pane_count} panes")
-                    },
-                    activity: String::new(),
+                    secondary,
                     is_current: self.active == Some(ws_idx) && ws.active_tab_index() == tab_idx,
                     expanded: false,
                     is_tab: true,
@@ -539,39 +735,53 @@ impl AppState {
             .collect()
     }
 
+    /// Shared variable-height row layout for the current body rectangle.
+    /// All switcher geometry consumers derive from this calculation.
+    fn workspace_switcher_row_layout(
+        &self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) -> SwitcherRowLayout {
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        SwitcherRowLayout::new(&rows, self.workspace_switcher_body_rect().height as usize)
+    }
+
     pub(crate) fn workspace_switcher_max_scroll_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-        viewport: usize,
     ) -> usize {
-        if viewport == 0 {
-            return 0;
-        }
-        self.workspace_switcher_rows_from(terminal_runtimes)
-            .len()
-            .saturating_sub(viewport)
+        self.workspace_switcher_row_layout(terminal_runtimes)
+            .max_scroll()
     }
 
     pub(crate) fn ensure_workspace_switcher_selection_visible_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let viewport = workspace_switcher_capacity(self.workspace_switcher_body_rect().height);
-        if viewport == 0 {
-            self.workspace_switcher.scroll = 0;
+        let layout = self.workspace_switcher_row_layout(terminal_runtimes);
+        self.workspace_switcher.scroll = layout.scroll_to_show(
+            self.workspace_switcher.selected,
+            self.workspace_switcher.scroll,
+        );
+    }
+
+    /// Re-anchor the selection by target identity after an asynchronous
+    /// state change (Git branch refresh, provider results, agent activity)
+    /// changed the row composition or heights. Falls back to the stored
+    /// index when the target is no longer in the results.
+    pub(crate) fn reanchor_workspace_switcher_selection_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        if !self.workspace_switcher.active {
             return;
         }
-        let max_scroll = self.workspace_switcher_max_scroll_from(terminal_runtimes, viewport);
-        if self.workspace_switcher.selected < self.workspace_switcher.scroll {
-            self.workspace_switcher.scroll = self.workspace_switcher.selected;
-        } else if self.workspace_switcher.selected >= self.workspace_switcher.scroll + viewport {
-            self.workspace_switcher.scroll = self
-                .workspace_switcher
-                .selected
-                .saturating_add(1)
-                .saturating_sub(viewport);
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        if let Some(target) = self.workspace_switcher.selected_target.clone() {
+            if let Some(position) = rows.iter().position(|row| row.target == target) {
+                self.workspace_switcher.selected = position;
+            }
         }
-        self.workspace_switcher.scroll = self.workspace_switcher.scroll.min(max_scroll);
+        self.clamp_workspace_switcher_selection_from(terminal_runtimes);
     }
 
     pub(crate) fn clamp_workspace_switcher_selection_from(
@@ -1239,7 +1449,10 @@ fn move_workspace_switcher_page(
     terminal_runtimes: &TerminalRuntimeRegistry,
     direction: isize,
 ) {
-    let page = workspace_switcher_capacity(state.workspace_switcher_body_rect().height).max(1);
+    let page = state
+        .workspace_switcher_row_layout(terminal_runtimes)
+        .visible_count_at(state.workspace_switcher.scroll)
+        .max(1);
     state.move_workspace_switcher_selection_from(
         terminal_runtimes,
         (page as isize).saturating_mul(direction),
@@ -1373,8 +1586,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
             state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         MouseEventKind::ScrollDown => {
-            let viewport = workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
-            let max = state.workspace_switcher_max_scroll_from(terminal_runtimes, viewport);
+            let max = state.workspace_switcher_max_scroll_from(terminal_runtimes);
             state.workspace_switcher.scroll =
                 state.workspace_switcher.scroll.saturating_add(3).min(max);
             state.workspace_switcher.selected = state.workspace_switcher.scroll;
@@ -1390,6 +1602,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
 fn close_workspace_switcher(state: &mut AppState) {
     state.workspace_switcher.active = false;
     state.workspace_switcher.selected_target = None;
+    state.workspace_switcher.branch_refresh_requested = false;
     state.reset_search_provider_state();
     if state.active.is_some() {
         state.mode = Mode::Terminal;
@@ -1416,6 +1629,7 @@ pub(crate) fn paste_workspace_switcher_query(
     state.workspace_switcher.scroll = 0;
     state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
     state.refresh_workspace_switcher_preview_from(terminal_runtimes);
+    state.capture_workspace_switcher_target_from(terminal_runtimes);
     true
 }
 
@@ -1647,16 +1861,9 @@ impl AppState {
         if !rect_contains(body, col, row) {
             return None;
         }
-        let capacity = workspace_switcher_capacity(body.height);
         let physical_offset = row.saturating_sub(body.y) as usize;
-        if physical_offset >= capacity.saturating_mul(WORKSPACE_SWITCHER_LINES_PER_ITEM as usize) {
-            return None;
-        }
-        let idx = self
-            .workspace_switcher
-            .scroll
-            .saturating_add(physical_offset / WORKSPACE_SWITCHER_LINES_PER_ITEM as usize);
-        (idx < self.workspace_switcher_rows_from(terminal_runtimes).len()).then_some(idx)
+        let layout = self.workspace_switcher_row_layout(terminal_runtimes);
+        layout.row_at_physical(physical_offset, self.workspace_switcher.scroll)
     }
 }
 
@@ -1828,8 +2035,13 @@ fn render_rows(
         return;
     }
 
-    let capacity = workspace_switcher_capacity(body.height);
-    if capacity == 0 {
+    let scroll = app
+        .workspace_switcher
+        .scroll
+        .min(rows.len().saturating_sub(1));
+    let layout = SwitcherRowLayout::new(&rows, body.height as usize);
+    let visible = layout.visible_count_at(scroll);
+    if visible == 0 {
         frame.render_widget(
             Paragraph::new(format!("{} items hidden", rows.len()))
                 .style(Style::default().fg(app.palette.overlay0)),
@@ -1838,18 +2050,15 @@ fn render_rows(
         return;
     }
 
-    let start = app.workspace_switcher.scroll.min(rows.len());
-    let end = rows.len().min(start.saturating_add(capacity));
-    for (visible_idx, row) in rows[start..end].iter().enumerate() {
-        let idx = start + visible_idx;
-        let y = body.y + visible_idx as u16 * WORKSPACE_SWITCHER_LINES_PER_ITEM;
-        let rect = Rect::new(body.x, y, body.width, WORKSPACE_SWITCHER_LINES_PER_ITEM);
+    for (index, row) in rows.iter().enumerate().skip(scroll).take(visible) {
+        let y = body.y + (layout.physical_offset(index) - layout.physical_offset(scroll)) as u16;
+        let rect = Rect::new(body.x, y, body.width, layout.height(index) as u16);
         render_row(
             app,
             frame,
             rect,
             row,
-            idx == app.workspace_switcher.selected,
+            index == app.workspace_switcher.selected,
         );
     }
 }
@@ -1886,7 +2095,12 @@ fn render_row(
     };
 
     let primary = Rect::new(rect.x, rect.y, rect.width, 1);
-    let secondary = Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1);
+    let has_secondary = rect.height >= 2;
+    let secondary = if has_secondary {
+        Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1)
+    } else {
+        Rect::default()
+    };
     let mut spans: Vec<Span> = Vec::new();
 
     if row.is_directory {
@@ -1901,14 +2115,16 @@ fn render_row(
         let title = truncate_text(row.label.parts().1, title_budget);
         spans.push(Span::styled(title, dir_text_style));
         frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
-        let secondary_rect = Rect::new(
-            secondary.x.saturating_add(fixed_width),
-            secondary.y,
-            secondary.width.saturating_sub(fixed_width),
-            1,
-        );
-        let path = truncate_text(&row.meta, secondary_rect.width as usize);
-        frame.render_widget(Paragraph::new(path).style(dim_style), secondary_rect);
+        if has_secondary {
+            let secondary_rect = Rect::new(
+                secondary.x.saturating_add(fixed_width),
+                secondary.y,
+                secondary.width.saturating_sub(fixed_width),
+                1,
+            );
+            let path = truncate_secondary_segments(&row.secondary, secondary_rect.width as usize);
+            frame.render_widget(Paragraph::new(path).style(dim_style), secondary_rect);
+        }
         return;
     }
 
@@ -1926,49 +2142,27 @@ fn render_row(
     spans.push(Span::styled(dot, dot_style));
     spans.push(Span::styled(" ", dim_style));
 
-    let meta_width = row_meta_width(rect.width);
     let fixed_width: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-    let title_budget = rect
-        .width
-        .saturating_sub(meta_width)
-        .saturating_sub(fixed_width)
-        .saturating_sub(1) as usize;
+    let title_budget = rect.width.saturating_sub(fixed_width).saturating_sub(1) as usize;
     let title = truncate_text(row.label.parts().1, title_budget);
     spans.push(Span::styled(title, text_style));
 
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
 
-    if meta_width > 0 {
-        let meta_rect = Rect::new(
-            rect.x + rect.width.saturating_sub(meta_width),
-            primary.y,
-            meta_width,
+    if has_secondary && !row.secondary.is_empty() {
+        let secondary_rect = Rect::new(
+            secondary.x.saturating_add(fixed_width),
+            secondary.y,
+            secondary.width.saturating_sub(fixed_width),
             1,
         );
-        let meta = truncate_text(&row.meta, meta_width.saturating_sub(1) as usize);
-        let style = if selected {
-            base_style
-        } else {
-            Style::default().fg(p.overlay0).bg(p.panel_bg)
-        };
-        frame.render_widget(Paragraph::new(format!(" {meta}")).style(style), meta_rect);
+        let secondary_text =
+            truncate_secondary_segments(&row.secondary, secondary_rect.width as usize);
+        frame.render_widget(
+            Paragraph::new(secondary_text).style(dim_style),
+            secondary_rect,
+        );
     }
-
-    let secondary_rect = Rect::new(
-        secondary.x.saturating_add(fixed_width),
-        secondary.y,
-        secondary.width.saturating_sub(fixed_width),
-        1,
-    );
-    let secondary_text = workspace_secondary_text(
-        row.label.parts().0,
-        &row.activity,
-        secondary_rect.width as usize,
-    );
-    frame.render_widget(
-        Paragraph::new(secondary_text).style(dim_style),
-        secondary_rect,
-    );
 }
 
 fn render_workspace_switcher_scrollbar(
@@ -1980,20 +2174,21 @@ fn render_workspace_switcher_scrollbar(
     if body.width <= 1 || body.height == 0 {
         return;
     }
-    let rows = app.workspace_switcher_rows_from(terminal_runtimes).len();
-    let viewport = workspace_switcher_capacity(body.height);
-    if viewport == 0 {
+    let layout = app.workspace_switcher_row_layout(terminal_runtimes);
+    let total = layout.total_physical();
+    if total <= body.height as usize {
         return;
     }
-    if rows <= viewport {
-        return;
-    }
+    // Window-position metrics, the same pattern as the sidebar scrollbar:
+    // the physical lines above the window top. Monotonic for mixed-height
+    // rows, zero at the top and max at the bottom of the list.
+    let max_scroll = layout.max_scroll();
+    let max_offset_from_top = layout.physical_offset(max_scroll);
+    let offset_from_top = layout.physical_offset(app.workspace_switcher.scroll.min(max_scroll));
     let metrics = crate::pane::ScrollMetrics {
-        viewport_rows: viewport,
-        offset_from_bottom: rows
-            .saturating_sub(viewport)
-            .saturating_sub(app.workspace_switcher.scroll),
-        max_offset_from_bottom: rows.saturating_sub(viewport),
+        viewport_rows: body.height as usize,
+        offset_from_bottom: max_offset_from_top - offset_from_top,
+        max_offset_from_bottom: max_offset_from_top,
     };
     if !should_show_scrollbar(metrics) {
         return;
@@ -2184,16 +2379,6 @@ fn render_separator(frame: &mut Frame, area: Rect, color: Color) {
     );
 }
 
-fn row_meta_width(width: u16) -> u16 {
-    if width >= 38 {
-        13
-    } else if width >= 30 {
-        9
-    } else {
-        0
-    }
-}
-
 fn truncate_text(text: &str, max_width: usize) -> String {
     let len = text.chars().count();
     if len <= max_width {
@@ -2209,35 +2394,63 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
-fn workspace_secondary_text(repo: Option<&str>, activity: &str, max_width: usize) -> String {
-    const MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH: usize = 2;
+/// Separator between secondary metadata segments.
+const SECONDARY_SEPARATOR: &str = " · ";
 
-    let Some(repo) = repo else {
-        return truncate_text(activity, max_width);
-    };
-    if activity.is_empty() {
-        return truncate_text(repo, max_width);
+/// Join secondary metadata segments with ` · ` for the given width, keeping
+/// left-to-right priority: earlier segments are preserved before later
+/// ones. The first segment that does not fit is truncated with an ellipsis
+/// when at least two columns remain, otherwise it and all later segments
+/// are dropped. The result never ends in a dangling separator.
+fn truncate_secondary_segments(segments: &[String], max_width: usize) -> String {
+    if segments.is_empty() || max_width == 0 {
+        return String::new();
+    }
+    if segments.len() == 1 {
+        return truncate_text(&segments[0], max_width);
     }
 
-    let repo_width = repo.chars().count();
-    let separator = " · ";
-    let separator_width = separator.chars().count();
-    if repo_width > max_width {
-        return truncate_text(repo, max_width);
-    }
-    if repo_width
-        .saturating_add(separator_width)
-        .saturating_add(MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH)
-        > max_width
-    {
-        return repo.to_string();
+    let separator_width = SECONDARY_SEPARATOR.chars().count();
+    let widths: Vec<usize> = segments.iter().map(|s| s.chars().count()).collect();
+    let full: usize = widths.iter().sum::<usize>() + separator_width * (segments.len() - 1);
+    if full <= max_width {
+        return segments.join(SECONDARY_SEPARATOR);
     }
 
-    let activity_width = max_width - repo_width - separator_width;
-    format!(
-        "{repo}{separator}{}",
-        truncate_text(activity, activity_width)
-    )
+    let mut used = 0usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let taken = used + if index > 0 { separator_width } else { 0 };
+        let remaining = max_width.saturating_sub(taken);
+        if widths[index] <= remaining {
+            used = taken + widths[index];
+            continue;
+        }
+        if remaining >= 2 {
+            let mut out = if index == 0 {
+                String::new()
+            } else {
+                let mut joined = segments[..index].join(SECONDARY_SEPARATOR);
+                joined.push_str(SECONDARY_SEPARATOR);
+                joined
+            };
+            out.push_str(&truncate_text(segment, remaining));
+            return out;
+        }
+        if index == 0 {
+            return truncate_text(segment, remaining);
+        }
+        return segments[..index].join(SECONDARY_SEPARATOR);
+    }
+    segments.join(SECONDARY_SEPARATOR)
+}
+
+/// Returns `true` when the branch is already the primary displayed title.
+/// Normal grouped linked-worktree children display the branch (with the
+/// `worktree/` prefix stripped) as their primary label, so repeating it on
+/// the secondary line is avoided. A custom primary name only suppresses the
+/// branch when it is exactly the branch (or its stripped form).
+fn branch_matches_primary_label(branch: &str, existing_label: &str) -> bool {
+    existing_label == branch || existing_label == branch.strip_prefix("worktree/").unwrap_or(branch)
 }
 
 /// Separator used between the repository name and the existing workspace
@@ -2613,9 +2826,48 @@ mod tests {
         };
         assert_eq!(state.workspaces[state.active.unwrap()].id, workspace_id);
     }
+
+    #[test]
+    fn reanchor_selection_follows_target_identity_across_row_reorder() {
+        let mut state = app_with_workspaces(&["one", "two", "three", "four"]);
+        for ws in state.workspaces.iter_mut() {
+            ws.cached_git_branch = None;
+        }
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        // Rows are [one, two, three, four]; select "three" (row 2) and
+        // capture its target identity.
+        state.workspace_switcher.selected = 2;
+        state.clamp_workspace_switcher_selection_from(&terminal_runtimes);
+        assert_eq!(state.workspace_switcher_rows()[2].ws_idx, 2);
+
+        // A concurrent client reorders the MRU while the switcher is open:
+        // rows become [one, three, four, two]. The stale numeric index 2
+        // now points at "four"; the re-anchor must land on "three".
+        state.workspace_mru = vec![
+            state.workspaces[2].id.clone(),
+            state.workspaces[3].id.clone(),
+            state.workspaces[1].id.clone(),
+        ];
+        state.reanchor_workspace_switcher_selection_from(&terminal_runtimes);
+
+        assert_eq!(state.workspace_switcher.selected, 1);
+        assert_eq!(state.workspace_switcher_rows()[1].ws_idx, 2);
+    }
+
+    #[test]
+    fn opening_switcher_demands_async_branch_refresh() {
+        let mut state = app_with_workspaces(&["one"]);
+        assert!(!state.workspace_switcher.branch_refresh_requested);
+        state.open_workspace_switcher();
+        assert!(state.workspace_switcher.branch_refresh_requested);
+    }
+
     #[test]
     fn workspace_switcher_filters_workspace_names_only() {
         let mut state = app_with_workspaces(&["one", "issue"]);
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].cached_git_branch = None;
         let root = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(root).cloned().unwrap();
         state
@@ -2630,7 +2882,7 @@ mod tests {
         state.workspace_switcher.query = "weekly".into();
         assert!(state.workspace_switcher_rows().is_empty());
 
-        state.workspace_switcher.query = "ie".into();
+        state.workspace_switcher.query = "issu".into();
         let rows = state.workspace_switcher_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ws_idx, 1);
@@ -3431,8 +3683,7 @@ mod tests {
             ws_idx: 0,
             depth: 0,
             label: SwitcherLabel::plain("test".to_string()),
-            meta: "".to_string(),
-            activity: String::new(),
+            secondary: Vec::new(),
             is_current: true,
             expanded: false,
             is_tab: false,
@@ -3461,8 +3712,7 @@ mod tests {
             ws_idx: 0,
             depth: 0,
             label: SwitcherLabel::plain("test".to_string()),
-            meta: "".to_string(),
-            activity: String::new(),
+            secondary: Vec::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -3492,8 +3742,7 @@ mod tests {
             ws_idx: 0,
             depth: 1,
             label: SwitcherLabel::plain("ws".to_string()),
-            meta: "".to_string(),
-            activity: String::new(),
+            secondary: Vec::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4466,8 +4715,8 @@ mod tests {
 
             let rows = state.workspace_switcher_rows();
             let dir_row = rows.iter().find(|r| r.is_directory).expect("dir row");
-            assert!(dir_row.meta.starts_with('~'));
-            assert!(dir_row.meta.contains("projects/myapp"));
+            assert!(dir_row.secondary[0].starts_with('~'));
+            assert!(dir_row.secondary[0].contains("projects/myapp"));
         }
     }
 
@@ -4701,20 +4950,169 @@ mod tests {
     }
 
     #[test]
-    fn composite_row_preserves_pane_metadata() {
+    fn search_matches_branch_identity_field() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        state.workspace_switcher.query = "feature-x".into();
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let child = rows.iter().find(|r| r.ws_idx == 1);
+        assert!(child.is_some(), "branch-only query should find the row");
+    }
+
+    #[test]
+    fn search_selection_survives_async_branch_match_insertion() {
+        let mut state = app_with_workspaces(&["alpha", "beta", "gamma"]);
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].cached_git_branch = None;
+        state.workspaces[2].cached_git_branch = Some("issue-9-a".into());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        state.workspace_switcher.query = "issue-9".into();
+        state.clamp_workspace_switcher_selection_from(&terminal_runtimes);
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ws_idx, 2);
+        assert_eq!(state.workspace_switcher.selected, 0);
+
+        // An asynchronous Git refresh arrives while the switcher is open:
+        // "beta" now carries a matching branch and inserts a row above the
+        // selected one (equal rank, earlier MRU order).
+        let cwd = state.workspaces[1].resolved_identity_cwd().unwrap();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id: state.workspaces[1].id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "beta".into(),
+                branch: Some("issue-9-zz".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+        );
+        assert!(changed);
+
+        state.reanchor_workspace_switcher_selection_from(&terminal_runtimes);
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ws_idx, 1);
+        assert_eq!(rows[1].ws_idx, 2);
+        // The selection followed the target identity, not the stale index 0.
+        assert_eq!(state.workspace_switcher.selected, 1);
+    }
+
+    #[test]
+    fn search_does_not_match_agent_activity() {
+        let mut state = app_with_workspaces(&["alpha"]);
+        state.workspaces[0].cached_git_branch = None;
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(root).cloned().unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().state = crate::detect::AgentState::Working;
+        // The row carries "1 working" on its secondary line, but activity
+        // is not a search identity field.
+        let rows = state.workspace_switcher_rows();
+        assert!(rows[0].secondary.join(" ").contains("working"));
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+
+        state.workspace_switcher.query = "working".into();
+        assert!(state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .is_empty());
+
+        state.workspace_switcher.query = "alpha".into();
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn composite_row_secondary_omits_branch_already_in_primary() {
         let mut state = app_with_workspaces(&["main", "feature"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
         state.workspaces[1].custom_name = None;
         state.workspaces[1].cached_git_branch = Some("worktree/feature-x".into());
+        state.workspaces[0].cached_git_branch = None;
 
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         state.open_workspace_switcher_from(&terminal_runtimes);
         let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
 
         let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
-        // The meta field should still contain the pane count.
-        assert!(child.meta.contains("pane"));
+        // The primary title is the branch with the `worktree/` prefix
+        // stripped, so the branch must not repeat on the secondary line.
+        assert_eq!(child.label.display(), "myrepo / feature-x");
+        assert_eq!(child.secondary, vec!["myrepo".to_string()]);
+    }
+
+    #[test]
+    fn composite_row_secondary_keeps_branch_different_from_primary() {
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        // Custom primary name does not suppress a different branch.
+        state.workspaces[1].cached_git_branch = Some("worktree/other".into());
+        state.workspaces[0].cached_git_branch = None;
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child.label.display(), "myrepo / feature");
+        assert_eq!(
+            child.secondary,
+            vec!["myrepo".to_string(), "worktree/other".to_string()]
+        );
+    }
+
+    #[test]
+    fn tab_rows_carry_tab_specific_activity_not_workspace_wide() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.workspaces[0].cached_git_branch = None;
+        // A second tab so per-tab activity differs from workspace-wide.
+        state.workspaces[0].test_add_tab(None);
+        state.ensure_test_terminals();
+
+        let term0 = state.workspaces[0]
+            .terminal_id(state.workspaces[0].tabs[0].root_pane)
+            .cloned()
+            .unwrap();
+        let term1 = state.workspaces[0]
+            .terminal_id(state.workspaces[0].tabs[1].root_pane)
+            .cloned()
+            .unwrap();
+        state.terminals.get_mut(&term0).unwrap().state = crate::detect::AgentState::Blocked;
+        state.terminals.get_mut(&term1).unwrap().state = crate::detect::AgentState::Working;
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let tab_rows = state.workspace_switcher_tab_rows(0);
+        assert_eq!(tab_rows.len(), 2);
+        assert_eq!(tab_rows[0].secondary, vec!["1 blocked".to_string()]);
+        assert_eq!(tab_rows[1].secondary, vec!["1 working".to_string()]);
+
+        // The workspace row aggregates all tabs instead.
+        let ws_row = state.workspace_switcher_workspace_row(
+            0,
+            state.workspace_label(0, &terminal_runtimes),
+            false,
+        );
+        assert_eq!(ws_row.secondary, vec!["1 blocked · 1 working".to_string()]);
     }
 
     fn rendered_line(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
@@ -4739,8 +5137,7 @@ mod tests {
             ws_idx: 0,
             depth: 0,
             label: SwitcherLabel::composite("herdr".to_string(), "feature-x".to_string()),
-            meta: "2 panes".to_string(),
-            activity: "1 working".to_string(),
+            secondary: vec!["herdr".to_string(), "1 working".to_string()],
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4758,8 +5155,8 @@ mod tests {
         let primary = rendered_line(&terminal, 0, 40);
         let secondary = rendered_line(&terminal, 1, 40);
         assert!(primary.contains("feature-x"));
-        assert!(primary.contains("2 panes"));
         assert!(!primary.contains("herdr"));
+        assert!(!primary.contains("pane"));
         assert!(secondary.contains("herdr · 1 working"));
         assert_eq!(
             primary.chars().position(|ch| ch == 'f'),
@@ -4768,20 +5165,67 @@ mod tests {
     }
 
     #[test]
-    fn secondary_text_preserves_repository_before_activity() {
+    fn secondary_truncation_keeps_left_segments_before_right() {
+        let segs = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // Everything fits: joined with separators.
         assert_eq!(
-            workspace_secondary_text(Some("repository"), "working", 10),
+            truncate_secondary_segments(&segs(&["repo", "main", "1 working"]), 23),
+            "repo · main · 1 working"
+        );
+        // Rightmost segment truncates first.
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "main", "1 working"]), 18),
+            "repo · main · 1 w…"
+        );
+        // Then the middle segment, then only the left one remains.
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "main", "1 working"]), 10),
+            "repo · ma…"
+        );
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "main", "1 working"]), 8),
+            "repo"
+        );
+        // A single segment truncates on its own.
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repository"]), 6),
+            "repos…"
+        );
+        // Prior two-segment behavior is preserved.
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repository", "working"]), 10),
             "repository"
         );
         assert_eq!(
-            workspace_secondary_text(Some("repository"), "working", 6),
-            "repos…"
-        );
-        assert_eq!(
-            workspace_secondary_text(Some("repo"), "long activity", 11),
+            truncate_secondary_segments(&segs(&["repo", "long activity"]), 11),
             "repo · lon…"
         );
-        assert_eq!(workspace_secondary_text(Some("repo"), "working", 8), "repo");
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "working"]), 8),
+            "repo"
+        );
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["working"]), 6),
+            "worki…"
+        );
+        // No dangling separator at the drop boundary, never past the width.
+        for width in [4, 5, 6, 7] {
+            let out = truncate_secondary_segments(&segs(&["repo", "main"]), width);
+            assert!(!out.ends_with('·'), "width {width}: {out:?}");
+            assert!(!out.ends_with(' '), "width {width}: {out:?}");
+            assert!(out.chars().count() <= width, "width {width}: {out:?}");
+        }
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "main"]), 3),
+            "re…"
+        );
+        assert_eq!(
+            truncate_secondary_segments(&segs(&["repo", "main"]), 1),
+            "…"
+        );
+        assert_eq!(truncate_secondary_segments(&Vec::new(), 10), "");
+        assert_eq!(truncate_secondary_segments(&segs(&["repo"]), 0), "");
     }
 
     #[test]
@@ -4795,8 +5239,7 @@ mod tests {
                 ws_idx: 0,
                 depth: 0,
                 label: SwitcherLabel::plain("workspace".to_string()),
-                meta: "1 pane".to_string(),
-                activity: "2 blocked".to_string(),
+                secondary: vec!["2 blocked".to_string()],
                 is_current: false,
                 expanded: false,
                 is_tab: false,
@@ -4812,8 +5255,7 @@ mod tests {
                 ws_idx: usize::MAX,
                 depth: 0,
                 label: SwitcherLabel::plain("project".to_string()),
-                meta: "/work/project".to_string(),
-                activity: String::new(),
+                secondary: vec!["/work/project".to_string()],
                 is_current: false,
                 expanded: false,
                 is_tab: false,
@@ -4828,8 +5270,7 @@ mod tests {
                 ws_idx: 0,
                 depth: 1,
                 label: SwitcherLabel::plain("tab".to_string()),
-                meta: "3 panes".to_string(),
-                activity: String::new(),
+                secondary: Vec::new(),
                 is_current: false,
                 expanded: false,
                 is_tab: true,
@@ -4840,29 +5281,41 @@ mod tests {
         ];
 
         for (row, expected_secondary) in rows.iter().zip(["2 blocked", "/work/project", ""]) {
+            let height = switcher_row_height(row) as u16;
             let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
             terminal
-                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 2), row, true))
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, height), row, true))
                 .unwrap();
+            let buffer = terminal.backend().buffer();
             let primary = rendered_line(&terminal, 0, 40);
-            let secondary = rendered_line(&terminal, 1, 40);
-            assert_eq!(terminal.backend().buffer()[(0, 0)].bg, app.palette.accent);
-            assert_eq!(terminal.backend().buffer()[(0, 1)].bg, app.palette.accent);
+            let secondary = if height >= 2 {
+                rendered_line(&terminal, 1, 40)
+            } else {
+                String::new()
+            };
+            // Selected styling covers exactly the rendered item height.
+            for y in 0..height {
+                assert_eq!(buffer[(0, y)].bg, app.palette.accent);
+            }
+            if height < 2 {
+                assert_ne!(buffer[(0, 1)].bg, app.palette.accent);
+            }
             if expected_secondary.is_empty() {
                 assert!(secondary.trim().is_empty());
             } else {
                 assert!(secondary.contains(expected_secondary));
             }
-            if row.is_directory {
-                assert!(!primary.contains(&row.meta));
-            } else {
-                assert!(primary.contains(&row.meta));
+            // The primary line never renders secondary metadata or pane
+            // counts.
+            assert!(!primary.contains("pane"));
+            if !expected_secondary.is_empty() {
+                assert!(!primary.contains(expected_secondary));
             }
         }
     }
 
     #[test]
-    fn pane_metadata_uses_existing_width_thresholds() {
+    fn primary_title_uses_width_released_from_pane_count() {
         let app = AppState::test_new();
         let row = WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -4870,9 +5323,8 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: SwitcherLabel::plain("workspace".to_string()),
-            meta: "12 panes".to_string(),
-            activity: String::new(),
+            label: SwitcherLabel::plain("very-long-workspace-name".to_string()),
+            secondary: Vec::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4881,15 +5333,19 @@ mod tests {
             seen: false,
         };
 
-        for (width, visible) in [(38, true), (30, true), (29, false)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+        // Widths where the former pane-count reservation (9-13 columns) used
+        // to truncate the title now keep it intact.
+        for width in [30u16, 38, 46] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
             terminal
-                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, width, 2), &row, false))
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, width, 1), &row, false))
                 .unwrap();
-            assert_eq!(
-                rendered_line(&terminal, 0, width).contains("12 panes"),
-                visible
+            let primary = rendered_line(&terminal, 0, width);
+            assert!(
+                primary.contains("very-long-workspace-name"),
+                "width {width}: {primary:?}"
             );
+            assert!(!primary.contains("pane"));
         }
     }
 
@@ -4903,8 +5359,7 @@ mod tests {
             ws_idx: 0,
             depth: 0,
             label: SwitcherLabel::plain("workspace".to_string()),
-            meta: "1 pane".to_string(),
-            activity: "working".to_string(),
+            secondary: vec!["1 working".to_string()],
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4929,7 +5384,35 @@ mod tests {
     }
 
     #[test]
-    fn complete_two_line_items_render_in_mobile_and_desktop_layouts() {
+    fn selected_style_covers_exactly_one_line_for_plain_item() {
+        let app = AppState::test_new();
+        let row = WorkspaceSwitcherRow {
+            target: WorkspaceSwitcherTarget::Workspace {
+                workspace_id: String::new(),
+            },
+            ws_idx: 0,
+            depth: 0,
+            label: SwitcherLabel::plain("workspace".to_string()),
+            secondary: Vec::new(),
+            is_current: false,
+            expanded: false,
+            is_tab: false,
+            is_directory: false,
+            state: crate::detect::AgentState::Idle,
+            seen: false,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 1), &row, true))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].bg, app.palette.accent);
+        assert_eq!(buffer[(39, 0)].bg, app.palette.accent);
+    }
+
+    #[test]
+    fn mixed_height_items_render_in_mobile_and_desktop_layouts() {
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         for (width, expected_layout) in [
             (44, crate::app::state::ViewLayout::Mobile),
@@ -4939,11 +5422,20 @@ mod tests {
             mark_parent_worktree(&mut app, 0);
             mark_linked_worktree_with_repo(&mut app, 1, "herdr");
             app.workspaces[1].custom_name = Some("feature".to_string());
+            // Deterministic mixed heights: the parent workspace carries no
+            // secondary line, the linked worktree renders repo + branch.
+            app.workspaces[0].cached_git_branch = None;
+            app.workspaces[1].cached_git_branch = Some("worktree/issue-137".to_string());
             crate::ui::compute_view(&mut app, Rect::new(0, 0, width, 24));
             app.open_workspace_switcher_from(&terminal_runtimes);
             assert_eq!(app.view.layout, expected_layout);
 
             let body = app.workspace_switcher_body_rect();
+            let rows = app.workspace_switcher_rows_from(&terminal_runtimes);
+            let layout = SwitcherRowLayout::new(&rows, body.height as usize);
+            assert_eq!(layout.height(0), 1);
+            assert_eq!(layout.height(1), 2);
+
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal
                 .draw(|frame| render_workspace_switcher_overlay(&app, &terminal_runtimes, frame))
@@ -4952,7 +5444,9 @@ mod tests {
             let feature_y = (body.y..body.y + body.height)
                 .find(|&y| rendered_rect_line(&terminal, body, y).contains("feature"))
                 .expect("linked workspace primary line should render");
-            assert_eq!((feature_y - body.y) % WORKSPACE_SWITCHER_LINES_PER_ITEM, 0);
+            // The two-line item starts on the odd physical offset left by
+            // the one-line item above it, not on a fixed stride.
+            assert_eq!((feature_y - body.y) as usize, layout.physical_offset(1));
             assert!(rendered_rect_line(&terminal, body, feature_y + 1).contains("herdr"));
         }
     }
@@ -5022,38 +5516,74 @@ mod tests {
     }
 
     #[test]
-    fn hit_testing_maps_both_lines_and_rejects_spare_and_post_list_rows() {
-        let mut state = app_with_workspaces(&["one", "two"]);
+    fn hit_testing_maps_mixed_height_lines_and_rejects_trailing_rows() {
+        let mut state = app_with_workspaces(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ]);
+        // Alternate row heights: even rows carry no secondary (1 line), odd
+        // rows carry a branch (2 lines).
+        for (idx, ws) in state.workspaces.iter_mut().enumerate() {
+            ws.cached_git_branch = if idx % 2 == 1 {
+                Some(format!("branch-{idx}"))
+            } else {
+                None
+            };
+        }
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         for height in 12..40 {
             set_switcher_view(&mut state, 80, height);
-            if state.workspace_switcher_body_rect().height % 2 == 1 {
+            if state.workspace_switcher_body_rect().height == 7 {
                 break;
             }
         }
-        state.open_workspace_switcher_from(&terminal_runtimes);
         let body = state.workspace_switcher_body_rect();
-        assert_eq!(body.height % 2, 1);
+        assert_eq!(body.height, 7);
+        state.open_workspace_switcher_from(&terminal_runtimes);
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let layout = SwitcherRowLayout::new(&rows, body.height as usize);
         assert_eq!(
-            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y,),
-            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y + 1,)
+            (0..rows.len())
+                .map(|i| layout.height(i))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 1, 2, 1, 2, 1, 2]
         );
-        assert_eq!(
-            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y + 2,),
-            Some(state.workspace_switcher.scroll + 1)
+
+        // At scroll 0 the rows fill the body exactly (1+2+1+2+1 = 7 lines),
+        // so every body line maps to its item and both lines of a two-line
+        // item map to the same row.
+        let expected_at_top: [usize; 7] = [0, 1, 1, 2, 3, 3, 4];
+        for (offset, expected) in expected_at_top.iter().enumerate() {
+            assert_eq!(
+                state.workspace_switcher_row_index_at_from(
+                    &terminal_runtimes,
+                    body.x,
+                    body.y + offset as u16
+                ),
+                Some(*expected)
+            );
+        }
+
+        // Scrolled to the end, rows 4..=7 use 6 of the 7 body lines; the
+        // final trailing line must reject hit-testing.
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::End, KeyModifiers::empty()),
         );
-        let spare_y = body.y + workspace_switcher_capacity(body.height) as u16 * 2;
-        assert!(spare_y < body.y + body.height);
-        assert_eq!(
-            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, spare_y),
-            None
-        );
-        let post_list_y = body.y + state.workspace_switcher_rows().len() as u16 * 2;
-        assert!(post_list_y < spare_y);
-        assert_eq!(
-            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, post_list_y),
-            None
-        );
+        assert_eq!(state.workspace_switcher.scroll, 4);
+        let expected_at_bottom: [Option<usize>; 7] =
+            [Some(4), Some(5), Some(5), Some(6), Some(7), Some(7), None];
+        for (offset, expected) in expected_at_bottom.iter().enumerate() {
+            assert_eq!(
+                state.workspace_switcher_row_index_at_from(
+                    &terminal_runtimes,
+                    body.x,
+                    body.y + offset as u16
+                ),
+                *expected
+            );
+        }
     }
 
     #[test]
@@ -5093,14 +5623,29 @@ mod tests {
     }
 
     #[test]
-    fn page_navigation_and_resize_use_logical_item_capacity() {
+    fn page_navigation_and_resize_use_mixed_height_item_capacity() {
         let names = (0..20).map(|idx| format!("ws-{idx}")).collect::<Vec<_>>();
         let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
         let mut state = app_with_workspaces(&name_refs);
+        // Alternate row heights: even rows 1 line, odd rows 2 lines (30
+        // physical lines for 20 rows).
+        for (idx, ws) in state.workspaces.iter_mut().enumerate() {
+            ws.cached_git_branch = if idx % 2 == 1 {
+                Some(format!("branch-{idx}"))
+            } else {
+                None
+            };
+        }
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 30));
         state.open_workspace_switcher_from(&terminal_runtimes);
-        let capacity = workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        let layout =
+            SwitcherRowLayout::new(&rows, state.workspace_switcher_body_rect().height as usize);
+        assert_eq!(layout.total_physical(), 30);
+        // Body 21 lines fits 14 alternating rows (7 pairs of 3 lines).
+        let page = layout.visible_count_at(0);
+        assert_eq!(page, 14);
         state.workspace_switcher.selected = 0;
         state.workspace_switcher.scroll = 0;
         handle_workspace_switcher_key(
@@ -5108,7 +5653,7 @@ mod tests {
             &terminal_runtimes,
             KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()),
         );
-        assert_eq!(state.workspace_switcher.selected, capacity);
+        assert_eq!(state.workspace_switcher.selected, page);
         handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
@@ -5117,8 +5662,12 @@ mod tests {
         assert_eq!(state.workspace_switcher.selected, 0);
 
         state.enter_workspace_switcher_search_from(&terminal_runtimes);
-        let search_capacity =
-            workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        let search_layout =
+            SwitcherRowLayout::new(&rows, state.workspace_switcher_body_rect().height as usize);
+        // Search row + separator shrink the body to 19 lines, fitting 13
+        // rows (19 of the 30 physical lines).
+        let search_page = search_layout.visible_count_at(0);
+        assert_eq!(search_page, 13);
         state.workspace_switcher.selected = 0;
         state.workspace_switcher.scroll = 0;
         handle_workspace_switcher_key(
@@ -5126,7 +5675,7 @@ mod tests {
             &terminal_runtimes,
             KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()),
         );
-        assert_eq!(state.workspace_switcher.selected, search_capacity);
+        assert_eq!(state.workspace_switcher.selected, search_page);
         handle_workspace_switcher_key(
             &mut state,
             &terminal_runtimes,
@@ -5136,23 +5685,16 @@ mod tests {
 
         state.workspace_switcher.selected = state.workspace_switcher_rows().len() - 1;
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 16));
-        let resized_capacity =
-            workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        let resized_layout =
+            SwitcherRowLayout::new(&rows, state.workspace_switcher_body_rect().height as usize);
         assert!(state.workspace_switcher.selected >= state.workspace_switcher.scroll);
         assert!(
             state.workspace_switcher.selected
-                < state
-                    .workspace_switcher
-                    .scroll
-                    .saturating_add(resized_capacity)
+                < state.workspace_switcher.scroll.saturating_add(
+                    resized_layout.visible_count_at(state.workspace_switcher.scroll)
+                )
         );
-        assert_eq!(
-            state.workspace_switcher.scroll,
-            state
-                .workspace_switcher_rows()
-                .len()
-                .saturating_sub(resized_capacity)
-        );
+        assert_eq!(state.workspace_switcher.scroll, resized_layout.max_scroll());
     }
 
     #[test]
@@ -5160,6 +5702,14 @@ mod tests {
         let names = (0..20).map(|idx| format!("ws-{idx}")).collect::<Vec<_>>();
         let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
         let mut state = app_with_workspaces(&name_refs);
+        // Mixed heights: wheel movement counts rows, not physical lines.
+        for (idx, ws) in state.workspaces.iter_mut().enumerate() {
+            ws.cached_git_branch = if idx % 2 == 1 {
+                Some(format!("branch-{idx}"))
+            } else {
+                None
+            };
+        }
         set_switcher_view(&mut state, 80, 20);
         let terminal_runtimes = TerminalRuntimeRegistry::new();
         state.open_workspace_switcher_from(&terminal_runtimes);
@@ -5179,5 +5729,68 @@ mod tests {
         );
         assert_eq!(state.workspace_switcher.scroll, 3);
         assert_eq!(state.workspace_switcher.selected, 3);
+
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: body.x,
+                row: body.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert_eq!(state.workspace_switcher.scroll, 0);
+        assert_eq!(state.workspace_switcher.selected, 0);
+    }
+
+    #[test]
+    fn scrollbar_tracks_mixed_height_window_position() {
+        let mut state = app_with_workspaces(&[
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ]);
+        for (idx, ws) in state.workspaces.iter_mut().enumerate() {
+            ws.cached_git_branch = if idx % 2 == 1 {
+                Some(format!("branch-{idx}"))
+            } else {
+                None
+            };
+        }
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        set_switcher_view(&mut state, 80, 12);
+        assert_eq!(state.workspace_switcher_body_rect().height, 7);
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let body = state.workspace_switcher_body_rect();
+        let track_x = body.x + body.width - 1;
+
+        let thumb_rows = |state: &AppState| -> Vec<u16> {
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal
+                .draw(|frame| render_workspace_switcher_overlay(state, &terminal_runtimes, frame))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (body.y..body.y + body.height)
+                .filter(|&y| {
+                    buffer[(track_x, y)].symbol() == "▕"
+                        && buffer[(track_x, y)].fg == state.palette.overlay0
+                })
+                .collect()
+        };
+
+        // At the top of the list the thumb starts at the top of the track.
+        let top_thumb = thumb_rows(&state);
+        assert!(!top_thumb.is_empty());
+        assert_eq!(top_thumb.first(), Some(&body.y));
+
+        // Scrolling to the end moves the thumb to the bottom of the track.
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::End, KeyModifiers::empty()),
+        );
+        let bottom_thumb = thumb_rows(&state);
+        assert!(!bottom_thumb.is_empty());
+        assert_eq!(bottom_thumb.last(), Some(&(body.y + body.height - 1)));
+        assert!(bottom_thumb.first() > top_thumb.first());
     }
 }

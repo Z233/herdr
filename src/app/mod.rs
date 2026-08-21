@@ -995,6 +995,13 @@ impl App {
 
             // -- Workspace Switcher Search provider controller --
 
+            // An open switcher demands the asynchronous Git identity/branch
+            // refresh so branch metadata arrives while it is open.
+            if self.state.workspace_switcher.branch_refresh_requested {
+                self.state.workspace_switcher.branch_refresh_requested = false;
+                self.request_git_identity_refresh(Instant::now());
+            }
+
             // Refresh the workspace canonical snapshot when Search starts
             // or after provider/preview events that change candidates.
             if self.state.workspace_switcher.search_started {
@@ -1009,7 +1016,7 @@ impl App {
                 self.state.workspace_switcher.needs_provider_refresh = false;
                 self.refresh_workspace_canonical_snapshot();
                 self.state
-                    .clamp_workspace_switcher_selection_from(&self.terminal_runtimes);
+                    .reanchor_workspace_switcher_selection_from(&self.terminal_runtimes);
                 needs_render = true;
             }
             if let Some(preview_path) = self.state.workspace_switcher.needs_preview_refresh.take() {

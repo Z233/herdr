@@ -924,7 +924,7 @@ fn state_priority(state: AgentState, seen: bool) -> u8 {
     }
 }
 
-fn tab_activity_summary(
+pub(crate) fn tab_activity_summary(
     tab: &crate::workspace::Tab,
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
