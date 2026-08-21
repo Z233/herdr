@@ -192,6 +192,58 @@ impl SwitcherRowLayout {
         }
         Some(lo)
     }
+
+    /// Physical line offset of `row` within the viewport window starting at
+    /// `scroll`, or `None` when the row is not fully visible there.
+    fn offset_within_window(&self, row: usize, scroll: usize) -> Option<usize> {
+        let rows = self.rows();
+        if rows == 0 {
+            return None;
+        }
+        let row = row.min(rows - 1);
+        let scroll = scroll.min(rows - 1);
+        if row >= scroll && row < scroll + self.visible_count_at(scroll) {
+            Some(self.physical_offset(row) - self.physical_offset(scroll))
+        } else {
+            None
+        }
+    }
+
+    /// Nearest row-boundary scroll that keeps `selected` fully visible and
+    /// minimizes the deviation of its viewport offset from `wanted_offset`.
+    /// Ties prefer the smaller scroll, so less of the list stays hidden
+    /// above. Never returns a scroll beyond the max-scroll policy; when no
+    /// valid scroll keeps the row visible, falls back to
+    /// [`Self::scroll_to_show`] from `current`.
+    fn scroll_to_preserve_offset(
+        &self,
+        selected: usize,
+        wanted_offset: usize,
+        current: usize,
+    ) -> usize {
+        let rows = self.rows();
+        if rows == 0 || self.body_height == 0 {
+            return 0;
+        }
+        let selected = selected.min(rows - 1);
+        let mut best: Option<(usize, usize)> = None; // (deviation, scroll)
+        for scroll in 0..=self.max_scroll() {
+            if scroll > selected {
+                break;
+            }
+            let Some(offset) = self.offset_within_window(selected, scroll) else {
+                continue;
+            };
+            let deviation = offset.abs_diff(wanted_offset);
+            if best.is_none_or(|(best_deviation, _)| deviation < best_deviation) {
+                best = Some((deviation, scroll));
+            }
+        }
+        match best {
+            Some((_, scroll)) => scroll,
+            None => self.scroll_to_show(selected, current),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +334,12 @@ pub(crate) struct WorkspaceSwitcherState {
     pub selected: usize,
     pub selected_target: Option<WorkspaceSwitcherTarget>,
     pub scroll: usize,
+    /// Physical line offset of the selected row within the current
+    /// viewport, captured whenever the selection, scroll, or target capture
+    /// settles. The asynchronous re-anchor uses it to keep the selected
+    /// target's on-screen position stable across row composition and
+    /// height changes. Presentation state only.
+    pub selected_viewport_offset: usize,
     pub preview: WorkspaceSwitcherPreview,
     pub expanded_workspaces: std::collections::HashSet<String>,
     // -- Search provider session state (plain data, no handles or I/O) --
@@ -512,16 +570,24 @@ impl AppState {
             }
             let label = self.workspace_label(ws_idx, terminal_runtimes);
 
-            // Search identity fields: workspace name/primary label,
-            // repository name, and git branch. Agent activity does not
-            // participate in matching. Each field is ranked with the
-            // shared match-rank function and the best rank wins.
-            let mut identity_fields: Vec<String> = vec![label.display()];
-            if let Some(repo) = label.parts().0 {
+            // Search identity fields: the actual workspace primary name,
+            // repository name, and git branch. For composite labels the
+            // rendered `repo / primary` display string is retained as an
+            // additional compatibility field so multi-term repo+label
+            // queries keep matching. Agent activity does not participate in
+            // matching. Each field is ranked with the shared match-rank
+            // function and the best rank wins.
+            let (repo, primary) = label.parts();
+            let mut identity_fields: Vec<String> = vec![primary.to_string()];
+            if let Some(repo) = repo {
                 identity_fields.push(repo.to_string());
             }
             if let Some(branch) = self.workspaces[ws_idx].branch() {
                 identity_fields.push(branch);
+            }
+            let display = label.display();
+            if display != primary {
+                identity_fields.push(display);
             }
             let mut best_rank: Option<(u8, usize)> = identity_fields
                 .iter()
@@ -670,13 +736,17 @@ impl AppState {
         if let Some(repo) = repo {
             secondary.push(repo.to_string());
         }
-        // Omit the branch when it is already the primary displayed title,
-        // which happens for normal grouped linked-worktree children. A
-        // custom primary name does not suppress a different branch.
-        if let Some(branch) = ws
-            .branch()
-            .filter(|branch| !branch_matches_primary_label(branch, existing))
-        {
+        // Provenance: the displayed primary was derived from the branch
+        // only for a normal (non-custom-named) grouped linked-worktree
+        // child. Passed explicitly so suppression never infers it from
+        // string comparison alone.
+        let primary_derived_from_branch =
+            crate::ui::sidebar::is_grouped_child_worktree(self, ws_idx) && ws.custom_name.is_none();
+        // Omit the branch when it is already the primary displayed title.
+        // A custom primary name never suppresses a distinct branch.
+        if let Some(branch) = ws.branch().filter(|branch| {
+            !branch_matches_primary_label(branch, existing, primary_derived_from_branch)
+        }) {
             secondary.push(branch);
         }
         let activity = workspace_activity_summary(ws, &self.terminals);
@@ -762,12 +832,28 @@ impl AppState {
             self.workspace_switcher.selected,
             self.workspace_switcher.scroll,
         );
+        self.capture_workspace_switcher_viewport_anchor(&layout);
+    }
+
+    /// Record the selected row's physical offset within the current
+    /// viewport. Called whenever the selection, scroll, or row composition
+    /// settles, so the asynchronous re-anchor always reads a fresh anchor.
+    fn capture_workspace_switcher_viewport_anchor(&mut self, layout: &SwitcherRowLayout) {
+        self.workspace_switcher.selected_viewport_offset = layout
+            .offset_within_window(
+                self.workspace_switcher.selected,
+                self.workspace_switcher.scroll,
+            )
+            .unwrap_or(0);
     }
 
     /// Re-anchor the selection by target identity after an asynchronous
     /// state change (Git branch refresh, provider results, agent activity)
-    /// changed the row composition or heights. Falls back to the stored
-    /// index when the target is no longer in the results.
+    /// changed the row composition or heights. Relocates the selection to
+    /// the same target and, when a valid row-boundary scroll allows it,
+    /// preserves the target's stored physical offset in the viewport.
+    /// Falls back to the stored index and the safe clamp/visibility policy
+    /// when the target is no longer in the results.
     pub(crate) fn reanchor_workspace_switcher_selection_from(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -778,7 +864,19 @@ impl AppState {
         let rows = self.workspace_switcher_rows_from(terminal_runtimes);
         if let Some(target) = self.workspace_switcher.selected_target.clone() {
             if let Some(position) = rows.iter().position(|row| row.target == target) {
+                let layout = SwitcherRowLayout::new(
+                    &rows,
+                    self.workspace_switcher_body_rect().height as usize,
+                );
                 self.workspace_switcher.selected = position;
+                self.workspace_switcher.scroll = layout.scroll_to_preserve_offset(
+                    position,
+                    self.workspace_switcher.selected_viewport_offset,
+                    self.workspace_switcher.scroll,
+                );
+                self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+                self.capture_workspace_switcher_target_from(terminal_runtimes);
+                return;
             }
         }
         self.clamp_workspace_switcher_selection_from(terminal_runtimes);
@@ -988,10 +1086,13 @@ impl AppState {
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) {
-        self.workspace_switcher.selected_target = self
-            .workspace_switcher_rows_from(terminal_runtimes)
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        self.workspace_switcher.selected_target = rows
             .get(self.workspace_switcher.selected)
             .map(|row| row.target.clone());
+        let layout =
+            SwitcherRowLayout::new(&rows, self.workspace_switcher_body_rect().height as usize);
+        self.capture_workspace_switcher_viewport_anchor(&layout);
     }
 
     fn focus_workspace_switcher_target(&mut self, target: WorkspaceSwitcherTarget) -> bool {
@@ -2443,13 +2544,22 @@ fn truncate_secondary_segments(segments: &[String], max_width: usize) -> String 
     segments.join(SECONDARY_SEPARATOR)
 }
 
-/// Returns `true` when the branch is already the primary displayed title.
-/// Normal grouped linked-worktree children display the branch (with the
-/// `worktree/` prefix stripped) as their primary label, so repeating it on
-/// the secondary line is avoided. A custom primary name only suppresses the
-/// branch when it is exactly the branch (or its stripped form).
-fn branch_matches_primary_label(branch: &str, existing_label: &str) -> bool {
-    existing_label == branch || existing_label == branch.strip_prefix("worktree/").unwrap_or(branch)
+/// Returns `true` when the branch should be omitted from secondary
+/// metadata because it is already the primary displayed title. Raw
+/// equality is suppressed for every primary. The `worktree/`-stripped form
+/// is suppressed only when `primary_derived_from_branch` holds, i.e. the
+/// displayed primary came from the branch for a normal grouped child — a
+/// custom primary name never suppresses a distinct branch.
+fn branch_matches_primary_label(
+    branch: &str,
+    existing_label: &str,
+    primary_derived_from_branch: bool,
+) -> bool {
+    if existing_label == branch {
+        return true;
+    }
+    primary_derived_from_branch
+        && existing_label == branch.strip_prefix("worktree/").unwrap_or(branch)
 }
 
 /// Separator used between the repository name and the existing workspace
@@ -2852,6 +2962,153 @@ mod tests {
 
         assert_eq!(state.workspace_switcher.selected, 1);
         assert_eq!(state.workspace_switcher_rows()[1].ws_idx, 2);
+    }
+
+    /// Select workspace 2 in a 6-workspace fixture, open Search for
+    /// "proj" at an 8-line body (terminal 80x15), and return the expected
+    /// pre-refresh anchor: selected row 2, scroll 0, offset 3.
+    fn open_search_anchor_at_ws2(
+        state: &mut AppState,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        state.open_workspace_switcher_from(terminal_runtimes);
+        state.enter_workspace_switcher_search_from(terminal_runtimes);
+        set_snapshot(state);
+        state.workspace_switcher.query = "proj".into();
+        for _ in 0..2 {
+            handle_workspace_switcher_key(
+                state,
+                terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        assert_eq!(state.workspace_switcher.selected, 2);
+        assert_eq!(state.workspace_switcher.scroll, 0);
+        assert_eq!(state.workspace_switcher.selected_viewport_offset, 3);
+    }
+
+    #[test]
+    fn reanchor_preserves_viewport_offset_when_result_inserted_above() {
+        // Rows [proj-a(1), b(2), c(2), d(2), e(2)] for query "proj": ws0
+        // matches by label (1 line), ws1..ws4 by branch (2 lines), ws5
+        // matches nothing. Body is 8 lines (terminal 80x15, search mode).
+        let mut state = app_with_workspaces(&["proj-a", "b", "c", "d", "e", "f"]);
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].cached_git_branch = Some("proj-b".into());
+        state.workspaces[2].cached_git_branch = Some("proj-c".into());
+        state.workspaces[3].cached_git_branch = Some("proj-d".into());
+        state.workspaces[4].cached_git_branch = Some("proj-e".into());
+        state.workspaces[5].cached_git_branch = None;
+        state.active = Some(5);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 15));
+
+        open_search_anchor_at_ws2(&mut state, &terminal_runtimes);
+        assert_eq!(state.workspace_switcher_body_rect().height, 8);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 5);
+        let selected_id = state.workspaces[2].id.clone();
+
+        // Async Git refresh: ws5 gains a branch that starts with the query
+        // and ranks ahead of every existing row, inserting a 2-line result
+        // above the selected target.
+        let cwd = state.workspaces[5].resolved_identity_cwd().unwrap();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id: state.workspaces[5].id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "f".into(),
+                branch: Some("proj-head".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+        );
+        assert!(changed);
+
+        state.reanchor_workspace_switcher_selection_from(&terminal_runtimes);
+
+        // Identity preserved: the selection still targets ws2, now row 3.
+        assert_eq!(state.workspace_switcher.selected, 3);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[3].ws_idx, 2);
+        let WorkspaceSwitcherTarget::Workspace { workspace_id } = &rows[3].target else {
+            panic!("expected workspace target");
+        };
+        assert_eq!(workspace_id, &selected_id);
+        // Physical offset 3 is preservable (window at row 1) and kept:
+        // the old scroll 0 would have shown the target two lines lower.
+        assert_eq!(state.workspace_switcher.scroll, 1);
+        assert_eq!(state.workspace_switcher.selected_viewport_offset, 3);
+    }
+
+    #[test]
+    fn reanchor_preserves_viewport_offset_when_row_grows_above() {
+        // Rows [proj-a(1), proj-b(1), c(2), d(2), e(2), f(2)] for query
+        // "proj": ws0/ws1 match by label (1 line each), ws2..ws5 by branch
+        // (2 lines each). Body is 8 lines (terminal 80x15, search mode).
+        let mut state = app_with_workspaces(&["proj-a", "proj-b", "c", "d", "e", "f"]);
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].cached_git_branch = None;
+        state.workspaces[2].cached_git_branch = Some("proj-c".into());
+        state.workspaces[3].cached_git_branch = Some("proj-d".into());
+        state.workspaces[4].cached_git_branch = Some("proj-e".into());
+        state.workspaces[5].cached_git_branch = Some("proj-f".into());
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 15));
+
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        assert_eq!(state.workspace_switcher_body_rect().height, 8);
+        state.workspace_switcher.query = "proj".into();
+        for _ in 0..3 {
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        assert_eq!(state.workspace_switcher.selected, 3);
+        assert_eq!(state.workspace_switcher.scroll, 0);
+        assert_eq!(state.workspace_switcher.selected_viewport_offset, 4);
+        let selected_id = state.workspaces[3].id.clone();
+
+        // Async Git refresh: ws1 gains a branch, so its row grows from one
+        // line to two directly above the selected target.
+        let cwd = state.workspaces[1].resolved_identity_cwd().unwrap();
+        let changed = state.apply_workspace_git_statuses(
+            &terminal_runtimes,
+            vec![crate::workspace::WorkspaceGitStatus {
+                workspace_id: state.workspaces[1].id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                status_cache_key: cwd,
+                demand: crate::workspace::GitStatusRefreshDemand::ALL,
+                auto_label: "proj-b".into(),
+                branch: Some("proj-g".into()),
+                ahead_behind: None,
+                space: None,
+            }],
+        );
+        assert!(changed);
+
+        state.reanchor_workspace_switcher_selection_from(&terminal_runtimes);
+
+        // Identity preserved: the selection still targets ws3 at row 3.
+        assert_eq!(state.workspace_switcher.selected, 3);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(rows.len(), 6);
+        let WorkspaceSwitcherTarget::Workspace { workspace_id } = &rows[3].target else {
+            panic!("expected workspace target");
+        };
+        assert_eq!(workspace_id, &selected_id);
+        // Offset 4 is preservable at window start row 1; keeping scroll 0
+        // would have shown the target one line lower.
+        assert_eq!(state.workspace_switcher.scroll, 1);
+        assert_eq!(state.workspace_switcher.selected_viewport_offset, 4);
     }
 
     #[test]
@@ -4966,6 +5223,34 @@ mod tests {
     }
 
     #[test]
+    fn search_ranks_exact_primary_match_for_composite_rows() {
+        // ws0 is a composite row `myrepo / feature` (custom primary
+        // "feature"); ws1 matches the query only through its branch field.
+        // The exact primary match must keep ws0 ranked by the primary's own
+        // position, not by the repo-prefixed composite string's later
+        // position.
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        mark_linked_worktree_with_repo(&mut state, 0, "myrepo");
+        state.workspaces[0].custom_name = Some("feature".to_string());
+        state.workspaces[0].cached_git_branch = None;
+        state.workspaces[1].custom_name = Some("unrelated".to_string());
+        state.workspaces[1].cached_git_branch = Some("feature-b".to_string());
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        set_snapshot(&mut state);
+        state.workspace_switcher.query = "feature".into();
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert_eq!(
+            rows.iter().map(|r| r.ws_idx).collect::<Vec<_>>(),
+            vec![0, 1],
+            "exact primary match must not lose to a branch-field match"
+        );
+    }
+
+    #[test]
     fn search_selection_survives_async_branch_match_insertion() {
         let mut state = app_with_workspaces(&["alpha", "beta", "gamma"]);
         state.workspaces[0].cached_git_branch = None;
@@ -5077,6 +5362,30 @@ mod tests {
         assert_eq!(
             child.secondary,
             vec!["myrepo".to_string(), "worktree/other".to_string()]
+        );
+    }
+
+    #[test]
+    fn composite_row_secondary_keeps_branch_matching_custom_primary_stripped() {
+        // Custom primary "feature" and branch "worktree/feature" are
+        // distinct titles: the stripped-prefix equality must not suppress
+        // the branch for custom names (only for branch-derived primaries).
+        let mut state = app_with_workspaces(&["main", "feature"]);
+        mark_parent_worktree(&mut state, 0);
+        mark_linked_worktree_with_repo(&mut state, 1, "myrepo");
+        state.workspaces[1].custom_name = Some("feature".to_string());
+        state.workspaces[1].cached_git_branch = Some("worktree/feature".to_string());
+        state.workspaces[0].cached_git_branch = None;
+
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        let child = rows.iter().find(|r| r.ws_idx == 1).unwrap();
+        assert_eq!(child.label.display(), "myrepo / feature");
+        assert_eq!(
+            child.secondary,
+            vec!["myrepo".to_string(), "worktree/feature".to_string()]
         );
     }
 
