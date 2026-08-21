@@ -17,7 +17,7 @@ use super::{
 use crate::{
     app::{
         actions::{tab_aggregate_state, workspace_activity_summary},
-        state::{AppState, Mode},
+        state::{AppState, Mode, ViewLayout},
     },
     config::key_event_matches_combo,
     input::TerminalKey,
@@ -1331,7 +1331,13 @@ pub(crate) fn handle_workspace_switcher_mouse(
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(idx) = state.workspace_switcher_row_index_at_from(
+            if rect_contains(
+                state.workspace_switcher_close_rect(),
+                mouse.column,
+                mouse.row,
+            ) {
+                close_workspace_switcher(state);
+            } else if let Some(idx) = state.workspace_switcher_row_index_at_from(
                 terminal_runtimes,
                 mouse.column,
                 mouse.row,
@@ -1406,90 +1412,207 @@ fn workspace_switcher_list_width(width: u16) -> u16 {
     (width / 3).clamp(24, 42).min(width.saturating_sub(1))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WorkspaceSwitcherLayout {
+    mobile_fullscreen: bool,
+    popup: Rect,
+    inner: Rect,
+    top_bar: Rect,
+    close: Rect,
+    search: Rect,
+    search_separator: Rect,
+    content: Rect,
+    body: Rect,
+    divider: Rect,
+    preview: Rect,
+    footer: Rect,
+}
+
 impl AppState {
-    pub(crate) fn workspace_switcher_popup_rect(&self) -> Rect {
+    fn workspace_switcher_layout(&self) -> WorkspaceSwitcherLayout {
+        if self.view.layout == ViewLayout::Mobile {
+            return self.workspace_switcher_mobile_layout();
+        }
+
         let area = self.view.sidebar_rect.union(self.view.terminal_area);
         let margin_x = (area.width / 12).max(2);
         let margin_y = (area.height / 9).max(1);
         let width = area.width.saturating_sub(margin_x.saturating_mul(2));
         let height = area.height.saturating_sub(margin_y.saturating_mul(2));
-        Rect::new(
+        let popup = Rect::new(
             area.x + margin_x,
             area.y + margin_y,
             width.max(4),
             height.max(4),
-        )
-    }
-
-    pub(crate) fn workspace_switcher_inner_rect(&self) -> Rect {
-        Block::default()
-            .borders(Borders::ALL)
-            .inner(self.workspace_switcher_popup_rect())
-    }
-
-    pub(crate) fn workspace_switcher_search_rect(&self) -> Rect {
-        if !self.workspace_switcher.mode.search_visible() {
-            return Rect::default();
-        }
-        let inner = self.workspace_switcher_inner_rect();
-        Rect::new(inner.x, inner.y, inner.width, inner.height.min(1))
-    }
-
-    pub(crate) fn workspace_switcher_content_rect(&self) -> Rect {
-        let inner = self.workspace_switcher_inner_rect();
-        if self.workspace_switcher.mode.search_visible() {
+        );
+        let inner = Block::default().borders(Borders::ALL).inner(popup);
+        let search = if self.workspace_switcher.mode.search_visible() {
+            Rect::new(inner.x, inner.y, inner.width, inner.height.min(1))
+        } else {
+            Rect::default()
+        };
+        let search_separator = if self.workspace_switcher.mode.search_visible() {
+            Rect::new(inner.x, search.y + 1, inner.width, 1)
+        } else {
+            Rect::default()
+        };
+        let content = if self.workspace_switcher.mode.search_visible() {
             if inner.height <= 3 {
-                return Rect::default();
+                Rect::default()
+            } else {
+                Rect::new(
+                    inner.x,
+                    inner.y + 2,
+                    inner.width,
+                    inner.height.saturating_sub(3),
+                )
             }
-            return Rect::new(
+        } else if inner.height <= 1 {
+            Rect::default()
+        } else {
+            Rect::new(
                 inner.x,
-                inner.y + 2,
+                inner.y,
                 inner.width,
-                inner.height.saturating_sub(3),
-            );
-        }
-        if inner.height <= 1 {
-            return Rect::default();
-        }
-        Rect::new(
-            inner.x,
-            inner.y,
-            inner.width,
-            inner.height.saturating_sub(1),
-        )
-    }
-
-    pub(crate) fn workspace_switcher_body_rect(&self) -> Rect {
-        let content = self.workspace_switcher_content_rect();
-        let list_width = workspace_switcher_list_width(content.width);
-        Rect::new(content.x, content.y, list_width, content.height)
-    }
-
-    pub(crate) fn workspace_switcher_divider_rect(&self) -> Rect {
-        let content = self.workspace_switcher_content_rect();
-        let list_width = workspace_switcher_list_width(content.width);
-        if content.width <= list_width || content.height == 0 {
-            return Rect::default();
-        }
-        Rect::new(content.x + list_width, content.y, 1, content.height)
-    }
-
-    pub(crate) fn workspace_switcher_preview_rect(&self) -> Rect {
-        let content = self.workspace_switcher_content_rect();
-        let list_width = workspace_switcher_list_width(content.width);
-        let x = content.x.saturating_add(list_width).saturating_add(1);
-        let width = content.width.saturating_sub(list_width).saturating_sub(1);
-        Rect::new(x, content.y, width, content.height)
-    }
-
-    pub(crate) fn workspace_switcher_footer_rect(&self) -> Rect {
-        let inner = self.workspace_switcher_inner_rect();
-        Rect::new(
+                inner.height.saturating_sub(1),
+            )
+        };
+        let footer = Rect::new(
             inner.x,
             inner.y + inner.height.saturating_sub(1),
             inner.width,
             inner.height.min(1),
-        )
+        );
+        Self::workspace_switcher_layout_with_content(WorkspaceSwitcherLayout {
+            mobile_fullscreen: false,
+            popup,
+            inner,
+            top_bar: Rect::default(),
+            close: Rect::default(),
+            search,
+            search_separator,
+            content,
+            footer,
+            ..WorkspaceSwitcherLayout::default()
+        })
+    }
+
+    fn workspace_switcher_mobile_layout(&self) -> WorkspaceSwitcherLayout {
+        let popup = self.view.mobile_header_rect.union(self.view.terminal_area);
+        if popup.width == 0 || popup.height == 0 {
+            return WorkspaceSwitcherLayout {
+                mobile_fullscreen: true,
+                ..WorkspaceSwitcherLayout::default()
+            };
+        }
+
+        let top_bar = Rect::new(popup.x, popup.y, popup.width, 1);
+        let close_width = popup.width.min(10);
+        let close = Rect::new(
+            popup.x + popup.width.saturating_sub(close_width),
+            popup.y,
+            close_width,
+            1,
+        );
+        let search = if self.workspace_switcher.mode.search_visible() && popup.height > 1 {
+            Rect::new(popup.x, popup.y + 1, popup.width, 1)
+        } else {
+            Rect::default()
+        };
+        let search_separator = if self.workspace_switcher.mode.search_visible() && popup.height > 2
+        {
+            Rect::new(popup.x, popup.y + 2, popup.width, 1)
+        } else {
+            Rect::default()
+        };
+        let reserved_height = 1u16
+            .saturating_add(search.height)
+            .saturating_add(search_separator.height);
+        let content = Rect::new(
+            popup.x,
+            popup.y.saturating_add(reserved_height),
+            popup.width,
+            popup.height.saturating_sub(reserved_height),
+        );
+        Self::workspace_switcher_layout_with_content(WorkspaceSwitcherLayout {
+            mobile_fullscreen: true,
+            popup,
+            inner: popup,
+            top_bar,
+            close,
+            search,
+            search_separator,
+            content,
+            ..WorkspaceSwitcherLayout::default()
+        })
+    }
+
+    fn workspace_switcher_layout_with_content(
+        mut layout: WorkspaceSwitcherLayout,
+    ) -> WorkspaceSwitcherLayout {
+        let content = layout.content;
+        let list_width = workspace_switcher_list_width(content.width);
+        layout.body = Rect::new(content.x, content.y, list_width, content.height);
+        layout.divider = if content.width <= list_width || content.height == 0 {
+            Rect::default()
+        } else {
+            Rect::new(content.x + list_width, content.y, 1, content.height)
+        };
+        let preview_x = content.x.saturating_add(list_width).saturating_add(1);
+        layout.preview = Rect::new(
+            preview_x,
+            content.y,
+            content.width.saturating_sub(list_width).saturating_sub(1),
+            content.height,
+        );
+        layout
+    }
+
+    pub(crate) fn workspace_switcher_popup_rect(&self) -> Rect {
+        self.workspace_switcher_layout().popup
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_inner_rect(&self) -> Rect {
+        self.workspace_switcher_layout().inner
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_top_bar_rect(&self) -> Rect {
+        self.workspace_switcher_layout().top_bar
+    }
+
+    pub(crate) fn workspace_switcher_close_rect(&self) -> Rect {
+        self.workspace_switcher_layout().close
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_search_rect(&self) -> Rect {
+        self.workspace_switcher_layout().search
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_content_rect(&self) -> Rect {
+        self.workspace_switcher_layout().content
+    }
+
+    pub(crate) fn workspace_switcher_body_rect(&self) -> Rect {
+        self.workspace_switcher_layout().body
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_divider_rect(&self) -> Rect {
+        self.workspace_switcher_layout().divider
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_preview_rect(&self) -> Rect {
+        self.workspace_switcher_layout().preview
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_switcher_footer_rect(&self) -> Rect {
+        self.workspace_switcher_layout().footer
     }
 
     pub(crate) fn workspace_switcher_popup_contains(&self, col: u16, row: u16) -> bool {
@@ -1519,31 +1642,83 @@ pub(super) fn render_workspace_switcher_overlay(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
-    let popup = app.workspace_switcher_popup_rect();
-    let Some(inner) = render_panel_shell(frame, popup, app.palette.accent, app.palette.panel_bg)
-    else {
+    let layout = app.workspace_switcher_layout();
+    if layout.popup.width == 0 || layout.popup.height == 0 {
         return;
-    };
-
-    let search = app.workspace_switcher_search_rect();
-    let body = app.workspace_switcher_body_rect();
-    let divider = app.workspace_switcher_divider_rect();
-    let preview = app.workspace_switcher_preview_rect();
-    let footer = app.workspace_switcher_footer_rect();
+    }
+    if layout.mobile_fullscreen {
+        frame.render_widget(Clear, layout.popup);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(app.palette.panel_bg)),
+            layout.popup,
+        );
+        render_mobile_top_bar(app, frame, layout.top_bar, layout.close);
+    } else if render_panel_shell(
+        frame,
+        layout.popup,
+        app.palette.accent,
+        app.palette.panel_bg,
+    )
+    .is_none()
+    {
+        return;
+    }
 
     if app.workspace_switcher.mode.search_visible() {
-        render_search(app, terminal_runtimes, frame, search);
-        render_separator(
-            frame,
-            Rect::new(inner.x, search.y + 1, inner.width, 1),
-            app.palette.surface1,
-        );
+        render_search(app, terminal_runtimes, frame, layout.search);
+        render_separator(frame, layout.search_separator, app.palette.surface1);
     }
-    render_rows(app, terminal_runtimes, frame, body);
-    render_workspace_switcher_scrollbar(app, terminal_runtimes, frame, body);
-    render_vertical_divider(app, frame, divider);
-    render_preview(app, terminal_runtimes, frame, preview);
-    render_footer(app, frame, footer);
+    render_rows(app, terminal_runtimes, frame, layout.body);
+    render_workspace_switcher_scrollbar(app, terminal_runtimes, frame, layout.body);
+    render_vertical_divider(app, frame, layout.divider);
+    render_preview(app, terminal_runtimes, frame, layout.preview);
+    if !layout.mobile_fullscreen {
+        render_footer(app, frame, layout.footer);
+    }
+}
+
+fn render_mobile_top_bar(app: &AppState, frame: &mut Frame, area: Rect, close: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    frame.render_widget(
+        Paragraph::new(" workspace switcher").style(
+            Style::default()
+                .fg(p.text)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+    if close.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "close",
+                Style::default()
+                    .fg(p.overlay1)
+                    .bg(p.surface0)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default().bg(p.surface0)),
+            Span::styled(
+                "×",
+                Style::default()
+                    .fg(p.text)
+                    .bg(p.surface0)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::default().bg(p.surface0))
+        .alignment(ratatui::layout::Alignment::Center),
+        close,
+    );
+    frame.buffer_mut()[(close.x, close.y)]
+        .set_symbol("│")
+        .set_style(Style::default().fg(p.surface_dim).bg(p.surface0));
 }
 
 fn render_search(
@@ -1559,8 +1734,14 @@ fn render_search(
     let p = &app.palette;
     let rows = app.workspace_switcher_rows_from(terminal_runtimes);
     let query = app.workspace_switcher.query.trim();
-    let title = " workspace switcher ";
-    let mut spans = vec![Span::styled(title, Style::default().fg(p.accent))];
+    let mut spans = if app.view.layout == ViewLayout::Mobile {
+        Vec::new()
+    } else {
+        vec![Span::styled(
+            " workspace switcher ",
+            Style::default().fg(p.accent),
+        )]
+    };
     spans.push(Span::styled("/ ", Style::default().fg(p.overlay0)));
     if query.is_empty() {
         spans.push(Span::styled(
@@ -2144,6 +2325,188 @@ mod tests {
             state.mode = Mode::Navigate;
         }
         state
+    }
+
+    fn rendered_screen(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_switcher_overlay(state, &terminal_runtimes, frame);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mobile_quick_switch_uses_full_frame_without_footer() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        state.open_workspace_switcher();
+
+        assert_eq!(state.view.layout, ViewLayout::Mobile);
+        assert_eq!(
+            state.workspace_switcher_popup_rect(),
+            Rect::new(0, 0, 60, 20)
+        );
+        assert_eq!(
+            state.workspace_switcher_inner_rect(),
+            Rect::new(0, 0, 60, 20)
+        );
+        assert_eq!(
+            state.workspace_switcher_top_bar_rect(),
+            Rect::new(0, 0, 60, 1)
+        );
+        assert_eq!(
+            state.workspace_switcher_close_rect(),
+            Rect::new(50, 0, 10, 1)
+        );
+        assert_eq!(state.workspace_switcher_search_rect(), Rect::default());
+        assert_eq!(
+            state.workspace_switcher_content_rect(),
+            Rect::new(0, 1, 60, 19)
+        );
+        assert_eq!(
+            state.workspace_switcher_body_rect(),
+            Rect::new(0, 1, 24, 19)
+        );
+        assert_eq!(
+            state.workspace_switcher_divider_rect(),
+            Rect::new(24, 1, 1, 19)
+        );
+        assert_eq!(
+            state.workspace_switcher_preview_rect(),
+            Rect::new(25, 1, 35, 19)
+        );
+        assert_eq!(state.workspace_switcher_footer_rect(), Rect::default());
+
+        let screen = rendered_screen(&state, 60, 20);
+        assert!(screen[0].contains("workspace switcher"), "{}", screen[0]);
+        assert!(screen[0].contains("close"), "{}", screen[0]);
+        assert!(screen[0].contains('×'), "{}", screen[0]);
+        assert!(!screen.join("\n").contains("enter"));
+        assert_ne!(screen[0].chars().next(), Some('┌'));
+        assert_ne!(screen[19].chars().next(), Some('└'));
+    }
+
+    #[test]
+    fn mobile_search_places_search_below_top_bar_and_returns_footer_row_to_content() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+
+        assert_eq!(
+            state.workspace_switcher_search_rect(),
+            Rect::new(0, 1, 60, 1)
+        );
+        assert_eq!(
+            state.workspace_switcher_content_rect(),
+            Rect::new(0, 3, 60, 17)
+        );
+        assert_eq!(state.workspace_switcher_body_rect().bottom(), 20);
+        assert_eq!(state.workspace_switcher_preview_rect().bottom(), 20);
+        assert_eq!(state.workspace_switcher_footer_rect(), Rect::default());
+
+        let screen = rendered_screen(&state, 60, 20);
+        assert!(screen[0].contains("workspace switcher"), "{}", screen[0]);
+        assert!(
+            screen[1].contains("search workspace names"),
+            "{}",
+            screen[1]
+        );
+        assert!(!screen[1].contains("workspace switcher"), "{}", screen[1]);
+    }
+
+    #[test]
+    fn mobile_close_control_closes_switcher_without_accepting_a_row() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 20));
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let active = state.active;
+        let close = state.workspace_switcher_close_rect();
+
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: close.x + 1,
+                row: close.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        assert!(!state.workspace_switcher.active);
+        assert_eq!(state.active, active);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn mobile_fullscreen_keeps_tiny_height_geometry_in_bounds() {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut state = app_with_workspaces(&["alpha"]);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 1));
+        state.open_workspace_switcher_from(&terminal_runtimes);
+
+        assert_eq!(
+            state.workspace_switcher_top_bar_rect(),
+            Rect::new(0, 0, 40, 1)
+        );
+        assert_eq!(state.workspace_switcher_body_rect().height, 0);
+        let quick_screen = rendered_screen(&state, 40, 1);
+        assert!(quick_screen[0].contains("workspace switcher"));
+
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 2));
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        assert_eq!(
+            state.workspace_switcher_search_rect(),
+            Rect::new(0, 1, 40, 1)
+        );
+        assert_eq!(state.workspace_switcher_body_rect().height, 0);
+        let search_screen = rendered_screen(&state, 40, 2);
+        assert!(search_screen[1].contains("search workspace names"));
+    }
+
+    #[test]
+    fn desktop_switcher_keeps_bordered_popup_geometry_and_footer() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 30));
+        state.open_workspace_switcher();
+
+        assert_eq!(state.view.layout, ViewLayout::Desktop);
+        assert_eq!(
+            state.workspace_switcher_popup_rect(),
+            Rect::new(10, 3, 100, 24)
+        );
+        assert_eq!(
+            state.workspace_switcher_inner_rect(),
+            Rect::new(11, 4, 98, 22)
+        );
+        assert_eq!(state.workspace_switcher_top_bar_rect(), Rect::default());
+        assert_eq!(state.workspace_switcher_close_rect(), Rect::default());
+        assert_eq!(
+            state.workspace_switcher_content_rect(),
+            Rect::new(11, 4, 98, 21)
+        );
+        assert_eq!(
+            state.workspace_switcher_footer_rect(),
+            Rect::new(11, 25, 98, 1)
+        );
+
+        let screen = rendered_screen(&state, 120, 30);
+        assert_eq!(screen[3].chars().nth(10), Some('┌'));
+        assert_eq!(screen[26].chars().nth(10), Some('└'));
+        assert!(screen[25].contains("enter"), "{}", screen[25]);
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {

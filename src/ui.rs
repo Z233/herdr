@@ -1689,6 +1689,36 @@ switch_workspace = "ctrl+1..9"
     }
 
     #[test]
+    fn mobile_zero_workspace_auto_open_closes_from_fullscreen_top_bar() {
+        let mut app = AppState::test_new();
+        app.mobile_width_threshold = 64;
+        app.mode = Mode::Navigate;
+        app.active = None;
+        let runtimes = TerminalRuntimeRegistry::new();
+
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(app.workspace_switcher.active);
+        assert_eq!(app.workspace_switcher_popup_rect(), Rect::new(0, 0, 40, 20));
+        let close = app.workspace_switcher_close_rect();
+
+        crate::ui::workspace_switcher::handle_workspace_switcher_mouse(
+            &mut app,
+            &runtimes,
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: close.x + 1,
+                row: close.y,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+        );
+
+        assert!(!app.workspace_switcher.active);
+        assert_eq!(app.mode, Mode::Navigate);
+        compute_view(&mut app, Rect::new(0, 0, 40, 20));
+        assert!(!app.workspace_switcher.active);
+    }
+
+    #[test]
     fn mobile_zero_workspace_auto_open_resets_when_workspaces_added() {
         let mut app = AppState::test_new();
         app.mobile_width_threshold = 64;
@@ -1816,15 +1846,16 @@ switch_workspace = "ctrl+1..9"
 
         let content = buffer_content(terminal.backend());
 
-        // Fork switcher shows workspace rows and footer hints.
+        // Fork switcher shows workspace rows and the mobile fullscreen top bar.
         assert!(
             content.contains("alpha"),
             "fork switcher should show workspace name 'alpha'"
         );
         assert!(
-            content.contains("enter"),
-            "fork switcher footer hint should be visible"
+            content.contains("workspace switcher") && content.contains("close"),
+            "fullscreen switcher top bar should be visible"
         );
+        assert!(!content.contains("enter"), "mobile footer must not render");
         // Old Mobile Navigation Panel distinctive content is absent.
         assert!(
             !content.contains("new workspace"),
@@ -1891,7 +1922,7 @@ switch_workspace = "ctrl+1..9"
 
         // Very narrow: list-only, no preview.
         let mut app = mobile_state_with_workspaces();
-        compute_view(&mut app, Rect::new(0, 0, 30, 20));
+        compute_view(&mut app, Rect::new(0, 0, 47, 20));
         app.open_workspace_switcher_from(&runtimes);
         let preview_narrow = app.workspace_switcher_preview_rect();
         assert_eq!(
@@ -1900,9 +1931,9 @@ switch_workspace = "ctrl+1..9"
         );
         assert!(app.workspace_switcher_body_rect().width > 0);
 
-        // Near default threshold (60 cols): list + preview.
+        // At the unchanged preview breakpoint: list + preview.
         let mut app = mobile_state_with_workspaces();
-        compute_view(&mut app, Rect::new(0, 0, 60, 20));
+        compute_view(&mut app, Rect::new(0, 0, 48, 20));
         app.open_workspace_switcher_from(&runtimes);
         let preview_wide = app.workspace_switcher_preview_rect();
         assert!(
