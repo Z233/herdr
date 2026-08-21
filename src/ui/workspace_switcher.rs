@@ -24,6 +24,12 @@ use crate::{
     terminal::TerminalRuntimeRegistry,
 };
 
+const WORKSPACE_SWITCHER_LINES_PER_ITEM: u16 = 2;
+
+fn workspace_switcher_capacity(body_height: u16) -> usize {
+    usize::from(body_height / WORKSPACE_SWITCHER_LINES_PER_ITEM)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSwitcherTarget {
     Workspace {
@@ -58,6 +64,7 @@ pub(crate) struct WorkspaceSwitcherRow {
     pub depth: u8,
     pub label: SwitcherLabel,
     pub meta: String,
+    pub activity: String,
     pub is_current: bool,
     pub expanded: bool,
     pub is_tab: bool,
@@ -423,6 +430,7 @@ impl AppState {
             depth: 0,
             label,
             meta,
+            activity: String::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -471,16 +479,12 @@ impl AppState {
     ) -> WorkspaceSwitcherRow {
         let ws = &self.workspaces[ws_idx];
         let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
-        let mut meta = if pane_count == 1 {
+        let meta = if pane_count == 1 {
             "1 pane".to_string()
         } else {
             format!("{pane_count} panes")
         };
         let activity = workspace_activity_summary(ws, &self.terminals);
-        if !activity.is_empty() {
-            meta.push_str(" · ");
-            meta.push_str(&activity);
-        }
         let (state, seen) = ws.aggregate_state(&self.terminals);
 
         WorkspaceSwitcherRow {
@@ -491,6 +495,7 @@ impl AppState {
             depth: 0,
             label,
             meta,
+            activity,
             is_current: self.active == Some(ws_idx),
             expanded,
             is_tab: false,
@@ -522,6 +527,7 @@ impl AppState {
                     } else {
                         format!("{pane_count} panes")
                     },
+                    activity: String::new(),
                     is_current: self.active == Some(ws_idx) && ws.active_tab_index() == tab_idx,
                     expanded: false,
                     is_tab: true,
@@ -550,7 +556,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
-        let viewport = self.workspace_switcher_body_rect().height as usize;
+        let viewport = workspace_switcher_capacity(self.workspace_switcher_body_rect().height);
         if viewport == 0 {
             self.workspace_switcher.scroll = 0;
             return;
@@ -1127,16 +1133,10 @@ pub(crate) fn handle_workspace_switcher_key(
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::PageDown => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                state.workspace_switcher_body_rect().height.max(1) as isize,
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, 1);
         }
         KeyCode::PageUp => {
-            state.move_workspace_switcher_selection_from(
-                terminal_runtimes,
-                -(state.workspace_switcher_body_rect().height.max(1) as isize),
-            );
+            move_workspace_switcher_page(state, terminal_runtimes, -1);
         }
         KeyCode::Home => {
             state.workspace_switcher.selected = 0;
@@ -1208,6 +1208,12 @@ fn handle_quick_switch_key(
         {
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
+        KeyCode::PageDown => {
+            move_workspace_switcher_page(state, terminal_runtimes, 1);
+        }
+        KeyCode::PageUp => {
+            move_workspace_switcher_page(state, terminal_runtimes, -1);
+        }
         KeyCode::Home => {
             state.workspace_switcher.selected = 0;
             state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
@@ -1226,6 +1232,18 @@ fn handle_quick_switch_key(
     if state.workspace_switcher.active {
         state.capture_workspace_switcher_target_from(terminal_runtimes);
     }
+}
+
+fn move_workspace_switcher_page(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    direction: isize,
+) {
+    let page = workspace_switcher_capacity(state.workspace_switcher_body_rect().height).max(1);
+    state.move_workspace_switcher_selection_from(
+        terminal_runtimes,
+        (page as isize).saturating_mul(direction),
+    );
 }
 
 fn workspace_switcher_command_modifiers(state: &AppState, modifiers: KeyModifiers) -> bool {
@@ -1355,7 +1373,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
             state.clamp_workspace_switcher_selection_from(terminal_runtimes);
         }
         MouseEventKind::ScrollDown => {
-            let viewport = state.workspace_switcher_body_rect().height as usize;
+            let viewport = workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
             let max = state.workspace_switcher_max_scroll_from(terminal_runtimes, viewport);
             state.workspace_switcher.scroll =
                 state.workspace_switcher.scroll.saturating_add(3).min(max);
@@ -1629,10 +1647,15 @@ impl AppState {
         if !rect_contains(body, col, row) {
             return None;
         }
+        let capacity = workspace_switcher_capacity(body.height);
+        let physical_offset = row.saturating_sub(body.y) as usize;
+        if physical_offset >= capacity.saturating_mul(WORKSPACE_SWITCHER_LINES_PER_ITEM as usize) {
+            return None;
+        }
         let idx = self
             .workspace_switcher
             .scroll
-            .saturating_add(row.saturating_sub(body.y) as usize);
+            .saturating_add(physical_offset / WORKSPACE_SWITCHER_LINES_PER_ITEM as usize);
         (idx < self.workspace_switcher_rows_from(terminal_runtimes).len()).then_some(idx)
     }
 }
@@ -1805,12 +1828,22 @@ fn render_rows(
         return;
     }
 
+    let capacity = workspace_switcher_capacity(body.height);
+    if capacity == 0 {
+        frame.render_widget(
+            Paragraph::new(format!("{} items hidden", rows.len()))
+                .style(Style::default().fg(app.palette.overlay0)),
+            body,
+        );
+        return;
+    }
+
     let start = app.workspace_switcher.scroll.min(rows.len());
-    let end = rows.len().min(start.saturating_add(body.height as usize));
+    let end = rows.len().min(start.saturating_add(capacity));
     for (visible_idx, row) in rows[start..end].iter().enumerate() {
         let idx = start + visible_idx;
-        let y = body.y + visible_idx as u16;
-        let rect = Rect::new(body.x, y, body.width, 1);
+        let y = body.y + visible_idx as u16 * WORKSPACE_SWITCHER_LINES_PER_ITEM;
+        let rect = Rect::new(body.x, y, body.width, WORKSPACE_SWITCHER_LINES_PER_ITEM);
         render_row(
             app,
             frame,
@@ -1835,6 +1868,7 @@ fn render_row(
     } else {
         Style::default().bg(p.panel_bg).fg(p.text)
     };
+    frame.render_widget(Block::default().style(base_style), rect);
     let dim_style = if selected {
         base_style
     } else {
@@ -1851,37 +1885,30 @@ fn render_row(
         Style::default().fg(p.subtext0).bg(p.panel_bg)
     };
 
+    let primary = Rect::new(rect.x, rect.y, rect.width, 1);
+    let secondary = Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1);
     let mut spans: Vec<Span> = Vec::new();
 
     if row.is_directory {
-        // Directory row: dim +, basename label, shown-path metadata.
         let dir_text_style = if selected {
             base_style.add_modifier(Modifier::BOLD)
         } else {
             dim_style
         };
         spans.push(Span::styled(" + ", dim_style));
-        let meta_width = row_meta_width(rect.width);
         let fixed_width: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-        let title_budget = rect
-            .width
-            .saturating_sub(meta_width)
-            .saturating_sub(fixed_width)
-            .saturating_sub(1) as usize;
+        let title_budget = primary.width.saturating_sub(fixed_width).saturating_sub(1) as usize;
         let title = truncate_text(row.label.parts().1, title_budget);
         spans.push(Span::styled(title, dir_text_style));
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), rect);
-        if meta_width > 0 {
-            let meta_rect = Rect::new(
-                rect.x + rect.width.saturating_sub(meta_width),
-                rect.y,
-                meta_width,
-                1,
-            );
-            let meta = truncate_text(&row.meta, meta_width.saturating_sub(1) as usize);
-            let style = if selected { base_style } else { dim_style };
-            frame.render_widget(Paragraph::new(format!(" {meta}")).style(style), meta_rect);
-        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
+        let secondary_rect = Rect::new(
+            secondary.x.saturating_add(fixed_width),
+            secondary.y,
+            secondary.width.saturating_sub(fixed_width),
+            1,
+        );
+        let path = truncate_text(&row.meta, secondary_rect.width as usize);
+        frame.render_widget(Paragraph::new(path).style(dim_style), secondary_rect);
         return;
     }
 
@@ -1906,18 +1933,15 @@ fn render_row(
         .saturating_sub(meta_width)
         .saturating_sub(fixed_width)
         .saturating_sub(1) as usize;
-    let title = match row.label.parts() {
-        (Some(repo), existing) => truncate_composite_label(repo, existing, title_budget),
-        (None, existing) => truncate_text(existing, title_budget),
-    };
+    let title = truncate_text(row.label.parts().1, title_budget);
     spans.push(Span::styled(title, text_style));
 
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), rect);
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
 
     if meta_width > 0 {
         let meta_rect = Rect::new(
             rect.x + rect.width.saturating_sub(meta_width),
-            rect.y,
+            primary.y,
             meta_width,
             1,
         );
@@ -1929,6 +1953,22 @@ fn render_row(
         };
         frame.render_widget(Paragraph::new(format!(" {meta}")).style(style), meta_rect);
     }
+
+    let secondary_rect = Rect::new(
+        secondary.x.saturating_add(fixed_width),
+        secondary.y,
+        secondary.width.saturating_sub(fixed_width),
+        1,
+    );
+    let secondary_text = workspace_secondary_text(
+        row.label.parts().0,
+        &row.activity,
+        secondary_rect.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(secondary_text).style(dim_style),
+        secondary_rect,
+    );
 }
 
 fn render_workspace_switcher_scrollbar(
@@ -1941,7 +1981,10 @@ fn render_workspace_switcher_scrollbar(
         return;
     }
     let rows = app.workspace_switcher_rows_from(terminal_runtimes).len();
-    let viewport = body.height as usize;
+    let viewport = workspace_switcher_capacity(body.height);
+    if viewport == 0 {
+        return;
+    }
     if rows <= viewport {
         return;
     }
@@ -2166,6 +2209,37 @@ fn truncate_text(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+fn workspace_secondary_text(repo: Option<&str>, activity: &str, max_width: usize) -> String {
+    const MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH: usize = 2;
+
+    let Some(repo) = repo else {
+        return truncate_text(activity, max_width);
+    };
+    if activity.is_empty() {
+        return truncate_text(repo, max_width);
+    }
+
+    let repo_width = repo.chars().count();
+    let separator = " · ";
+    let separator_width = separator.chars().count();
+    if repo_width > max_width {
+        return truncate_text(repo, max_width);
+    }
+    if repo_width
+        .saturating_add(separator_width)
+        .saturating_add(MIN_ACTIVITY_WITH_ELLIPSIS_WIDTH)
+        > max_width
+    {
+        return repo.to_string();
+    }
+
+    let activity_width = max_width - repo_width - separator_width;
+    format!(
+        "{repo}{separator}{}",
+        truncate_text(activity, activity_width)
+    )
+}
+
 /// Separator used between the repository name and the existing workspace
 /// label in a composite switcher row.
 const COMPOSITE_SEPARATOR: &str = " / ";
@@ -2235,70 +2309,6 @@ fn managed_worktree_repo_name(ws: &crate::workspace::Workspace) -> Option<&str> 
         .filter(|s| s.is_linked_worktree)
         .map(|s| s.label.as_str())
         .filter(|s| !s.is_empty())
-}
-
-/// Truncate a composite label (`repo / existing-label`) so that both parts
-/// retain at least one visible character whenever the separator fits.
-///
-/// When the full composite fits in `max_width`, it is returned unchanged.
-///
-/// When `max_width` is at least `sep_len + 1 + 1` (5 for the 3-char
-/// separator), each part keeps at least one visible character and the
-/// separator is preserved. Budgets are balanced (leftover space from a
-/// part that fits is given to the other). When a part's budget is ≥ 2,
-/// [`truncate_text`] is used so the truncation is marked with `…`;
-/// when a part's budget is exactly 1, the single character is used as-is
-/// (no ellipsis substitution for the sole identity character).
-///
-/// When `max_width` is below that minimum (less than 5), the function
-/// falls back to plain end-truncation of the full composite string via
-/// [`truncate_text`].
-fn truncate_composite_label(repo: &str, existing: &str, max_width: usize) -> String {
-    let sep_len = COMPOSITE_SEPARATOR.chars().count();
-    let full_len = repo.chars().count() + sep_len + existing.chars().count();
-
-    if full_len <= max_width {
-        return SwitcherLabel::compose(repo, existing);
-    }
-
-    // Minimum for preserving both identities: separator + 1 char per part.
-    let min_balanced = sep_len + 1 + 1;
-    if max_width < min_balanced {
-        let full = SwitcherLabel::compose(repo, existing);
-        return truncate_text(&full, max_width);
-    }
-
-    let available = max_width - sep_len;
-    let repo_len = repo.chars().count();
-    let existing_len = existing.chars().count();
-    let repo_share = available / 2;
-    let existing_share = available - repo_share;
-
-    let (repo_budget, existing_budget) = if repo_len <= repo_share {
-        (repo_len, available - repo_len)
-    } else if existing_len <= existing_share {
-        (available - existing_len, existing_len)
-    } else {
-        (repo_share, existing_share)
-    };
-
-    let repo_part = truncate_identity_part(repo, repo_budget);
-    let existing_part = truncate_identity_part(existing, existing_budget);
-    SwitcherLabel::compose(&repo_part, &existing_part)
-}
-
-/// Truncate a single identity part to `budget` characters. When `budget`
-/// is 0, returns an empty string. When `budget` is 1, returns the first
-/// character as-is (no ellipsis substitution for the sole identity
-/// character). When `budget` ≥ 2, uses [`truncate_text`] which appends `…`.
-fn truncate_identity_part(s: &str, budget: usize) -> String {
-    if budget == 0 {
-        return String::new();
-    }
-    if budget == 1 {
-        return s.chars().next().map(|c| c.to_string()).unwrap_or_default();
-    }
-    truncate_text(s, budget)
 }
 
 #[cfg(test)]
@@ -3422,6 +3432,7 @@ mod tests {
             depth: 0,
             label: SwitcherLabel::plain("test".to_string()),
             meta: "".to_string(),
+            activity: String::new(),
             is_current: true,
             expanded: false,
             is_tab: false,
@@ -3429,8 +3440,8 @@ mod tests {
             state: crate::detect::AgentState::Blocked,
             seen: false,
         };
-        let area = Rect::new(0, 0, 20, 1);
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
 
         terminal
             .draw(|frame| render_row(&app, frame, area, &row, false))
@@ -3451,6 +3462,7 @@ mod tests {
             depth: 0,
             label: SwitcherLabel::plain("test".to_string()),
             meta: "".to_string(),
+            activity: String::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -3458,8 +3470,8 @@ mod tests {
             state: crate::detect::AgentState::Idle,
             seen: true,
         };
-        let area = Rect::new(0, 0, 20, 1);
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
 
         terminal
             .draw(|frame| render_row(&app, frame, area, &row, false))
@@ -3481,6 +3493,7 @@ mod tests {
             depth: 1,
             label: SwitcherLabel::plain("ws".to_string()),
             meta: "".to_string(),
+            activity: String::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -3488,8 +3501,8 @@ mod tests {
             state: crate::detect::AgentState::Working,
             seen: false,
         };
-        let area = Rect::new(0, 0, 20, 1);
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut terminal = Terminal::new(TestBackend::new(20, 2)).unwrap();
 
         terminal
             .draw(|frame| render_row(&app, frame, area, &row, false))
@@ -4704,95 +4717,20 @@ mod tests {
         assert!(child.meta.contains("pane"));
     }
 
-    // -----------------------------------------------------------------------
-    // Balanced truncation tests
-    // -----------------------------------------------------------------------
+    fn rendered_line(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect()
+    }
 
-    #[test]
-    fn truncate_composite_fits_without_truncation() {
-        let result = truncate_composite_label("repo", "label", 20);
-        assert_eq!(result, "repo / label");
+    fn rendered_rect_line(terminal: &Terminal<TestBackend>, rect: Rect, y: u16) -> String {
+        (rect.x..rect.x + rect.width)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect()
     }
 
     #[test]
-    fn truncate_composite_preserves_both_parts_when_separator_fits() {
-        // "longrepo / longlabel" = 20 chars, budget 12.
-        // Separator is 3, available = 9, each part gets 4 (floor) and 5.
-        let result = truncate_composite_label("longrepo", "longlabel", 12);
-        assert!(result.contains(" / "), "separator must be visible");
-        // Both parts must have at least one visible character.
-        let parts: Vec<&str> = result.split(" / ").collect();
-        assert_eq!(parts.len(), 2);
-        assert!(
-            parts[0].chars().count() >= 2,
-            "repo part needs >= 1 visible char + …"
-        );
-        assert!(
-            parts[1].chars().count() >= 2,
-            "label part needs >= 1 visible char + …"
-        );
-        assert!(parts[0].ends_with('…'));
-        assert!(parts[1].ends_with('…'));
-    }
-
-    #[test]
-    fn truncate_composite_width_5_preserves_both_identities() {
-        // Budget 5 = sep(3) + 1 char per part. No ellipsis.
-        let result = truncate_composite_label("repo", "label", 5);
-        assert_eq!(result, "r / l");
-    }
-
-    #[test]
-    fn truncate_composite_width_6_preserves_both_identities() {
-        // Budget 6 = sep(3) + 3 chars. repo_share = 1, existing_share = 2.
-        // repo gets 1 char (no ellipsis), existing gets 2 chars (1 + …).
-        let result = truncate_composite_label("repo", "label", 6);
-        assert!(
-            result.contains(" / "),
-            "separator must be visible: {result}"
-        );
-        let parts: Vec<&str> = result.split(" / ").collect();
-        assert_eq!(parts.len(), 2);
-        assert!(!parts[0].is_empty(), "repo part must have a character");
-        assert!(!parts[1].is_empty(), "label part must have a character");
-    }
-
-    #[test]
-    fn truncate_composite_width_4_falls_back_to_end_truncation() {
-        // Budget 4 < 5 (sep + 1 + 1) → end-truncation fallback.
-        let result = truncate_composite_label("repo", "label", 4);
-        // End-truncation: first 3 chars + …
-        assert_eq!(result, "rep…");
-    }
-
-    #[test]
-    fn truncate_composite_gives_leftover_to_shorter_part() {
-        // repo fits in its share, leftover goes to label.
-        // "ab / verylonglabel" = 18 chars, budget 12.
-        // Separator 3, available 9, repo_share 4. repo_len 2 <= 4,
-        // so repo_budget=2, label_budget=7.
-        let result = truncate_composite_label("ab", "verylonglabel", 12);
-        assert!(result.starts_with("ab / "));
-        assert!(result.ends_with('…'));
-        assert!(!result.starts_with("ab…"));
-    }
-
-    #[test]
-    fn truncate_composite_falls_back_to_end_truncation_when_too_narrow() {
-        // Budget 3 < 5 (sep + 1 + 1) → end-truncation fallback.
-        let result = truncate_composite_label("repo", "label", 3);
-        // End-truncation: first 2 chars + …
-        assert_eq!(result, "re…");
-    }
-
-    #[test]
-    fn truncate_composite_zero_width_returns_empty() {
-        let result = truncate_composite_label("repo", "label", 0);
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn render_narrow_composite_row_preserves_both_parts() {
+    fn render_linked_workspace_uses_label_primary_and_repo_activity_secondary() {
         let app = AppState::test_new();
         let row = WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -4800,8 +4738,9 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
-            meta: "".to_string(),
+            label: SwitcherLabel::composite("herdr".to_string(), "feature-x".to_string()),
+            meta: "2 panes".to_string(),
+            activity: "1 working".to_string(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4809,27 +4748,121 @@ mod tests {
             state: crate::detect::AgentState::Idle,
             seen: false,
         };
-        // Width 25: fixed prefix is " ▸ ○ " (5 chars), no meta, budget ~19.
-        // Full label is 20 chars, so it will be truncated.
-        let area = Rect::new(0, 0, 25, 1);
-        let mut terminal = Terminal::new(TestBackend::new(25, 1)).unwrap();
+        let area = Rect::new(0, 0, 40, 2);
+        let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
 
         terminal
             .draw(|frame| render_row(&app, frame, area, &row, false))
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let rendered: String = (0..25)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(
-            rendered.contains(" / "),
-            "narrow composite row should preserve the separator: {rendered:?}"
+        let primary = rendered_line(&terminal, 0, 40);
+        let secondary = rendered_line(&terminal, 1, 40);
+        assert!(primary.contains("feature-x"));
+        assert!(primary.contains("2 panes"));
+        assert!(!primary.contains("herdr"));
+        assert!(secondary.contains("herdr · 1 working"));
+        assert_eq!(
+            primary.chars().position(|ch| ch == 'f'),
+            secondary.chars().position(|ch| ch == 'h')
         );
     }
 
     #[test]
-    fn render_composite_row_at_width_5_preserves_both_identities() {
+    fn secondary_text_preserves_repository_before_activity() {
+        assert_eq!(
+            workspace_secondary_text(Some("repository"), "working", 10),
+            "repository"
+        );
+        assert_eq!(
+            workspace_secondary_text(Some("repository"), "working", 6),
+            "repos…"
+        );
+        assert_eq!(
+            workspace_secondary_text(Some("repo"), "long activity", 11),
+            "repo · lon…"
+        );
+        assert_eq!(workspace_secondary_text(Some("repo"), "working", 8), "repo");
+    }
+
+    #[test]
+    fn render_workspace_directory_and_tab_secondary_lines() {
+        let app = AppState::test_new();
+        let rows = [
+            WorkspaceSwitcherRow {
+                target: WorkspaceSwitcherTarget::Workspace {
+                    workspace_id: String::new(),
+                },
+                ws_idx: 0,
+                depth: 0,
+                label: SwitcherLabel::plain("workspace".to_string()),
+                meta: "1 pane".to_string(),
+                activity: "2 blocked".to_string(),
+                is_current: false,
+                expanded: false,
+                is_tab: false,
+                is_directory: false,
+                state: crate::detect::AgentState::Idle,
+                seen: false,
+            },
+            WorkspaceSwitcherRow {
+                target: WorkspaceSwitcherTarget::Directory {
+                    shown_path: "/work/project".into(),
+                    canonical_path: "/work/project".into(),
+                },
+                ws_idx: usize::MAX,
+                depth: 0,
+                label: SwitcherLabel::plain("project".to_string()),
+                meta: "/work/project".to_string(),
+                activity: String::new(),
+                is_current: false,
+                expanded: false,
+                is_tab: false,
+                is_directory: true,
+                state: crate::detect::AgentState::Idle,
+                seen: false,
+            },
+            WorkspaceSwitcherRow {
+                target: WorkspaceSwitcherTarget::Tab {
+                    tab_id: String::new(),
+                },
+                ws_idx: 0,
+                depth: 1,
+                label: SwitcherLabel::plain("tab".to_string()),
+                meta: "3 panes".to_string(),
+                activity: String::new(),
+                is_current: false,
+                expanded: false,
+                is_tab: true,
+                is_directory: false,
+                state: crate::detect::AgentState::Idle,
+                seen: false,
+            },
+        ];
+
+        for (row, expected_secondary) in rows.iter().zip(["2 blocked", "/work/project", ""]) {
+            let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
+            terminal
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 2), row, true))
+                .unwrap();
+            let primary = rendered_line(&terminal, 0, 40);
+            let secondary = rendered_line(&terminal, 1, 40);
+            assert_eq!(terminal.backend().buffer()[(0, 0)].bg, app.palette.accent);
+            assert_eq!(terminal.backend().buffer()[(0, 1)].bg, app.palette.accent);
+            if expected_secondary.is_empty() {
+                assert!(secondary.trim().is_empty());
+            } else {
+                assert!(secondary.contains(expected_secondary));
+            }
+            if row.is_directory {
+                assert!(!primary.contains(&row.meta));
+            } else {
+                assert!(primary.contains(&row.meta));
+            }
+        }
+    }
+
+    #[test]
+    fn pane_metadata_uses_existing_width_thresholds() {
         let app = AppState::test_new();
         let row = WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -4837,8 +4870,9 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
-            meta: "".to_string(),
+            label: SwitcherLabel::plain("workspace".to_string()),
+            meta: "12 panes".to_string(),
+            activity: String::new(),
             is_current: false,
             expanded: false,
             is_tab: false,
@@ -4846,28 +4880,21 @@ mod tests {
             state: crate::detect::AgentState::Idle,
             seen: false,
         };
-        // Width 10: fixed prefix " \u{25b8} \u{25cb} " (5 chars), no meta,
-        // title_budget = 10 - 0 - 5 - 1 = 4 — too narrow for balanced (need 5).
-        // But we want to test budget 5, so use width 11: budget = 11 - 0 - 5 - 1 = 5.
-        let area = Rect::new(0, 0, 11, 1);
-        let mut terminal = Terminal::new(TestBackend::new(11, 1)).unwrap();
 
-        terminal
-            .draw(|frame| render_row(&app, frame, area, &row, false))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let rendered: String = (0..11)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(
-            rendered.contains(" / "),
-            "width-5 budget should preserve separator: {rendered:?}"
-        );
+        for (width, visible) in [(38, true), (30, true), (29, false)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).unwrap();
+            terminal
+                .draw(|frame| render_row(&app, frame, Rect::new(0, 0, width, 2), &row, false))
+                .unwrap();
+            assert_eq!(
+                rendered_line(&terminal, 0, width).contains("12 panes"),
+                visible
+            );
+        }
     }
 
     #[test]
-    fn render_composite_row_at_width_6_preserves_both_identities() {
+    fn selected_style_covers_both_item_lines() {
         let app = AppState::test_new();
         let row = WorkspaceSwitcherRow {
             target: WorkspaceSwitcherTarget::Workspace {
@@ -4875,71 +4902,282 @@ mod tests {
             },
             ws_idx: 0,
             depth: 0,
-            label: SwitcherLabel::composite("longrepo".to_string(), "longlabel".to_string()),
-            meta: "".to_string(),
+            label: SwitcherLabel::plain("workspace".to_string()),
+            meta: "1 pane".to_string(),
+            activity: "working".to_string(),
             is_current: false,
             expanded: false,
             is_tab: false,
             is_directory: false,
-            state: crate::detect::AgentState::Idle,
+            state: crate::detect::AgentState::Working,
             seen: false,
         };
-        // Width 12: fixed prefix 5 chars, title_budget = 12 - 0 - 5 - 1 = 6.
-        let area = Rect::new(0, 0, 12, 1);
-        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
-
+        let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
         terminal
-            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .draw(|frame| render_row(&app, frame, Rect::new(0, 0, 40, 2), &row, true))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let rendered: String = (0..12)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(
-            rendered.contains(" / "),
-            "width-6 budget should preserve separator: {rendered:?}"
+        for y in 0..2 {
+            assert_eq!(buffer[(0, y)].bg, app.palette.accent);
+            assert_eq!(buffer[(5, y)].fg, panel_contrast_fg(&app.palette));
+        }
+        assert_eq!(
+            buffer[(3, 0)].fg,
+            state_dot(row.state, row.seen, &app.palette).1.fg.unwrap()
         );
     }
 
     #[test]
-    fn render_non_composite_row_uses_end_truncation() {
-        let app = AppState::test_new();
-        let row = WorkspaceSwitcherRow {
-            target: WorkspaceSwitcherTarget::Workspace {
-                workspace_id: String::new(),
-            },
-            ws_idx: 0,
-            depth: 0,
-            label: SwitcherLabel::plain("verylongworkspacename".to_string()),
-            meta: "".to_string(),
-            is_current: false,
-            expanded: false,
-            is_tab: false,
-            is_directory: false,
-            state: crate::detect::AgentState::Idle,
-            seen: false,
-        };
-        // Width 20: fixed prefix " ▸ ○ " (5 chars), budget ~14.
-        let area = Rect::new(0, 0, 20, 1);
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+    fn complete_two_line_items_render_in_mobile_and_desktop_layouts() {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        for (width, expected_layout) in [
+            (44, crate::app::state::ViewLayout::Mobile),
+            (80, crate::app::state::ViewLayout::Desktop),
+        ] {
+            let mut app = app_with_workspaces(&["main", "feature"]);
+            mark_parent_worktree(&mut app, 0);
+            mark_linked_worktree_with_repo(&mut app, 1, "herdr");
+            app.workspaces[1].custom_name = Some("feature".to_string());
+            crate::ui::compute_view(&mut app, Rect::new(0, 0, width, 24));
+            app.open_workspace_switcher_from(&terminal_runtimes);
+            assert_eq!(app.view.layout, expected_layout);
 
+            let body = app.workspace_switcher_body_rect();
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal
+                .draw(|frame| render_workspace_switcher_overlay(&app, &terminal_runtimes, frame))
+                .unwrap();
+
+            let feature_y = (body.y..body.y + body.height)
+                .find(|&y| rendered_rect_line(&terminal, body, y).contains("feature"))
+                .expect("linked workspace primary line should render");
+            assert_eq!((feature_y - body.y) % WORKSPACE_SWITCHER_LINES_PER_ITEM, 0);
+            assert!(rendered_rect_line(&terminal, body, feature_y + 1).contains("herdr"));
+        }
+    }
+
+    #[test]
+    fn render_rows_only_uses_complete_item_capacity_in_both_modes() {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        for mode in [
+            WorkspaceSwitcherMode::QuickSwitch,
+            WorkspaceSwitcherMode::Search,
+        ] {
+            let mut app = app_with_workspaces(&["one", "two", "three"]);
+            app.workspace_switcher.active = true;
+            app.workspace_switcher.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
+            terminal
+                .draw(|frame| render_rows(&app, &terminal_runtimes, frame, Rect::new(0, 0, 30, 5)))
+                .unwrap();
+
+            assert!(!rendered_line(&terminal, 0, 30).trim().is_empty());
+            assert!(!rendered_line(&terminal, 2, 30).trim().is_empty());
+            assert!(rendered_line(&terminal, 4, 30).trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_rows_reports_hidden_items_when_no_complete_item_fits() {
+        let mut app = app_with_workspaces(&["one", "two", "three"]);
+        app.workspace_switcher.active = true;
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(30, 1)).unwrap();
         terminal
-            .draw(|frame| render_row(&app, frame, area, &row, false))
+            .draw(|frame| render_rows(&app, &terminal_runtimes, frame, Rect::new(0, 0, 30, 1)))
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let rendered: String = (0..20)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        // End-truncated: should end with … and not contain separator.
-        assert!(
-            rendered.contains('…'),
-            "non-composite row should use end-truncation: {rendered:?}"
+        assert_eq!(rendered_line(&terminal, 0, 30).trim_end(), "3 items hidden");
+    }
+
+    #[test]
+    fn zero_result_messages_take_priority_over_zero_capacity_message() {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let cases = [
+            (AppState::test_new(), "no workspaces"),
+            (
+                {
+                    let mut app = app_with_workspaces(&["one"]);
+                    app.workspace_switcher.mode = WorkspaceSwitcherMode::Search;
+                    app.workspace_switcher.query = "missing".to_string();
+                    app
+                },
+                "no matching workspaces",
+            ),
+        ];
+
+        for (app, expected) in cases {
+            let mut terminal = Terminal::new(TestBackend::new(30, 1)).unwrap();
+            terminal
+                .draw(|frame| render_rows(&app, &terminal_runtimes, frame, Rect::new(0, 0, 30, 1)))
+                .unwrap();
+            assert!(rendered_line(&terminal, 0, 30).contains(expected));
+        }
+    }
+
+    fn set_switcher_view(state: &mut AppState, width: u16, height: u16) {
+        state.view.sidebar_rect = Rect::default();
+        state.view.terminal_area = Rect::new(0, 0, width, height);
+    }
+
+    #[test]
+    fn hit_testing_maps_both_lines_and_rejects_spare_and_post_list_rows() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        for height in 12..40 {
+            set_switcher_view(&mut state, 80, height);
+            if state.workspace_switcher_body_rect().height % 2 == 1 {
+                break;
+            }
+        }
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let body = state.workspace_switcher_body_rect();
+        assert_eq!(body.height % 2, 1);
+        assert_eq!(
+            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y,),
+            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y + 1,)
         );
-        assert!(
-            !rendered.contains(" / "),
-            "non-composite row should not have separator: {rendered:?}"
+        assert_eq!(
+            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, body.y + 2,),
+            Some(state.workspace_switcher.scroll + 1)
         );
+        let spare_y = body.y + workspace_switcher_capacity(body.height) as u16 * 2;
+        assert!(spare_y < body.y + body.height);
+        assert_eq!(
+            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, spare_y),
+            None
+        );
+        let post_list_y = body.y + state.workspace_switcher_rows().len() as u16 * 2;
+        assert!(post_list_y < spare_y);
+        assert_eq!(
+            state.workspace_switcher_row_index_at_from(&terminal_runtimes, body.x, post_list_y),
+            None
+        );
+    }
+
+    #[test]
+    fn second_line_hover_and_click_target_the_same_item() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        set_switcher_view(&mut state, 80, 30);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let body = state.workspace_switcher_body_rect();
+        let expected = state.workspace_switcher.scroll + 1;
+
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: body.x,
+                row: body.y + 3,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert_eq!(state.workspace_switcher.selected, expected);
+
+        let expected_workspace = state.workspace_switcher_rows()[expected].ws_idx;
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: body.x,
+                row: body.y + 3,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert_eq!(state.active, Some(expected_workspace));
+        assert!(!state.workspace_switcher.active);
+    }
+
+    #[test]
+    fn page_navigation_and_resize_use_logical_item_capacity() {
+        let names = (0..20).map(|idx| format!("ws-{idx}")).collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut state = app_with_workspaces(&name_refs);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 30));
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let capacity = workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        state.workspace_switcher.selected = 0;
+        state.workspace_switcher.scroll = 0;
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspace_switcher.selected, capacity);
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspace_switcher.selected, 0);
+
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        let search_capacity =
+            workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        state.workspace_switcher.selected = 0;
+        state.workspace_switcher.scroll = 0;
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspace_switcher.selected, search_capacity);
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()),
+        );
+        assert_eq!(state.workspace_switcher.selected, 0);
+
+        state.workspace_switcher.selected = state.workspace_switcher_rows().len() - 1;
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 80, 16));
+        let resized_capacity =
+            workspace_switcher_capacity(state.workspace_switcher_body_rect().height);
+        assert!(state.workspace_switcher.selected >= state.workspace_switcher.scroll);
+        assert!(
+            state.workspace_switcher.selected
+                < state
+                    .workspace_switcher
+                    .scroll
+                    .saturating_add(resized_capacity)
+        );
+        assert_eq!(
+            state.workspace_switcher.scroll,
+            state
+                .workspace_switcher_rows()
+                .len()
+                .saturating_sub(resized_capacity)
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_moves_three_logical_items() {
+        let names = (0..20).map(|idx| format!("ws-{idx}")).collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut state = app_with_workspaces(&name_refs);
+        set_switcher_view(&mut state, 80, 20);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        state.workspace_switcher.selected = 0;
+        state.workspace_switcher.scroll = 0;
+        let body = state.workspace_switcher_body_rect();
+
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: body.x,
+                row: body.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert_eq!(state.workspace_switcher.scroll, 3);
+        assert_eq!(state.workspace_switcher.selected, 3);
     }
 }

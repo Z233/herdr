@@ -3682,7 +3682,7 @@ mod tests {
 
         // Click the second workspace row in the fork switcher.
         let body = app.state.workspace_switcher_body_rect();
-        let row_y = body.y + 1; // second row (first non-active workspace)
+        let row_y = body.y + 2; // first line of the second two-line item
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             body.x + 1,
