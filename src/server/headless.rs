@@ -913,12 +913,7 @@ impl HeadlessServer {
 
         // -- Workspace Switcher Search provider controller (headless) --
 
-        // An open switcher demands the asynchronous Git identity/branch
-        // refresh so branch metadata arrives while it is open.
-        if self.app.state.workspace_switcher.branch_refresh_requested {
-            self.app.state.workspace_switcher.branch_refresh_requested = false;
-            self.app.request_git_identity_refresh(Instant::now());
-        }
+        self.app.consume_workspace_switcher_branch_refresh();
 
         // Shared with TUI: refresh snapshot on search start.
         if self.app.state.workspace_switcher.search_started {

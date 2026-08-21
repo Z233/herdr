@@ -2063,6 +2063,23 @@ fn render_rows(
     }
 }
 
+fn render_secondary_line(
+    frame: &mut Frame,
+    secondary: &Rect,
+    fixed_width: u16,
+    segments: &[String],
+    style: Style,
+) {
+    let secondary_rect = Rect::new(
+        secondary.x.saturating_add(fixed_width),
+        secondary.y,
+        secondary.width.saturating_sub(fixed_width),
+        1,
+    );
+    let text = truncate_secondary_segments(segments, secondary_rect.width as usize);
+    frame.render_widget(Paragraph::new(text).style(style), secondary_rect);
+}
+
 fn render_row(
     app: &AppState,
     frame: &mut Frame,
@@ -2116,14 +2133,7 @@ fn render_row(
         spans.push(Span::styled(title, dir_text_style));
         frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
         if has_secondary {
-            let secondary_rect = Rect::new(
-                secondary.x.saturating_add(fixed_width),
-                secondary.y,
-                secondary.width.saturating_sub(fixed_width),
-                1,
-            );
-            let path = truncate_secondary_segments(&row.secondary, secondary_rect.width as usize);
-            frame.render_widget(Paragraph::new(path).style(dim_style), secondary_rect);
+            render_secondary_line(frame, &secondary, fixed_width, &row.secondary, dim_style);
         }
         return;
     }
@@ -2150,18 +2160,7 @@ fn render_row(
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base_style), primary);
 
     if has_secondary && !row.secondary.is_empty() {
-        let secondary_rect = Rect::new(
-            secondary.x.saturating_add(fixed_width),
-            secondary.y,
-            secondary.width.saturating_sub(fixed_width),
-            1,
-        );
-        let secondary_text =
-            truncate_secondary_segments(&row.secondary, secondary_rect.width as usize);
-        frame.render_widget(
-            Paragraph::new(secondary_text).style(dim_style),
-            secondary_rect,
-        );
+        render_secondary_line(frame, &secondary, fixed_width, &row.secondary, dim_style);
     }
 }
 

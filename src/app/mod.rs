@@ -995,12 +995,7 @@ impl App {
 
             // -- Workspace Switcher Search provider controller --
 
-            // An open switcher demands the asynchronous Git identity/branch
-            // refresh so branch metadata arrives while it is open.
-            if self.state.workspace_switcher.branch_refresh_requested {
-                self.state.workspace_switcher.branch_refresh_requested = false;
-                self.request_git_identity_refresh(Instant::now());
-            }
+            self.consume_workspace_switcher_branch_refresh();
 
             // Refresh the workspace canonical snapshot when Search starts
             // or after provider/preview events that change candidates.
