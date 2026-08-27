@@ -145,6 +145,10 @@ pub(crate) fn is_enabled() -> bool {
     KITTY_GRAPHICS_ENABLED.load(Ordering::Acquire)
 }
 
+fn pane_graphics_are_visible(app: &AppState) -> bool {
+    app.mode == Mode::Terminal && !app.workspace_switcher.active
+}
+
 pub(crate) fn paint_local_pane_graphics(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -182,10 +186,10 @@ pub(crate) fn encode_local_pane_graphics(
     cell_size: HostCellSize,
     cache: &mut HostGraphicsCache,
 ) -> Vec<u8> {
-    let mode_ok = app.mode == Mode::Terminal;
+    let graphics_visible = pane_graphics_are_visible(app);
     let cell_ok = cell_size.is_known();
     tracing::debug!(
-        mode_ok,
+        graphics_visible,
         cell_ok,
         cell_width_px = cell_size.width_px,
         cell_height_px = cell_size.height_px,
@@ -193,10 +197,10 @@ pub(crate) fn encode_local_pane_graphics(
         pane_infos_len = surface.pane_infos.len(),
         "paint_local_pane_graphics entry"
     );
-    if !mode_ok || !cell_ok {
+    if !graphics_visible || !cell_ok {
         tracing::debug!(
-            reason = if !mode_ok {
-                "not terminal mode"
+            reason = if !graphics_visible {
+                "terminal graphics hidden"
             } else {
                 "cell size unknown"
             },
@@ -239,7 +243,7 @@ pub(crate) fn has_visible_pane_graphics(
     surface: crate::ui::TabSurfaceView<'_>,
     cell_size: HostCellSize,
 ) -> bool {
-    if app.mode != Mode::Terminal || !cell_size.is_known() {
+    if !pane_graphics_are_visible(app) || !cell_size.is_known() {
         return false;
     }
 
@@ -1278,6 +1282,30 @@ mod tests {
         assert!(redisplay.contains("a=p"));
         assert_eq!(cache.images.len(), 1);
         assert_eq!(cache.placements.len(), 1);
+    }
+
+    #[test]
+    fn workspace_switcher_clears_host_graphics() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.workspace_switcher.active = true;
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut cache = HostGraphicsCache::default();
+        cache.test_mark_non_empty();
+
+        let bytes = encode_local_pane_graphics(
+            &app,
+            &terminal_runtimes,
+            app.view.tab_surface(),
+            HostCellSize {
+                width_px: 10,
+                height_px: 20,
+            },
+            &mut cache,
+        );
+
+        assert!(String::from_utf8_lossy(&bytes).contains("a=d,d=I"));
+        assert!(cache.is_empty());
     }
 
     #[test]
