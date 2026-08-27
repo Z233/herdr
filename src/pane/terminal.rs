@@ -71,7 +71,6 @@ pub(crate) struct VisibleCell {
     pub symbol: String,
     pub style: Style,
     pub wide: crate::ghostty::CellWide,
-    pub overline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,6 +418,13 @@ impl PaneTerminal {
             return Vec::new();
         };
         buffer.search(query, case_sensitive, active_screen)
+    }
+
+    pub(crate) fn text_match_is_current(&self, text_match: TerminalTextMatch) -> bool {
+        self.text_matches_are_current(&[text_match])
+            .first()
+            .copied()
+            .unwrap_or(false)
     }
 
     pub(crate) fn text_matches_are_current(&self, text_matches: &[TerminalTextMatch]) -> Vec<bool> {
@@ -2898,7 +2904,6 @@ fn capture_visible_cells(
                 symbol,
                 style,
                 wide: basic.wide,
-                overline: basic.style.overline,
             });
         }
     }
@@ -6470,7 +6475,6 @@ mod tests {
         assert_eq!(snapshot.cells[0].wide, crate::ghostty::CellWide::Wide);
         assert_eq!(snapshot.cells[1].wide, crate::ghostty::CellWide::SpacerTail);
         assert_eq!(snapshot.cells[2].symbol, "e\u{301}");
-        assert!(snapshot.cells[0].overline);
         assert!(!snapshot
             .cells
             .iter()
