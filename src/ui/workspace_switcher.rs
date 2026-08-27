@@ -1437,10 +1437,10 @@ pub(crate) fn handle_workspace_switcher_key(
         KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
-        KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+        KeyCode::Down if key.modifiers.is_empty() => {
             state.move_workspace_switcher_selection_from(terminal_runtimes, 1);
         }
-        KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+        KeyCode::Up if key.modifiers.is_empty() => {
             state.move_workspace_switcher_selection_from(terminal_runtimes, -1);
         }
         KeyCode::PageDown => {
@@ -2464,7 +2464,7 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(" switch  ", dim),
             Span::styled("type", key),
             Span::styled(" search  ", dim),
-            Span::styled("j/k/↑↓", key),
+            Span::styled("↑↓", key),
             Span::styled(" move  ", dim),
             Span::styled("esc", key),
             Span::styled(" back", dim),
@@ -3577,6 +3577,23 @@ mod tests {
 
         assert_eq!(state.active, Some(1));
         assert_eq!(state.mode, Mode::Terminal);
+    }
+    #[test]
+    fn workspace_switcher_search_treats_j_and_k_as_query_text() {
+        let mut state = state_with_workspaces(&["main", "issue"]);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        state.open_workspace_switcher_from(&terminal_runtimes);
+
+        for key in ['s', 'j', 'k'] {
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Char(key), KeyModifiers::empty()),
+            );
+        }
+
+        assert_eq!(state.workspace_switcher.mode, WorkspaceSwitcherMode::Search);
+        assert_eq!(state.workspace_switcher.query, "jk");
     }
     #[test]
     fn workspace_switcher_escape_closes_without_switching() {
