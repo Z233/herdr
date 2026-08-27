@@ -52,6 +52,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    pub(crate) fn invalid_value() -> Self {
+        Self(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)
+    }
+}
+
 trait GhosttyResultExt {
     fn into_result(self) -> Result<(), Error>;
 }
@@ -2740,7 +2746,6 @@ impl<'a> RowIter<'a> {
         Ok(dirty)
     }
 
-    #[cfg(windows)]
     pub fn wrap_state(&self) -> Result<(bool, bool), Error> {
         let mut row = 0;
         // SAFETY: row output matches requested row data type.

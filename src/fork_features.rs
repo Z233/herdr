@@ -6,9 +6,34 @@
 
 pub(crate) mod easymotion;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyModeNotice {
+    SelectionOutsideSnapshot,
+    SnapshotResized,
+    SnapshotFailed,
+}
+
+impl CopyModeNotice {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::SelectionOutsideSnapshot => "Selection cleared: anchor outside snapshot",
+            Self::SnapshotResized => "EasyMotion snapshot cleared: pane resized",
+            Self::SnapshotFailed => "EasyMotion unavailable: pane snapshot failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrozenCopyView {
+    pub pane_id: crate::layout::PaneId,
+    pub cells: std::sync::Arc<crate::pane::VisibleCellSnapshot>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ForkFeatureState {
     pub easymotion: Option<crate::app::state::EasyMotionState>,
+    pub frozen_copy_view: Option<FrozenCopyView>,
+    pub copy_mode_notice: Option<CopyModeNotice>,
 }
 
 fn copy_mode_command_char(key: crate::input::TerminalKey) -> Option<char> {

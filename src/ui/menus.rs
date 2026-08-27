@@ -76,7 +76,9 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
     let Some(copy_mode) = app.copy_mode.as_ref() else {
         return;
     };
-    let line = if let Some(easymotion) = easymotion {
+    let line = if let Some(notice) = app.fork_features.copy_mode_notice {
+        Line::from(Span::styled(notice.text(), key))
+    } else if let Some(easymotion) = easymotion {
         let query = easymotion.query_text();
         let stage = match easymotion.query_len() {
             0 => "target 1",
@@ -388,5 +390,28 @@ mod tests {
         let label_cell = &terminal.backend().buffer()[(1, 0)];
         assert_eq!(label_cell.symbol(), "C");
         assert_eq!(label_cell.style().bg, Some(app.palette.accent));
+    }
+
+    #[test]
+    fn copy_mode_overlay_shows_frozen_view_notice_exactly() {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Copy;
+        app.copy_mode = Some(copy_mode_state());
+        app.fork_features.copy_mode_notice =
+            Some(crate::fork_features::CopyModeNotice::SnapshotResized);
+        let backend = ratatui::backend::TestBackend::new(60, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_copy_mode_overlay(&app, frame, Rect::new(0, 0, 60, 1)))
+            .unwrap();
+
+        let rendered = (0..60)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(
+            rendered.trim_end(),
+            "EasyMotion snapshot cleared: pane resized"
+        );
     }
 }

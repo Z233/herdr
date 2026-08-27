@@ -66,6 +66,184 @@ pub(crate) struct TerminalTextMatch {
     pub scan_screen: crate::ghostty::ActiveScreen,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleCell {
+    pub symbol: String,
+    pub style: Style,
+    pub wide: crate::ghostty::CellWide,
+    pub overline: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleCellSnapshot {
+    pub cols: u16,
+    pub rows: u16,
+    pub viewport_top: u32,
+    pub active_screen: crate::ghostty::ActiveScreen,
+    pub cells: Vec<VisibleCell>,
+    pub wraps: Vec<(bool, bool)>,
+}
+
+impl VisibleCellSnapshot {
+    pub(crate) fn row_text(&self, row: u16) -> Option<String> {
+        let cells = self.row(row)?;
+        let mut text = String::new();
+        for cell in cells {
+            if cell.wide != crate::ghostty::CellWide::SpacerTail {
+                text.push_str(&cell.symbol);
+            }
+        }
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        Some(text)
+    }
+
+    pub(crate) fn scroll_metrics(&self) -> ScrollMetrics {
+        ScrollMetrics {
+            offset_from_bottom: 0,
+            max_offset_from_bottom: self.viewport_top as usize,
+            viewport_rows: usize::from(self.rows),
+        }
+    }
+
+    pub(crate) fn contains_absolute_cell(&self, row: u32, col: u16) -> bool {
+        row >= self.viewport_top
+            && row < self.viewport_top.saturating_add(u32::from(self.rows))
+            && col < self.cols
+    }
+
+    pub(crate) fn extract_selection(&self, selection: &crate::selection::Selection) -> String {
+        let ((start_row, start_col), (end_row, end_col)) = selection.ordered_cells();
+        let snapshot_end = self
+            .viewport_top
+            .saturating_add(u32::from(self.rows.saturating_sub(1)));
+        let start_row = start_row.max(self.viewport_top);
+        let end_row = end_row.min(snapshot_end);
+        if start_row > end_row {
+            return String::new();
+        }
+
+        let mut text = String::new();
+        for absolute_row in start_row..=end_row {
+            let row = absolute_row.saturating_sub(self.viewport_top) as u16;
+            let first_col = if absolute_row == start_row {
+                start_col.min(self.cols.saturating_sub(1))
+            } else {
+                0
+            };
+            let last_col = if absolute_row == end_row {
+                end_col.min(self.cols.saturating_sub(1))
+            } else {
+                self.cols.saturating_sub(1)
+            };
+            let mut line = String::new();
+            if let Some(cells) = self.row(row) {
+                for cell in &cells[usize::from(first_col)..=usize::from(last_col)] {
+                    if cell.wide != crate::ghostty::CellWide::SpacerTail {
+                        line.push_str(&cell.symbol);
+                    }
+                }
+            }
+            while line.ends_with(' ') {
+                line.pop();
+            }
+            if absolute_row > start_row {
+                let previous_row = row.saturating_sub(1);
+                let previous_soft_wrapped = self
+                    .wraps
+                    .get(usize::from(previous_row))
+                    .is_some_and(|(soft_wrapped, _)| *soft_wrapped);
+                if !previous_soft_wrapped {
+                    text.push('\n');
+                }
+            }
+            text.push_str(&line);
+        }
+        text.trim_end().to_string()
+    }
+
+    pub(crate) fn search_text_matches(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Vec<TerminalTextMatch> {
+        RetainedTextBuffer::new_search(self.cols, self.text_rows(), self.viewport_top).search(
+            query,
+            case_sensitive,
+            self.active_screen,
+        )
+    }
+
+    pub(crate) fn word_motion_target(
+        &self,
+        row: u16,
+        col: u16,
+        motion: TerminalWordMotion,
+    ) -> Option<TerminalTextPoint> {
+        RetainedTextBuffer::new_words(self.cols, self.text_rows(), self.viewport_top).word_motion(
+            self.viewport_top.saturating_add(u32::from(row)),
+            col,
+            motion,
+        )
+    }
+
+    pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+        let buf = frame.buffer_mut();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let target = &mut buf[(area.x + x, area.y + y)];
+                target.reset();
+                if y < self.rows && x < self.cols {
+                    if let Some(cell) = self.cell(y, x) {
+                        target.set_symbol(&cell.symbol);
+                        target.set_style(cell.style);
+                        continue;
+                    }
+                }
+                target.set_symbol(" ");
+            }
+        }
+    }
+
+    fn row(&self, row: u16) -> Option<&[VisibleCell]> {
+        if row >= self.rows {
+            return None;
+        }
+        let start = usize::from(row) * usize::from(self.cols);
+        self.cells.get(start..start + usize::from(self.cols))
+    }
+
+    fn cell(&self, row: u16, col: u16) -> Option<&VisibleCell> {
+        self.cells
+            .get(usize::from(row) * usize::from(self.cols) + usize::from(col))
+    }
+
+    fn text_rows(&self) -> Vec<crate::ghostty::ScreenTextRow> {
+        (0..self.rows)
+            .filter_map(|row| {
+                let cells = self.row(row)?;
+                let (soft_wrapped, wrap_continuation) = self
+                    .wraps
+                    .get(usize::from(row))
+                    .copied()
+                    .unwrap_or_default();
+                Some(crate::ghostty::ScreenTextRow {
+                    cells: cells
+                        .iter()
+                        .map(|cell| crate::ghostty::ScreenTextCell {
+                            wide: cell.wide,
+                            graphemes: cell.symbol.chars().map(u32::from).collect(),
+                        })
+                        .collect(),
+                    soft_wrapped,
+                    wrap_continuation,
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalWordMotion {
     NextStart,
@@ -243,13 +421,6 @@ impl PaneTerminal {
         buffer.search(query, case_sensitive, active_screen)
     }
 
-    pub(crate) fn text_match_is_current(&self, text_match: TerminalTextMatch) -> bool {
-        self.text_matches_are_current(&[text_match])
-            .first()
-            .copied()
-            .unwrap_or(false)
-    }
-
     pub(crate) fn text_matches_are_current(&self, text_matches: &[TerminalTextMatch]) -> Vec<bool> {
         if text_matches.is_empty() {
             return Vec::new();
@@ -383,6 +554,14 @@ impl PaneTerminal {
         Vec<crate::ghostty::ScreenTextRow>,
     )> {
         self.ghostty.screen_text_snapshot()
+    }
+
+    pub(crate) fn visible_cell_snapshot(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<VisibleCellSnapshot> {
+        self.ghostty.visible_cell_snapshot(cols, rows)
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
@@ -1563,6 +1742,15 @@ impl GhosttyPaneTerminal {
         ))
     }
 
+    pub(crate) fn visible_cell_snapshot(
+        &self,
+        expected_cols: u16,
+        expected_rows: u16,
+    ) -> Option<VisibleCellSnapshot> {
+        let mut core = self.core.lock().ok()?;
+        capture_visible_cells(&mut core, expected_cols, expected_rows).ok()
+    }
+
     #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         let core = self.core.lock().ok()?;
@@ -2645,6 +2833,86 @@ fn ghostty_extract_selection(
         .read_text_screen((start_col, start_row), (end_col, end_row), false)
 }
 
+fn capture_visible_cells(
+    core: &mut GhosttyPaneCore,
+    expected_cols: u16,
+    expected_rows: u16,
+) -> Result<VisibleCellSnapshot, crate::ghostty::Error> {
+    let host_theme = core.host_terminal_theme;
+    let initial_default_foreground = core.initial_default_foreground;
+    let initial_default_background = core.initial_default_background;
+    let GhosttyPaneCore {
+        terminal,
+        render_state,
+        ..
+    } = &mut *core;
+    render_state.update(terminal)?;
+    if render_state.cols()? != expected_cols || render_state.rows()? != expected_rows {
+        return Err(crate::ghostty::Error::invalid_value());
+    }
+
+    let colors = render_state.colors()?;
+    let default_bg = ghostty_default_bg(colors.background, host_theme, initial_default_background);
+    let default_fg = ghostty_default_fg(colors.foreground, host_theme, initial_default_foreground);
+    let resolved_fg = Some(ghostty_color(colors.foreground));
+    let resolved_bg = Some(ghostty_color(colors.background));
+    let scrollbar = terminal.scrollbar()?;
+    let viewport_top = scrollbar.offset.min(u32::MAX as usize) as u32;
+    let active_screen = terminal.active_screen()?;
+    let mut row_iterator = crate::ghostty::RowIterator::new()?;
+    let mut row_cells = crate::ghostty::RowCells::new()?;
+    let mut rows = render_state.populate_row_iterator(&mut row_iterator)?;
+    let mut cells = Vec::with_capacity(usize::from(expected_cols) * usize::from(expected_rows));
+    let mut wraps = Vec::with_capacity(usize::from(expected_rows));
+    let mut grapheme_bytes = Vec::new();
+    let mut symbol_scratch = String::new();
+
+    for _ in 0..expected_rows {
+        if !rows.next() {
+            return Err(crate::ghostty::Error::invalid_value());
+        }
+        wraps.push(rows.wrap_state()?);
+        let mut row = rows.populate_cells(&mut row_cells)?;
+        for _ in 0..expected_cols {
+            if !row.next() {
+                return Err(crate::ghostty::Error::invalid_value());
+            }
+            let basic = row.basic_data()?;
+            let style = ghostty_cell_style(
+                &row,
+                &basic,
+                default_fg,
+                default_bg,
+                resolved_fg,
+                resolved_bg,
+            );
+            let symbol = ghostty_buffer_symbol_into(
+                &row,
+                basic.wide,
+                true,
+                &mut grapheme_bytes,
+                &mut symbol_scratch,
+            )?
+            .to_string();
+            cells.push(VisibleCell {
+                symbol,
+                style,
+                wide: basic.wide,
+                overline: basic.style.overline,
+            });
+        }
+    }
+
+    Ok(VisibleCellSnapshot {
+        cols: expected_cols,
+        rows: expected_rows,
+        viewport_top,
+        active_screen,
+        cells,
+        wraps,
+    })
+}
+
 fn ghostty_screen_row(
     terminal: &crate::ghostty::Terminal,
     cols: u16,
@@ -3345,14 +3613,14 @@ mod tests {
         let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx).unwrap());
 
         let text_match = pane.search_text_matches("needle", true)[0];
-        assert!(pane.text_match_is_current(text_match));
+        assert_eq!(pane.text_matches_are_current(&[text_match]), vec![true]);
         pane.ghostty
             .core
             .lock()
             .unwrap()
             .terminal
             .write(b"\r\x1b[2Kalpha changed");
-        assert!(!pane.text_match_is_current(text_match));
+        assert_eq!(pane.text_matches_are_current(&[text_match]), vec![false]);
     }
 
     #[test]
@@ -3366,7 +3634,7 @@ mod tests {
 
         assert_eq!(text_match.start, TerminalTextPoint { row: 0, col: 3 });
         assert_eq!(text_match.end, TerminalTextPoint { row: 1, col: 0 });
-        assert!(pane.text_match_is_current(text_match));
+        assert_eq!(pane.text_matches_are_current(&[text_match]), vec![true]);
     }
 
     #[test]
@@ -3384,7 +3652,7 @@ mod tests {
             .terminal
             .write(b"\x1b[?1049hneedle");
 
-        assert!(!pane.text_match_is_current(text_match));
+        assert_eq!(pane.text_matches_are_current(&[text_match]), vec![false]);
     }
 
     #[test]
@@ -6182,6 +6450,70 @@ mod tests {
         // fg must NOT be Color::Reset (which would be the same hue as bg).
         assert_eq!(cell.style().fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
         assert_eq!(cell.style().bg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+    }
+
+    #[tokio::test]
+    async fn visible_cell_snapshot_owns_styled_wide_graphemes_and_renders_after_redraw() {
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            12,
+            2,
+            "\x1b[31;44;1;2;3;4;5;9;53m界e\u{301}\x1b[0m\u{10eeee}".as_bytes(),
+        );
+        let snapshot = runtime
+            .visible_cell_snapshot(12, 2)
+            .expect("complete visible cell snapshot");
+
+        runtime.test_process_pty_bytes(b"\x1b[2J\x1b[Hlive redraw");
+
+        assert_eq!(snapshot.cells.len(), 24);
+        assert_eq!(snapshot.cells[0].symbol, "界");
+        assert_eq!(snapshot.cells[0].wide, crate::ghostty::CellWide::Wide);
+        assert_eq!(snapshot.cells[1].wide, crate::ghostty::CellWide::SpacerTail);
+        assert_eq!(snapshot.cells[2].symbol, "e\u{301}");
+        assert!(snapshot.cells[0].overline);
+        assert!(!snapshot
+            .cells
+            .iter()
+            .any(|cell| cell.symbol.chars().next().map(u32::from)
+                == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER)));
+        let modifiers = snapshot.cells[0].style.add_modifier;
+        assert!(modifiers.contains(Modifier::BOLD));
+        assert!(modifiers.contains(Modifier::DIM));
+        assert!(modifiers.contains(Modifier::ITALIC));
+        assert!(modifiers.contains(Modifier::UNDERLINED));
+        assert!(modifiers.contains(Modifier::SLOW_BLINK));
+        assert!(modifiers.contains(Modifier::CROSSED_OUT));
+
+        let backend = ratatui::backend::TestBackend::new(12, 2);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| snapshot.render(frame, Rect::new(0, 0, 12, 2)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].symbol(), "界");
+        assert_eq!(buffer[(2, 0)].symbol(), "e\u{301}");
+        assert_eq!(buffer[(0, 0)].style().fg, snapshot.cells[0].style.fg);
+        assert_eq!(buffer[(0, 0)].style().bg, snapshot.cells[0].style.bg);
+        assert_eq!(
+            buffer[(0, 0)].style().add_modifier,
+            snapshot.cells[0].style.add_modifier
+        );
+    }
+
+    #[tokio::test]
+    async fn visible_cell_snapshot_copy_preserves_soft_wrap_semantics() {
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(5, 2, b"abcdefgh");
+        let snapshot = runtime
+            .visible_cell_snapshot(5, 2)
+            .expect("visible cell snapshot");
+        let selection = crate::selection::Selection::line_range(
+            PaneId::from_raw(1),
+            snapshot.viewport_top,
+            snapshot.viewport_top + 1,
+            4,
+        );
+
+        assert_eq!(snapshot.extract_selection(&selection), "abcdefgh");
     }
 
     #[test]

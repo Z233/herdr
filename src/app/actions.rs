@@ -2273,8 +2273,15 @@ impl AppState {
         };
 
         let text = self
-            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
-            .and_then(|rt| rt.extract_selection(&sel));
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .filter(|view| view.pane_id == sel.pane_id)
+            .map(|view| view.cells.extract_selection(&sel))
+            .or_else(|| {
+                self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
+                    .and_then(|rt| rt.extract_selection(&sel))
+            });
         if let Some(text) = text {
             if !text.is_empty() {
                 self.request_clipboard_write = Some(text.into_bytes());

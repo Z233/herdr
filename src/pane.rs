@@ -43,7 +43,7 @@ use self::agent_detection::{
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub(crate) use self::terminal::{
     TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot, TerminalTextMatch,
-    TerminalTextPoint, TerminalWordMotion,
+    TerminalTextPoint, TerminalWordMotion, VisibleCellSnapshot,
 };
 pub use self::{
     state::PaneState,
@@ -2556,10 +2556,6 @@ impl PaneRuntime {
         self.terminal.search_text_matches(query, case_sensitive)
     }
 
-    pub(crate) fn text_match_is_current(&self, text_match: crate::pane::TerminalTextMatch) -> bool {
-        self.terminal.text_match_is_current(text_match)
-    }
-
     pub(crate) fn text_matches_are_current(
         &self,
         text_matches: &[crate::pane::TerminalTextMatch],
@@ -2655,6 +2651,14 @@ impl PaneRuntime {
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.terminal.extract_selection(selection)
+    }
+
+    pub(crate) fn visible_cell_snapshot(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<crate::pane::VisibleCellSnapshot> {
+        self.terminal.visible_cell_snapshot(cols, rows)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {

@@ -291,10 +291,6 @@ impl TerminalRuntime {
         self.0.search_text_matches(query, case_sensitive)
     }
 
-    pub(crate) fn text_match_is_current(&self, text_match: crate::pane::TerminalTextMatch) -> bool {
-        self.0.text_match_is_current(text_match)
-    }
-
     pub(crate) fn text_matches_are_current(
         &self,
         text_matches: &[crate::pane::TerminalTextMatch],
@@ -388,6 +384,14 @@ impl TerminalRuntime {
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.0.extract_selection(selection)
+    }
+
+    pub(crate) fn visible_cell_snapshot(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<crate::pane::VisibleCellSnapshot> {
+        self.0.visible_cell_snapshot(cols, rows)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {

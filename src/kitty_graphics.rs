@@ -260,6 +260,14 @@ pub(crate) fn has_visible_pane_graphics(
     }
 
     for info in surface.pane_infos {
+        if app
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .is_some_and(|view| view.pane_id == info.id)
+        {
+            continue;
+        }
         let empty_uploaded = HashMap::new();
         if app.pane_graphics_layers.get(&info.id).is_some_and(|layer| {
             let host_placement =
@@ -557,6 +565,14 @@ fn collect_visible_placements(
     );
     let mut placements = Vec::new();
     for info in surface.pane_infos {
+        if app
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .is_some_and(|view| view.pane_id == info.id)
+        {
+            continue;
+        }
         if let Some(layer) = app.pane_graphics_layers.get(&info.id) {
             placements.push(pane_graphics_host_placement(
                 info,
