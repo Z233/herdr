@@ -16,6 +16,18 @@ _Avoid_: Workspace, pane group
 A terminal session surface within a tab. An agent can run in a pane, but the pane is not the agent.
 _Avoid_: Agent, terminal tab
 
+**Frozen Copy View**:
+An immutable view of a Pane's visible terminal cells captured when EasyMotion first starts within a copy-mode session. It is distinct from the Pane's live content.
+_Avoid_: Pane snapshot, frozen Pane
+
+**EasyMotion Target**:
+A query match in a Frozen Copy View that is identified by an EasyMotion label. It is distinct from a Selection Anchor.
+_Avoid_: Anchor, jump anchor
+
+**Selection Anchor**:
+The fixed endpoint from which a copy-mode selection extends. It is distinct from an EasyMotion Target.
+_Avoid_: EasyMotion anchor, target
+
 **Managed Linked Worktree**:
 A workspace checkout that Herdr has explicitly associated with a repository and identified as a Git linked worktree. An arbitrary linked checkout opened outside Herdr management is not a managed linked worktree.
 _Avoid_: Managed workspace, any linked checkout
