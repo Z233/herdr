@@ -391,7 +391,14 @@ pub(super) fn render_tab_panes(
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
-            if interactive {
+            let frozen = app
+                .fork_features
+                .frozen_copy_view
+                .as_ref()
+                .filter(|view| view.pane_id == info.id);
+            if let Some(frozen) = frozen {
+                frozen.cells.render(frame, info.inner_rect);
+            } else if interactive {
                 rt.render(frame, info.inner_rect, show_cursor);
             } else {
                 rt.render_bottom_aligned(frame, info.inner_rect, app.palette.panel_bg);
@@ -438,7 +445,9 @@ pub(super) fn render_tab_panes(
                 frame,
                 info.id,
                 info.inner_rect,
-                rt.scroll_metrics(),
+                frozen
+                    .map(|view| view.cells.scroll_metrics())
+                    .or_else(|| rt.scroll_metrics()),
                 &app.palette,
                 app.host_terminal_theme,
             );
@@ -848,7 +857,15 @@ fn validated_copy_mode_search_matches(
     if copy_mode.pane_id != info.id {
         return (0, 0, Vec::new());
     }
-    let Some(metrics) = rt.scroll_metrics() else {
+    let frozen = app
+        .fork_features
+        .frozen_copy_view
+        .as_ref()
+        .filter(|view| view.pane_id == info.id);
+    let Some(metrics) = frozen
+        .map(|view| view.cells.scroll_metrics())
+        .or_else(|| rt.scroll_metrics())
+    else {
         return (0, 0, Vec::new());
     };
     let top = metrics
@@ -863,7 +880,11 @@ fn validated_copy_mode_search_matches(
     let visible = &copy_mode.search.matches[first_visible..];
     let visible_len = visible.partition_point(|text_match| text_match.start.row <= bottom);
     let candidates = visible[..visible_len].to_vec();
-    let validity = rt.text_matches_are_current(&candidates);
+    let validity = if frozen.is_some() {
+        vec![true; candidates.len()]
+    } else {
+        rt.text_matches_are_current(&candidates)
+    };
 
     let matches = candidates
         .into_iter()
@@ -1659,6 +1680,10 @@ mod tests {
             focused_pane,
             TerminalRuntime::test_with_scrollback_bytes(12, 3, 1024, b"focus\n"),
         );
+        let frozen_cells = workspace.tabs[0].runtimes[&focused_pane]
+            .visible_cell_snapshot(12, 3)
+            .expect("frozen visible cells");
+        workspace.tabs[0].runtimes[&focused_pane].test_process_pty_bytes(b"\x1b[2J\x1b[Hlive\n");
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.mode = Mode::Copy;
@@ -1680,6 +1705,10 @@ mod tests {
             search: Default::default(),
         });
         app.fork_features.easymotion = Some(easymotion);
+        app.fork_features.frozen_copy_view = Some(crate::fork_features::FrozenCopyView {
+            pane_id: focused_pane,
+            cells: std::sync::Arc::new(frozen_cells),
+        });
 
         let area = Rect::new(0, 0, 30, 5);
         let terminal_runtimes = TerminalRuntimeRegistry::new();
@@ -1714,6 +1743,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let body_cell = &buffer[(focused_info.inner_rect.x, focused_info.inner_rect.y)];
+        assert_eq!(body_cell.symbol(), "f");
         assert!(body_cell.style().add_modifier.contains(Modifier::DIM));
 
         let label_cell = &buffer[(focused_info.inner_rect.x + 1, focused_info.inner_rect.y)];

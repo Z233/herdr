@@ -87,7 +87,7 @@ impl AppState {
 
         match initial_action {
             Some(CopyModeInitialAction::EasyMotion) => {
-                self.begin_copy_mode_easymotion();
+                self.begin_copy_mode_easymotion(terminal_runtimes);
             }
             Some(CopyModeInitialAction::ScrollUp) => {
                 self.scroll_copy_mode_page(terminal_runtimes, -1, true);
@@ -106,6 +106,13 @@ impl AppState {
         if self.fork_features.easymotion.is_some() {
             self.handle_copy_mode_easymotion_key(terminal_runtimes, key);
             return;
+        }
+
+        if is_valid_copy_mode_command(&key)
+            && self.fork_features.copy_mode_notice
+                != Some(crate::fork_features::CopyModeNotice::SelectionOutsideSnapshot)
+        {
+            self.fork_features.copy_mode_notice = None;
         }
 
         if self.handle_copy_mode_search_prompt_key(terminal_runtimes, key.clone()) {
@@ -200,7 +207,7 @@ impl AppState {
             'y' => self.exit_copy_mode(terminal_runtimes, true),
             'v' | ' ' => self.begin_copy_mode_selection(terminal_runtimes),
             'V' => self.select_copy_mode_line(terminal_runtimes),
-            's' => self.begin_copy_mode_easymotion(),
+            's' => self.begin_copy_mode_easymotion(terminal_runtimes),
             'h' => self.move_copy_cursor(terminal_runtimes, 0, -1),
             'j' => self.move_copy_cursor(terminal_runtimes, 1, 0),
             'k' => self.move_copy_cursor(terminal_runtimes, -1, 0),
@@ -308,14 +315,15 @@ impl AppState {
             return;
         };
         let pane_id = copy_mode.pane_id;
-        let Some(ws_idx) = self.active else {
-            return;
-        };
-        let Some(runtime) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
-        else {
-            return;
-        };
-        let Some(metrics) = runtime.scroll_metrics() else {
+        let frozen = self
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .filter(|view| view.pane_id == pane_id);
+        let metrics = frozen
+            .map(|view| view.cells.scroll_metrics())
+            .or_else(|| self.pane_scroll_metrics(terminal_runtimes, pane_id));
+        let Some(metrics) = metrics else {
             return;
         };
         let cursor = crate::pane::TerminalTextPoint {
@@ -330,10 +338,28 @@ impl AppState {
                     .and_then(|index| copy_mode.search.matches.get(index).copied())
             })
             .flatten()
-            .filter(|text_match| {
-                text_match.start == cursor && runtime.text_match_is_current(*text_match)
-            });
-        let matches = runtime.search_text_matches(&query, query.chars().any(char::is_uppercase));
+            .filter(|text_match| text_match.start == cursor);
+        let (matches, previous_match) = if let Some(frozen) = frozen {
+            (
+                frozen
+                    .cells
+                    .search_text_matches(&query, query.chars().any(char::is_uppercase)),
+                previous_match,
+            )
+        } else {
+            let Some(ws_idx) = self.active else {
+                return;
+            };
+            let Some(runtime) =
+                self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            (
+                runtime.search_text_matches(&query, query.chars().any(char::is_uppercase)),
+                previous_match.filter(|text_match| runtime.text_match_is_current(*text_match)),
+            )
+        };
         let current = search_match_index(&matches, direction, cursor, previous_match);
 
         if let Some(copy_mode) = self.copy_mode.as_mut() {
@@ -368,6 +394,23 @@ impl AppState {
         let Some(info) = self.pane_info_by_id(pane_id).cloned() else {
             return;
         };
+        if let Some(frozen) = self
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .filter(|view| view.pane_id == pane_id)
+        {
+            if let Some(copy_mode) = self.copy_mode.as_mut() {
+                copy_mode.cursor_row = target
+                    .row
+                    .saturating_sub(frozen.cells.viewport_top)
+                    .min(u32::from(frozen.cells.rows.saturating_sub(1)))
+                    as u16;
+                copy_mode.cursor_col = target.col.min(frozen.cells.cols.saturating_sub(1));
+            }
+            self.sync_copy_mode_selection(terminal_runtimes);
+            return;
+        }
         let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, pane_id) else {
             return;
         };
@@ -421,6 +464,8 @@ impl AppState {
         }
         self.copy_mode = None;
         self.fork_features.easymotion = None;
+        self.fork_features.frozen_copy_view = None;
+        self.fork_features.copy_mode_notice = None;
         self.mode = if self.active.is_some() {
             Mode::Terminal
         } else {
@@ -441,7 +486,7 @@ impl AppState {
             return;
         }
 
-        let metrics = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id);
+        let metrics = self.copy_mode_selection_metrics(terminal_runtimes, copy_mode.pane_id);
         self.selection = Some(Selection::anchor(
             copy_mode.pane_id,
             copy_mode.cursor_row,
@@ -463,7 +508,7 @@ impl AppState {
             return;
         };
         let end_col = info.inner_rect.width.saturating_sub(1);
-        let metrics = self.pane_scroll_metrics(terminal_runtimes, pane_id);
+        let metrics = self.copy_mode_selection_metrics(terminal_runtimes, pane_id);
         let anchor_row = Selection::absolute_row_for_viewport(cursor_row, metrics);
         self.selection = Some(Selection::line_range(
             pane_id, anchor_row, anchor_row, end_col,
@@ -500,7 +545,9 @@ impl AppState {
 
         if row_delta < 0 {
             let delta = row_delta.unsigned_abs();
-            if cursor_row >= delta {
+            if self.fork_features.frozen_copy_view.is_some() {
+                cursor_row = cursor_row.saturating_sub(delta);
+            } else if cursor_row >= delta {
                 cursor_row -= delta;
             } else {
                 self.scroll_pane_up(terminal_runtimes, pane_id, usize::from(delta));
@@ -511,6 +558,8 @@ impl AppState {
             let bottom = info.inner_rect.height.saturating_sub(1);
             if cursor_row.saturating_add(delta) <= bottom {
                 cursor_row += delta;
+            } else if self.fork_features.frozen_copy_view.is_some() {
+                cursor_row = bottom;
             } else {
                 self.scroll_pane_down(terminal_runtimes, pane_id, usize::from(delta));
                 cursor_row = bottom;
@@ -540,6 +589,21 @@ impl AppState {
             return;
         };
         let lines = copy_mode_page_lines(info.inner_rect.height, half_page);
+        if self.fork_features.frozen_copy_view.is_some() {
+            let delta = lines.min(u16::MAX as usize) as u16;
+            cursor_row = if direction < 0 {
+                cursor_row.saturating_sub(delta)
+            } else {
+                cursor_row
+                    .saturating_add(delta)
+                    .min(info.inner_rect.height.saturating_sub(1))
+            };
+            if let Some(copy_mode) = self.copy_mode.as_mut() {
+                copy_mode.cursor_row = cursor_row;
+            }
+            self.sync_copy_mode_selection(terminal_runtimes);
+            return;
+        }
         if let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, pane_id) {
             if direction < 0 {
                 let next_offset = metrics.offset_from_bottom.saturating_add(lines);
@@ -587,6 +651,13 @@ impl AppState {
             return;
         };
         let pane_id = copy_mode.pane_id;
+        if self.fork_features.frozen_copy_view.is_some() {
+            if let Some(copy_mode) = self.copy_mode.as_mut() {
+                copy_mode.cursor_row = 0;
+            }
+            self.sync_copy_mode_selection(terminal_runtimes);
+            return;
+        }
         let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, pane_id) else {
             return;
         };
@@ -607,7 +678,9 @@ impl AppState {
             return;
         };
         let cursor_row = info.inner_rect.height.saturating_sub(1);
-        self.set_pane_scroll_offset(terminal_runtimes, pane_id, 0);
+        if self.fork_features.frozen_copy_view.is_none() {
+            self.set_pane_scroll_offset(terminal_runtimes, pane_id, 0);
+        }
         if let Some(copy_mode) = self.copy_mode.as_mut() {
             copy_mode.cursor_row = cursor_row;
         }
@@ -662,6 +735,21 @@ impl AppState {
         let Some(copy_mode) = self.copy_mode.as_ref() else {
             return;
         };
+        if let Some(frozen) = self.fork_features.frozen_copy_view.as_ref() {
+            let motion = match motion {
+                WordMotion::NextStart => crate::pane::TerminalWordMotion::NextStart,
+                WordMotion::PreviousStart => crate::pane::TerminalWordMotion::PreviousStart,
+                WordMotion::NextEnd => crate::pane::TerminalWordMotion::NextEnd,
+            };
+            if let Some(target) =
+                frozen
+                    .cells
+                    .word_motion_target(copy_mode.cursor_row, copy_mode.cursor_col, motion)
+            {
+                self.move_copy_cursor_to_absolute(terminal_runtimes, target, false);
+            }
+            return;
+        }
         let Some(metrics) = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id) else {
             return;
         };
@@ -760,6 +848,14 @@ impl AppState {
         viewport_row: u16,
     ) -> Option<String> {
         let copy_mode = self.copy_mode.as_ref()?;
+        if let Some(frozen) = self
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .filter(|view| view.pane_id == copy_mode.pane_id)
+        {
+            return frozen.cells.row_text(viewport_row);
+        }
         let ws_idx = self.active?;
         let info = self.pane_info_by_id(copy_mode.pane_id)?;
         if viewport_row >= info.inner_rect.height || info.inner_rect.width == 0 {
@@ -819,14 +915,32 @@ impl AppState {
                 .find(|info| info.id == copy_mode.pane_id)
                 .map(|info| (info.inner_rect.width, info.inner_rect.height))
         });
+        let snapshot_resized = geometry.is_some_and(|geometry| {
+            self.fork_features
+                .frozen_copy_view
+                .as_ref()
+                .is_some_and(|view| (view.cells.cols, view.cells.rows) != geometry)
+        });
+        if snapshot_resized {
+            self.clear_selection();
+            self.fork_features.frozen_copy_view = None;
+            self.fork_features.easymotion = None;
+            self.fork_features.copy_mode_notice =
+                Some(crate::fork_features::CopyModeNotice::SnapshotResized);
+        }
         let Some(copy_mode) = self.copy_mode.as_mut() else {
             return;
         };
         if let Some(geometry) = geometry {
+            if snapshot_resized {
+                copy_mode.selection = None;
+            }
             if copy_mode.search.geometry.is_some() && copy_mode.search.geometry != Some(geometry) {
                 copy_mode.search.matches.clear();
                 copy_mode.search.current = None;
             }
+            copy_mode.cursor_col = copy_mode.cursor_col.min(geometry.0.saturating_sub(1));
+            copy_mode.cursor_row = copy_mode.cursor_row.min(geometry.1.saturating_sub(1));
             copy_mode.search.geometry = Some(geometry);
         }
     }
@@ -851,6 +965,9 @@ impl AppState {
         {
             self.clear_selection();
             self.copy_mode = None;
+            self.fork_features.easymotion = None;
+            self.fork_features.frozen_copy_view = None;
+            self.fork_features.copy_mode_notice = None;
             if self.mode == Mode::Copy {
                 self.mode = if self.active.is_some() {
                     Mode::Terminal
@@ -875,15 +992,15 @@ impl AppState {
             CopyModeSelection::Character => {
                 let screen_col = info.inner_rect.x.saturating_add(copy_mode.cursor_col);
                 let screen_row = info.inner_rect.y.saturating_add(copy_mode.cursor_row);
-                self.update_selection_cursor(
-                    terminal_runtimes,
-                    copy_mode.pane_id,
-                    screen_col,
-                    screen_row,
-                );
+                let metrics =
+                    self.copy_mode_selection_metrics(terminal_runtimes, copy_mode.pane_id);
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.drag(screen_col, screen_row, info.inner_rect, metrics);
+                }
             }
             CopyModeSelection::Linewise { anchor_row } => {
-                let metrics = self.pane_scroll_metrics(terminal_runtimes, copy_mode.pane_id);
+                let metrics =
+                    self.copy_mode_selection_metrics(terminal_runtimes, copy_mode.pane_id);
                 let cursor_row =
                     Selection::absolute_row_for_viewport(copy_mode.cursor_row, metrics);
                 self.selection = Some(Selection::line_range(
@@ -894,6 +1011,19 @@ impl AppState {
                 ));
             }
         }
+    }
+
+    fn copy_mode_selection_metrics(
+        &self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::pane::ScrollMetrics> {
+        self.fork_features
+            .frozen_copy_view
+            .as_ref()
+            .filter(|view| view.pane_id == pane_id)
+            .map(|view| view.cells.scroll_metrics())
+            .or_else(|| self.pane_scroll_metrics(terminal_runtimes, pane_id))
     }
 }
 
@@ -983,6 +1113,57 @@ fn copy_mode_page_lines(height: u16, half_page: bool) -> usize {
     } else {
         usize::from(height - 2)
     }
+}
+
+fn is_valid_copy_mode_command(key: &TerminalKey) -> bool {
+    if matches!(
+        key.code,
+        KeyCode::Esc
+            | KeyCode::Enter
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+    ) {
+        return true;
+    }
+    if matches!(key.code, KeyCode::Char('b' | 'f' | 'u' | 'd'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return true;
+    }
+    copy_mode_command_char(key.clone()).is_some_and(|ch| {
+        matches!(
+            ch,
+            'q' | 'y'
+                | 'v'
+                | ' '
+                | 'V'
+                | 's'
+                | 'h'
+                | 'j'
+                | 'k'
+                | 'l'
+                | 'g'
+                | 'G'
+                | '0'
+                | '$'
+                | '^'
+                | '/'
+                | '?'
+                | 'n'
+                | 'N'
+                | 'w'
+                | 'b'
+                | 'e'
+                | '{'
+                | '}'
+        )
+    })
 }
 
 fn copy_mode_command_char(key: TerminalKey) -> Option<char> {
@@ -1255,6 +1436,16 @@ mod tests {
     async fn copy_mode_prefix_focus_keeps_copy_mode_on_source_pane() {
         let (mut app, first_pane, second_pane) = app_with_split_copy_screen(b"alpha\nbeta\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        let frozen = app
+            .state
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .expect("frozen view")
+            .cells
+            .clone();
         let copy_mode = app.state.copy_mode.as_ref().expect("copy mode").clone();
         assert_eq!(copy_mode.pane_id, first_pane);
 
@@ -1285,6 +1476,23 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Copy);
         assert_eq!(app.state.copy_mode, Some(copy_mode));
         assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), first_pane);
+        assert!(std::sync::Arc::ptr_eq(
+            &frozen,
+            &app.state
+                .fork_features
+                .frozen_copy_view
+                .as_ref()
+                .expect("preserved frozen view")
+                .cells
+        ));
+        assert_eq!(
+            app.state
+                .fork_features
+                .easymotion
+                .expect("preserved easymotion")
+                .query,
+            [Some('a'), None]
+        );
     }
 
     #[tokio::test]
@@ -1331,6 +1539,8 @@ mod tests {
 
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
         assert!(app.state.copy_mode.is_none());
+        assert!(app.state.fork_features.frozen_copy_view.is_none());
+        assert!(app.state.fork_features.easymotion.is_none());
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 
@@ -1511,6 +1721,314 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn easymotion_uses_first_frozen_view_after_live_terminal_changes() {
+        let (mut app, pane_id) = app_with_copy_screen(b"th original\r\nsecond\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        let original = app
+            .state
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .expect("frozen copy view")
+            .cells
+            .clone();
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(
+                b"\x1b[2J\x1b[Hlive replacement\r\n\x1b[?1049halt screen\x1b[?1049l",
+            );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+
+        let easymotion = app.state.fork_features.easymotion.expect("easymotion");
+        assert_eq!(easymotion.label_count, 1);
+        assert_eq!(easymotion.labels[0].expect("target").col, 0);
+        assert_eq!(original.row_text(0).as_deref(), Some("th original"));
+    }
+
+    #[tokio::test]
+    async fn easymotion_cancel_label_and_repeat_keep_original_frozen_view() {
+        let (mut app, pane_id) = app_with_copy_screen(b"th original\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        let original = app
+            .state
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .expect("frozen copy view")
+            .cells
+            .clone();
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert!(app.state.fork_features.easymotion.is_none());
+        assert!(app.state.fork_features.frozen_copy_view.is_some());
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\x1b[2J\x1b[Hth live\r\n");
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &app.state
+                .fork_features
+                .frozen_copy_view
+                .as_ref()
+                .expect("same frozen copy view")
+                .cells
+        ));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('f'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.easymotion.is_none());
+        assert!(std::sync::Arc::ptr_eq(
+            &original,
+            &app.state
+                .fork_features
+                .frozen_copy_view
+                .as_ref()
+                .expect("frozen view after jump")
+                .cells
+        ));
+    }
+
+    #[tokio::test]
+    async fn frozen_copy_view_backs_search_navigation_selection_and_yank() {
+        let (mut app, pane_id) = app_with_copy_screen(b"alpha needle\r\nbeta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\x1b[2J\x1b[Hlive only\r\n");
+
+        submit_copy_search(&mut app, '/', "needle");
+        let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+        assert_eq!(copy_mode.cursor_row, 0);
+        assert_eq!(copy_mode.cursor_col, 6);
+        assert_eq!(copy_mode.search.matches.len(), 1);
+
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            6
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('}'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_row,
+            2
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_row,
+            0
+        );
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        let bottom = app
+            .state
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .expect("frozen view")
+            .cells
+            .rows
+            .saturating_sub(1);
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_row,
+            bottom
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_row,
+            0
+        );
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(copy_mode_clipboard_text(&mut app), "alpha needle\nbeta");
+    }
+
+    #[tokio::test]
+    async fn frozen_character_selection_uses_snapshot_viewport_after_live_scroll() {
+        let (mut app, pane_id) = app_with_copy_scrollback(b"alpha\r\nbeta\r\ngamma\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(
+                b"live0\r\nlive1\r\nlive2\r\nlive3\r\nlive4\r\nlive5\r\nlive6\r\n",
+            );
+        assert!(copy_mode_viewport_top_row(&app, pane_id) > 0);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Right, KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+
+        assert_eq!(copy_mode_clipboard_text(&mut app), "al");
+    }
+
+    #[tokio::test]
+    async fn easymotion_clears_only_selection_with_anchor_outside_frozen_view() {
+        let (mut app, pane_id) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let metrics = copy_mode_scroll_metrics(&app, pane_id);
+        let outside_row = viewport_top_row(metrics).saturating_add(99);
+        app.state.selection = Some(Selection::line_range(pane_id, outside_row, outside_row, 3));
+        app.state.copy_mode.as_mut().expect("copy mode").selection =
+            Some(CopyModeSelection::Character);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        assert!(app.state.selection.is_none());
+        assert_eq!(
+            app.state
+                .fork_features
+                .copy_mode_notice
+                .map(|notice| notice.text()),
+            Some("Selection cleared: anchor outside snapshot")
+        );
+        assert!(app.state.fork_features.easymotion.is_some());
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.copy_mode_notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn easymotion_resize_invalidates_frozen_view_but_keeps_copy_mode() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.state.view.pane_infos[0].inner_rect.width -= 1;
+
+        app.state.sync_copy_mode_search_geometry();
+
+        assert!(app.state.copy_mode.is_some());
+        assert!(app.state.fork_features.easymotion.is_none());
+        assert!(app.state.fork_features.frozen_copy_view.is_none());
+        assert_eq!(
+            app.state
+                .fork_features
+                .copy_mode_notice
+                .map(|notice| notice.text()),
+            Some("EasyMotion snapshot cleared: pane resized")
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.copy_mode_notice.is_some());
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.copy_mode_notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn frozen_resize_invalidation_clears_snapshot_epoch_selection() {
+        let (mut app, pane_id) = app_with_copy_screen(b"frozen text\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Right, KeyModifiers::empty()));
+        assert!(app.state.selection.is_some());
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").selection,
+            Some(CopyModeSelection::Character)
+        );
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\x1b[2J\x1b[Hlive replacement\r\n");
+        app.state.view.pane_infos[0].inner_rect.width -= 1;
+        app.state.sync_copy_mode_search_geometry();
+
+        assert!(app.state.copy_mode.is_some());
+        assert!(app.state.fork_features.frozen_copy_view.is_none());
+        assert!(app.state.selection.is_none());
+        assert!(app
+            .state
+            .copy_mode
+            .as_ref()
+            .expect("copy mode")
+            .selection
+            .is_none());
+        assert_eq!(
+            app.state
+                .fork_features
+                .copy_mode_notice
+                .map(|notice| notice.text()),
+            Some("EasyMotion snapshot cleared: pane resized")
+        );
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn easymotion_capture_failure_has_no_live_fallback() {
+        let (mut app, _) = app_with_copy_screen(b"th live\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.state.view.pane_infos[0].inner_rect.width += 1;
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+
+        assert!(app.state.copy_mode.is_some());
+        assert!(app.state.fork_features.easymotion.is_none());
+        assert!(app.state.fork_features.frozen_copy_view.is_none());
+        assert_eq!(
+            app.state
+                .fork_features
+                .copy_mode_notice
+                .map(|notice| notice.text()),
+            Some("EasyMotion unavailable: pane snapshot failed")
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.copy_mode_notice.is_some());
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('h'), KeyModifiers::empty()));
+        assert!(app.state.fork_features.copy_mode_notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn frozen_copy_view_history_commands_never_expose_scrollback() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        for key in [
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()),
+            TerminalKey::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty()),
+            TerminalKey::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            TerminalKey::new(KeyCode::PageDown, KeyModifiers::empty()),
+            TerminalKey::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+        ] {
+            app.handle_copy_mode_key(key);
+            assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn copy_mode_easymotion_preserves_character_selection_anchor() {
         let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
@@ -1671,6 +2189,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn easymotion_bounds_existing_search_results_to_frozen_view() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, _) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        submit_copy_search(&mut app, '/', "000");
+        assert!(
+            app.state
+                .copy_mode
+                .as_ref()
+                .expect("copy mode")
+                .search
+                .matches
+                .len()
+                > 5
+        );
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+
+        let frozen = app
+            .state
+            .fork_features
+            .frozen_copy_view
+            .as_ref()
+            .expect("frozen view");
+        let search = &app.state.copy_mode.as_ref().expect("copy mode").search;
+        assert!(search.matches.iter().all(|text_match| {
+            frozen
+                .cells
+                .contains_absolute_cell(text_match.start.row, text_match.start.col)
+                && frozen
+                    .cells
+                    .contains_absolute_cell(text_match.end.row, text_match.end.col)
+        }));
+    }
+
+    #[tokio::test]
     async fn copy_mode_search_wraps_and_repeats_in_both_directions() {
         let (mut app, pane_id) = app_with_copy_screen(b"alpha needle\r\nbeta needle\r\ngamma\r\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
@@ -1713,6 +2267,29 @@ mod tests {
                 .current,
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn live_copy_search_repeat_ignores_an_overwritten_current_match() {
+        let (mut app, pane_id) = app_with_copy_screen(b"needle-----needle\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        submit_copy_search(&mut app, '/', "needle");
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_col,
+            0
+        );
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\x1b[1;1H\x1b[2Kxneedle----needle");
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty()));
+
+        let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+        assert_eq!(copy_mode.search.matches.len(), 2);
+        assert_eq!(copy_mode.cursor_row, 0);
+        assert_eq!(copy_mode.cursor_col, 1);
+        assert_eq!(copy_mode.search.current, Some(0));
     }
 
     #[tokio::test]
@@ -2232,6 +2809,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Copy);
         assert!(app.state.copy_mode.is_some());
         assert!(app.state.fork_features.easymotion.is_some());
+        assert!(app.state.fork_features.frozen_copy_view.is_some());
     }
 
     #[tokio::test]

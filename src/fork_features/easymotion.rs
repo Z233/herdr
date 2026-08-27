@@ -8,10 +8,82 @@ use crate::{
     terminal::TerminalRuntimeRegistry,
 };
 
+use super::{CopyModeNotice, FrozenCopyView};
+
 impl AppState {
-    pub(crate) fn begin_copy_mode_easymotion(&mut self) {
-        if self.copy_mode.is_none() {
+    pub(crate) fn begin_copy_mode_easymotion(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) {
+        let Some(copy_mode) = self.copy_mode.as_ref() else {
             return;
+        };
+        let pane_id = copy_mode.pane_id;
+        let mut captured = false;
+        if self.fork_features.frozen_copy_view.is_none() {
+            let Some(info) = self.pane_info_by_id(pane_id).cloned() else {
+                return;
+            };
+            let snapshot = self
+                .active
+                .and_then(|ws_idx| {
+                    self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
+                })
+                .and_then(|runtime| {
+                    runtime.visible_cell_snapshot(info.inner_rect.width, info.inner_rect.height)
+                });
+            let Some(snapshot) = snapshot else {
+                self.fork_features.easymotion = None;
+                self.fork_features.copy_mode_notice = Some(CopyModeNotice::SnapshotFailed);
+                return;
+            };
+            self.fork_features.frozen_copy_view = Some(FrozenCopyView {
+                pane_id,
+                cells: std::sync::Arc::new(snapshot),
+            });
+            captured = true;
+        }
+
+        if captured {
+            if let (Some(frozen), Some(copy_mode)) = (
+                self.fork_features.frozen_copy_view.as_ref(),
+                self.copy_mode.as_mut(),
+            ) {
+                if !copy_mode.search.query.is_empty() {
+                    let previous = copy_mode
+                        .search
+                        .current
+                        .and_then(|index| copy_mode.search.matches.get(index).copied());
+                    let matches = frozen.cells.search_text_matches(
+                        &copy_mode.search.query,
+                        copy_mode.search.query.chars().any(char::is_uppercase),
+                    );
+                    copy_mode.search.current = previous.and_then(|previous| {
+                        matches.iter().position(|candidate| {
+                            candidate.start == previous.start && candidate.end == previous.end
+                        })
+                    });
+                    copy_mode.search.matches = matches;
+                }
+            }
+        }
+
+        let anchor_outside = self
+            .selection
+            .as_ref()
+            .zip(self.fork_features.frozen_copy_view.as_ref())
+            .is_some_and(|(selection, frozen)| {
+                selection.pane_id != pane_id
+                    || !frozen.cells.contains_absolute_cell(
+                        selection.anchor_cell().0,
+                        selection.anchor_cell().1,
+                    )
+            });
+        if anchor_outside {
+            self.clear_copy_mode_selection();
+            self.fork_features.copy_mode_notice = Some(CopyModeNotice::SelectionOutsideSnapshot);
+        } else if self.fork_features.copy_mode_notice == Some(CopyModeNotice::SnapshotFailed) {
+            self.fork_features.copy_mode_notice = None;
         }
         self.fork_features.easymotion = Some(EasyMotionState::new());
     }
@@ -64,6 +136,9 @@ impl AppState {
         }
 
         easymotion.push_query_char(ch);
+        if self.fork_features.copy_mode_notice == Some(CopyModeNotice::SelectionOutsideSnapshot) {
+            self.fork_features.copy_mode_notice = None;
+        }
         let query_complete = easymotion.target().is_some();
         self.fork_features.easymotion = Some(easymotion);
         self.copy_mode = Some(copy_mode);

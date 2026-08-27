@@ -390,6 +390,14 @@ impl TerminalRuntime {
         self.0.extract_selection(selection)
     }
 
+    pub(crate) fn visible_cell_snapshot(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Option<crate::pane::VisibleCellSnapshot> {
+        self.0.visible_cell_snapshot(cols, rows)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         self.0.render(frame, area, show_cursor);
     }

@@ -10,7 +10,7 @@ z233 fork 在上游 [ogulcancelik/herdr](https://github.com/ogulcancelik/herdr) 
 | 四向 split | runtime/API | TUI 只发 `pane.split`；公开请求使用四向 `PaneDirection`，结构树的 `SplitDirection` 仍只表示 canonical right/down。 |
 | Workspace Picker / Quick Switch | TUI fork overlay | 不再新增 `Mode` 变体；overlay 先于 core mode 接收 key/paste/mouse，最后单独渲染。选择目标保存 workspace/tab public ID，row index 只用于一次 projection。 |
 | MRU | TUI presentation state | 观察既有 `workspace.focused` / `workspace.closed` 事件更新，不修改 `switch_workspace()`。 |
-| EasyMotion | fork feature adapter | 状态位于 `ForkFeatureState`，controller 位于 `src/fork_features/easymotion.rs`；`CopyModeState` 不再携带 fork 字段。 |
+| EasyMotion | fork feature adapter | EasyMotion 与 Frozen Copy View 会话状态位于 `ForkFeatureState`，controller 位于 `src/fork_features/easymotion.rs`；`CopyModeState` 不再携带 fork 字段。终端层只提供中立的只读可见 cell 捕获。 |
 | IME associated text | raw input primitive | host 侧 associated text 在 raw framer 中展开为普通字符 key press，绝不转成 Paste，fork framer 不产生 `Text`。v0.8.0 起上游为 client wire 路径引入 `RawInputEvent::Text`/`TextCommit`（Windows VTI IME 等），与 fork 的 host 展开并存；Text commit 不经 picker overlay，而 fork 展开的 key event 会自然流入 picker 搜索。 |
 
 稳定 hook 只有 overlay input/paste/mouse/render、prefix timer expiry 和 runtime mutation adapter。新增 fork 行为时应扩展这些边界，而不是新增 core `Mode`、修改 copy-mode struct，或从 TUI 直接 spawn/focus runtime。
@@ -73,7 +73,7 @@ placement 现在由 `pane.split` 请求统一承载：Left/Up 映射为新 child
 
 ### EasyMotion 复制模式跳转
 
-Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签跳转。小写查询不区分大小写，大写区分。跳转保持选择锚点。
+Vim EasyMotion 风格：复制模式中按 `s`，输入两个字符，按标签跳转。小写查询不区分大小写，大写区分。首次启动会深拷贝当前可见字符 cell 网格为 Frozen Copy View；同一复制模式会话中的匹配、移动、搜索、选择、复制和渲染都复用该视图，不暂停 PTY，也不捕获 scrollback 或 Kitty 图片。跳转保持位于视图内的选择锚点；面板尺寸变化会释放视图并退回普通复制模式。
 
 新增 `CopyModeInitialAction` 枚举（`EasyMotion` / `ScrollUp`），支持进入复制模式后立即执行初始动作，通过可选键绑定 `copy_mode_easymotion` / `copy_mode_scroll_up` 触发。EasyMotion controller/state 已从 `copy_mode.rs` / `CopyModeState` 移到 fork feature adapter，只通过窄 copy-mode helper 读取可见行和同步 cursor/selection。
 

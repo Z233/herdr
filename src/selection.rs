@@ -208,6 +208,10 @@ impl Selection {
         self.ordered()
     }
 
+    pub(crate) fn anchor_cell(&self) -> (u32, u16) {
+        self.anchor
+    }
+
     /// Check whether a pane-relative cell (row, col) is inside the selection.
     pub fn contains(&self, viewport_row: u16, col: u16, metrics: Option<ScrollMetrics>) -> bool {
         if !self.is_visible() {
