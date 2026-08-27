@@ -1503,10 +1503,14 @@ fn handle_quick_switch_key(
         KeyCode::Char('s') if workspace_switcher_command_modifiers(state, key.modifiers) => {
             state.enter_workspace_switcher_search_from(terminal_runtimes);
         }
-        KeyCode::Char('l') if workspace_switcher_command_modifiers(state, key.modifiers) => {
+        KeyCode::Right | KeyCode::Char('l')
+            if workspace_switcher_command_modifiers(state, key.modifiers) =>
+        {
             state.expand_selected_workspace_switcher_workspace_from(terminal_runtimes);
         }
-        KeyCode::Char('h') if workspace_switcher_command_modifiers(state, key.modifiers) => {
+        KeyCode::Left | KeyCode::Char('h')
+            if workspace_switcher_command_modifiers(state, key.modifiers) =>
+        {
             state.collapse_selected_workspace_switcher_workspace_from(terminal_runtimes);
         }
         KeyCode::Down | KeyCode::Char('j')
@@ -2452,8 +2456,8 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled(" switch  ", dim),
             Span::styled("tab", key),
             Span::styled(" cycle  ", dim),
-            Span::styled("l/h", key),
-            Span::styled(" expand  ", dim),
+            Span::styled("←/→", key),
+            Span::styled(" collapse/expand  ", dim),
             Span::styled("s", key),
             Span::styled(" search  ", dim),
             Span::styled("esc", key),
@@ -2751,6 +2755,7 @@ mod tests {
         assert!(screen[0].contains("close"), "{}", screen[0]);
         assert!(screen[0].contains('×'), "{}", screen[0]);
         assert!(!screen.join("\n").contains("enter"));
+        assert!(!screen.join("\n").contains("collapse/expand"));
         assert_ne!(screen[0].chars().next(), Some('┌'));
         assert_ne!(screen[19].chars().next(), Some('└'));
         assert_no_preview_text(&screen);
@@ -3063,6 +3068,7 @@ mod tests {
         assert_eq!(screen[3].chars().nth(10), Some('┌'));
         assert_eq!(screen[26].chars().nth(10), Some('└'));
         assert!(screen[25].contains("enter"), "{}", screen[25]);
+        assert!(screen[25].contains("←/→ collapse/expand"), "{}", screen[25]);
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {
@@ -3547,6 +3553,160 @@ mod tests {
         assert!(state.accept_workspace_switcher_selection_from(&terminal_runtimes));
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].active_tab_index(), second_tab);
+    }
+    #[test]
+    fn quick_switch_direction_keys_expand_and_collapse_in_both_layouts() {
+        for (width, expected_layout) in [(60, ViewLayout::Mobile), (120, ViewLayout::Desktop)] {
+            let (mut state, terminal_runtimes, _) =
+                state_with_quick_switch_binding("ctrl+tab", None);
+            crate::ui::compute_view(&mut state, Rect::new(0, 0, width, 30));
+            assert_eq!(state.view.layout, expected_layout);
+            let selected_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
+
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            );
+            assert!(
+                state
+                    .workspace_switcher_rows_from(&terminal_runtimes)
+                    .iter()
+                    .any(|row| row.ws_idx == selected_ws && row.is_tab),
+                "Right should expand in {expected_layout:?}"
+            );
+            let expanded_rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            );
+            assert_eq!(
+                state.workspace_switcher_rows_from(&terminal_runtimes),
+                expanded_rows
+            );
+
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            );
+            assert!(
+                !state
+                    .workspace_switcher_rows_from(&terminal_runtimes)
+                    .iter()
+                    .any(|row| row.ws_idx == selected_ws && row.is_tab),
+                "Left should collapse in {expected_layout:?}"
+            );
+            let collapsed_rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+            );
+            assert_eq!(
+                state.workspace_switcher_rows_from(&terminal_runtimes),
+                collapsed_rows
+            );
+
+            handle_workspace_switcher_key(
+                &mut state,
+                &terminal_runtimes,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+            );
+            state.open_workspace_switcher_from(&terminal_runtimes);
+            assert!(state
+                .workspace_switcher_rows_from(&terminal_runtimes)
+                .iter()
+                .all(|row| !row.is_tab));
+        }
+    }
+    #[test]
+    fn quick_switch_direction_keys_accept_configured_command_modifiers() {
+        let (mut state, terminal_runtimes, command_modifiers) =
+            state_with_quick_switch_binding("alt+f13", None);
+        let selected_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Right, command_modifiers),
+        );
+        assert!(state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .iter()
+            .any(|row| row.ws_idx == selected_ws && row.is_tab));
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Left, command_modifiers),
+        );
+        assert!(!state
+            .workspace_switcher_rows_from(&terminal_runtimes)
+            .iter()
+            .any(|row| row.ws_idx == selected_ws && row.is_tab));
+    }
+    #[test]
+    fn quick_switch_left_from_tab_collapses_and_selects_parent_workspace() {
+        let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
+        let selected_ws = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert!(
+            state.workspace_switcher_rows_from(&terminal_runtimes)
+                [state.workspace_switcher.selected]
+                .is_tab
+        );
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+
+        let rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+        assert!(!rows
+            .iter()
+            .any(|row| row.ws_idx == selected_ws && row.is_tab));
+        assert_eq!(rows[state.workspace_switcher.selected].ws_idx, selected_ws);
+        assert!(!rows[state.workspace_switcher.selected].is_tab);
+    }
+    #[test]
+    fn search_direction_keys_leave_observable_state_and_results_unchanged() {
+        let (mut state, terminal_runtimes, command_modifiers) =
+            state_with_quick_switch_binding("ctrl+tab", None);
+        state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        state.workspace_switcher.query = "main".into();
+        state.clamp_workspace_switcher_selection_from(&terminal_runtimes);
+        let before = state.workspace_switcher.clone();
+        let before_rows = state.workspace_switcher_rows_from(&terminal_runtimes);
+
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::empty()),
+        );
+        handle_workspace_switcher_key(
+            &mut state,
+            &terminal_runtimes,
+            KeyEvent::new(KeyCode::Right, command_modifiers),
+        );
+
+        assert_eq!(state.workspace_switcher, before);
+        assert_eq!(
+            state.workspace_switcher_rows_from(&terminal_runtimes),
+            before_rows
+        );
     }
     #[test]
     fn workspace_switcher_typing_filters_and_enter_switches_workspace() {
