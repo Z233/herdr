@@ -320,7 +320,7 @@ pub(crate) fn render_mobile_panel(
     render_mobile_switcher_content(app, terminal_runtimes, frame, areas.viewport);
 }
 
-fn render_header_status(
+pub(super) fn render_header_status(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,

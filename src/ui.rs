@@ -1852,14 +1852,14 @@ switch_workspace = "ctrl+1..9"
 
         let content = buffer_content(terminal.backend());
 
-        // Fork switcher shows workspace rows and the mobile fullscreen top bar.
+        // Fork switcher shows workspace rows and reuses the mobile header status.
         assert!(
             content.contains("alpha"),
             "fork switcher should show workspace name 'alpha'"
         );
         assert!(
-            content.contains("workspace switcher") && content.contains("close"),
-            "fullscreen switcher top bar should be visible"
+            content.contains("close") && !content.contains("workspace switcher"),
+            "fullscreen switcher should replace the switch control with close"
         );
         assert!(!content.contains("enter"), "mobile footer must not render");
         // Old Mobile Navigation Panel distinctive content is absent.

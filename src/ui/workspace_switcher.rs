@@ -1843,26 +1843,34 @@ impl AppState {
             };
         }
 
-        let top_bar = Rect::new(popup.x, popup.y, popup.width, 1);
+        let top_bar_height = popup.height.min(2);
+        let top_bar = Rect::new(popup.x, popup.y, popup.width, top_bar_height);
         let close_width = popup.width.min(10);
         let close = Rect::new(
             popup.x + popup.width.saturating_sub(close_width),
             popup.y,
             close_width,
-            1,
+            top_bar_height,
         );
-        let search = if self.workspace_switcher.mode.search_visible() && popup.height > 1 {
-            Rect::new(popup.x, popup.y + 1, popup.width, 1)
-        } else {
-            Rect::default()
-        };
-        let search_separator = if self.workspace_switcher.mode.search_visible() && popup.height > 2
+        let search =
+            if self.workspace_switcher.mode.search_visible() && popup.height > top_bar_height {
+                Rect::new(popup.x, popup.y + top_bar_height, popup.width, 1)
+            } else {
+                Rect::default()
+            };
+        let search_separator = if self.workspace_switcher.mode.search_visible()
+            && popup.height > top_bar_height.saturating_add(1)
         {
-            Rect::new(popup.x, popup.y + 2, popup.width, 1)
+            Rect::new(
+                popup.x,
+                popup.y + top_bar_height.saturating_add(1),
+                popup.width,
+                1,
+            )
         } else {
             Rect::default()
         };
-        let reserved_height = 1u16
+        let reserved_height = top_bar_height
             .saturating_add(search.height)
             .saturating_add(search_separator.height);
         let content = Rect::new(
@@ -1991,7 +1999,7 @@ pub(super) fn render_workspace_switcher_overlay(
             Block::default().style(Style::default().bg(app.palette.panel_bg)),
             layout.popup,
         );
-        render_mobile_top_bar(app, frame, layout.top_bar, layout.close);
+        render_mobile_top_bar(app, terminal_runtimes, frame, layout.top_bar, layout.close);
     } else if render_panel_shell(
         frame,
         layout.popup,
@@ -2022,23 +2030,36 @@ pub(super) fn render_workspace_switcher_overlay(
     }
 }
 
-fn render_mobile_top_bar(app: &AppState, frame: &mut Frame, area: Rect, close: Rect) {
+fn render_mobile_top_bar(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+    close: Rect,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let p = &app.palette;
-    frame.render_widget(
-        Paragraph::new(" workspace switcher").style(
-            Style::default()
-                .fg(p.text)
-                .bg(p.panel_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        area,
+    let status_width = close.x.saturating_sub(area.x).saturating_sub(1);
+    super::mobile::render_header_status(
+        app,
+        terminal_runtimes,
+        frame,
+        Rect::new(area.x, area.y, status_width, area.height),
     );
     if close.width == 0 {
         return;
     }
+    frame.render_widget(
+        Block::default().style(Style::default().bg(p.surface0)),
+        close,
+    );
+    let label_y = if close.height > 1 {
+        close.y + 1
+    } else {
+        close.y
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -2059,11 +2080,13 @@ fn render_mobile_top_bar(app: &AppState, frame: &mut Frame, area: Rect, close: R
         ]))
         .style(Style::default().bg(p.surface0))
         .alignment(ratatui::layout::Alignment::Center),
-        close,
+        Rect::new(close.x, label_y, close.width, 1),
     );
-    frame.buffer_mut()[(close.x, close.y)]
-        .set_symbol("│")
-        .set_style(Style::default().fg(p.surface_dim).bg(p.surface0));
+    for y in close.y..close.y + close.height {
+        frame.buffer_mut()[(close.x, y)]
+            .set_symbol("│")
+            .set_style(Style::default().fg(p.surface_dim).bg(p.surface0));
+    }
 }
 
 fn render_search(
@@ -2718,6 +2741,7 @@ mod tests {
     fn mobile_quick_switch_uses_full_frame_without_footer() {
         let mut state = app_with_workspaces(&["alpha", "beta"]);
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        let closed_screen = rendered_screen(&state, 60, 20);
         state.open_workspace_switcher();
 
         assert_eq!(state.view.layout, ViewLayout::Mobile);
@@ -2731,35 +2755,46 @@ mod tests {
         );
         assert_eq!(
             state.workspace_switcher_top_bar_rect(),
-            Rect::new(0, 0, 60, 1)
+            Rect::new(0, 0, 60, 2)
         );
         assert_eq!(
             state.workspace_switcher_close_rect(),
-            Rect::new(50, 0, 10, 1)
+            Rect::new(50, 0, 10, 2)
         );
         assert_eq!(state.workspace_switcher_search_rect(), Rect::default());
         assert_eq!(
             state.workspace_switcher_content_rect(),
-            Rect::new(0, 1, 60, 19)
+            Rect::new(0, 2, 60, 18)
         );
         assert_eq!(
             state.workspace_switcher_body_rect(),
-            Rect::new(0, 1, 60, 19)
+            Rect::new(0, 2, 60, 18)
         );
         assert_eq!(state.workspace_switcher_divider_rect(), Rect::default());
         assert_eq!(state.workspace_switcher_preview_rect(), Rect::default());
         assert_eq!(state.workspace_switcher_footer_rect(), Rect::default());
 
         let screen = rendered_screen(&state, 60, 20);
-        assert!(screen[0].contains("workspace switcher"), "{}", screen[0]);
-        assert!(screen[0].contains("close"), "{}", screen[0]);
-        assert!(screen[0].contains('×'), "{}", screen[0]);
+        let status_width = state.workspace_switcher_close_rect().x as usize - 1;
+        for row in 0..2 {
+            assert_eq!(
+                screen[row].chars().take(status_width).collect::<String>(),
+                closed_screen[row]
+                    .chars()
+                    .take(status_width)
+                    .collect::<String>()
+            );
+        }
+        assert!(!screen[0].contains("workspace switcher"), "{}", screen[0]);
+        assert!(!screen[0].contains("close"), "{}", screen[0]);
+        assert!(screen[1].contains("close"), "{}", screen[1]);
+        assert!(screen[1].contains('×'), "{}", screen[1]);
         assert!(!screen.join("\n").contains("enter"));
         assert!(!screen.join("\n").contains("collapse/expand"));
         assert_ne!(screen[0].chars().next(), Some('┌'));
         assert_ne!(screen[19].chars().next(), Some('└'));
         assert_no_preview_text(&screen);
-        assert_no_preview_divider(&screen, 1, 19);
+        assert_no_preview_divider(&screen, 2, 18);
     }
 
     #[test]
@@ -2811,7 +2846,7 @@ mod tests {
         state.open_workspace_switcher_from(&terminal_runtimes);
         assert_eq!(
             state.workspace_switcher_content_rect(),
-            Rect::new(0, 1, 5, 2)
+            Rect::new(0, 2, 5, 1)
         );
         assert_eq!(
             state.workspace_switcher_body_rect(),
@@ -2915,7 +2950,7 @@ mod tests {
         assert!(state.workspace_switcher.active);
         assert_eq!(
             state.workspace_switcher_content_rect(),
-            Rect::new(0, 1, 60, 19)
+            Rect::new(0, 2, 60, 18)
         );
         assert_eq!(
             state.workspace_switcher_body_rect(),
@@ -2925,7 +2960,7 @@ mod tests {
         assert_eq!(state.workspace_switcher_preview_rect(), Rect::default());
         let screen = rendered_screen(&state, 60, 20);
         assert_no_preview_text(&screen);
-        assert_no_preview_divider(&screen, 1, 19);
+        assert_no_preview_divider(&screen, 2, 18);
 
         // Cross back to Desktop while open: preview restored immediately.
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 30));
@@ -2962,54 +2997,58 @@ mod tests {
 
         assert_eq!(
             state.workspace_switcher_search_rect(),
-            Rect::new(0, 1, 60, 1)
+            Rect::new(0, 2, 60, 1)
         );
         assert_eq!(
             state.workspace_switcher_content_rect(),
-            Rect::new(0, 3, 60, 17)
+            Rect::new(0, 4, 60, 16)
         );
         assert_eq!(
             state.workspace_switcher_body_rect(),
-            Rect::new(0, 3, 60, 17)
+            Rect::new(0, 4, 60, 16)
         );
         assert_eq!(state.workspace_switcher_divider_rect(), Rect::default());
         assert_eq!(state.workspace_switcher_preview_rect(), Rect::default());
         assert_eq!(state.workspace_switcher_footer_rect(), Rect::default());
 
         let screen = rendered_screen(&state, 60, 20);
-        assert!(screen[0].contains("workspace switcher"), "{}", screen[0]);
+        assert!(screen[0].contains("alpha"), "{}", screen[0]);
+        assert!(!screen[0].contains("workspace switcher"), "{}", screen[0]);
         assert!(
-            screen[1].contains("search workspace names"),
+            screen[2].contains("search workspace names"),
             "{}",
-            screen[1]
+            screen[2]
         );
-        assert!(!screen[1].contains("workspace switcher"), "{}", screen[1]);
+        assert!(screen[1].contains("close"), "{}", screen[1]);
+        assert!(!screen[2].contains("workspace switcher"), "{}", screen[2]);
         assert_no_preview_text(&screen);
     }
 
     #[test]
-    fn mobile_close_control_closes_switcher_without_accepting_a_row() {
-        let mut state = app_with_workspaces(&["alpha", "beta"]);
+    fn mobile_close_control_accepts_both_header_rows() {
         let terminal_runtimes = TerminalRuntimeRegistry::new();
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 20));
-        state.open_workspace_switcher_from(&terminal_runtimes);
-        let active = state.active;
-        let close = state.workspace_switcher_close_rect();
+        for row_offset in 0..2 {
+            let mut state = app_with_workspaces(&["alpha", "beta"]);
+            crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 20));
+            state.open_workspace_switcher_from(&terminal_runtimes);
+            let active = state.active;
+            let close = state.workspace_switcher_close_rect();
 
-        handle_workspace_switcher_mouse(
-            &mut state,
-            &terminal_runtimes,
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: close.x + 1,
-                row: close.y,
-                modifiers: KeyModifiers::empty(),
-            },
-        );
+            handle_workspace_switcher_mouse(
+                &mut state,
+                &terminal_runtimes,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: close.x + 1,
+                    row: close.y + row_offset,
+                    modifiers: KeyModifiers::empty(),
+                },
+            );
 
-        assert!(!state.workspace_switcher.active);
-        assert_eq!(state.active, active);
-        assert_eq!(state.mode, Mode::Terminal);
+            assert!(!state.workspace_switcher.active);
+            assert_eq!(state.active, active);
+            assert_eq!(state.mode, Mode::Terminal);
+        }
     }
 
     #[test]
@@ -3025,17 +3064,25 @@ mod tests {
         );
         assert_eq!(state.workspace_switcher_body_rect().height, 0);
         let quick_screen = rendered_screen(&state, 40, 1);
-        assert!(quick_screen[0].contains("workspace switcher"));
+        assert!(quick_screen[0].contains("alpha"));
+        assert!(quick_screen[0].contains("close"));
 
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 2));
         state.enter_workspace_switcher_search_from(&terminal_runtimes);
+        assert_eq!(state.workspace_switcher_search_rect(), Rect::default());
+        assert_eq!(state.workspace_switcher_body_rect().height, 0);
+        let two_row_screen = rendered_screen(&state, 40, 2);
+        assert!(two_row_screen[0].contains("alpha"));
+        assert!(two_row_screen[1].contains("close"));
+
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 40, 3));
         assert_eq!(
             state.workspace_switcher_search_rect(),
-            Rect::new(0, 1, 40, 1)
+            Rect::new(0, 2, 40, 1)
         );
         assert_eq!(state.workspace_switcher_body_rect().height, 0);
-        let search_screen = rendered_screen(&state, 40, 2);
-        assert!(search_screen[1].contains("search workspace names"));
+        let search_screen = rendered_screen(&state, 40, 3);
+        assert!(search_screen[2].contains("search workspace names"));
     }
 
     #[test]

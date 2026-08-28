@@ -5,6 +5,9 @@
 ### Added
 - Workspace Switcher now shows repository-qualified labels (`repo / label`) for Herdr-managed linked worktrees.
 
+### Changed
+- The mobile Workspace Switcher now keeps the two-line workspace and agent status header visible while open.
+
 ## [0.8.0] - 2026-08-03
 
 ### Added
