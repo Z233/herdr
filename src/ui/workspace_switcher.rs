@@ -443,6 +443,27 @@ impl AppState {
         self.capture_workspace_switcher_target_from(terminal_runtimes);
     }
 
+    pub(crate) fn open_workspace_switcher_at_active_workspace_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        self.open_workspace_switcher_from(terminal_runtimes);
+        let Some(active) = self.active else {
+            return;
+        };
+        let rows = self.workspace_switcher_rows_from(terminal_runtimes);
+        let Some(selected) = rows
+            .iter()
+            .position(|row| row.ws_idx == active && !row.is_tab)
+        else {
+            return;
+        };
+        self.workspace_switcher.selected = selected;
+        self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+        self.refresh_workspace_switcher_preview_from(terminal_runtimes);
+        self.capture_workspace_switcher_target_from(terminal_runtimes);
+    }
+
     #[cfg(test)]
     pub(crate) fn workspace_switcher_rows(&self) -> Vec<WorkspaceSwitcherRow> {
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();

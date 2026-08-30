@@ -1147,7 +1147,7 @@ impl AppState {
             // `switch` button is interactive. Consume everything else so the
             // retained Mobile Navigation Panel is never reached.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_switch {
-                self.open_workspace_switcher_from(terminal_runtimes);
+                self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
             }
             return MobileMouseResult::Consumed;
         }
@@ -1161,7 +1161,7 @@ impl AppState {
         }
 
         if on_switch {
-            self.open_workspace_switcher_from(terminal_runtimes);
+            self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
             return MobileMouseResult::Consumed;
         }
 
@@ -3946,6 +3946,12 @@ mod tests {
             app.state.workspace_switcher.mode,
             crate::ui::workspace_switcher::WorkspaceSwitcherMode::QuickSwitch,
             "should be in QuickSwitch mode"
+        );
+        let selected = &app.state.workspace_switcher_rows()[app.state.workspace_switcher.selected];
+        assert_eq!(
+            Some(selected.ws_idx),
+            app.state.active,
+            "mobile switch button should initially select the active workspace"
         );
         // Old Mobile Navigation Panel was not entered.
         assert_ne!(
