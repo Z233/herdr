@@ -340,7 +340,7 @@ fn compute_view_internal(
         pane_infos,
         split_borders,
     };
-    app.sync_copy_mode_search_geometry();
+    app.sync_copy_mode_search_geometry(terminal_runtimes);
     if app.workspace_switcher.active {
         app.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
     }
@@ -406,7 +406,7 @@ fn compute_mobile_view(
         pane_infos,
         split_borders,
     };
-    app.sync_copy_mode_search_geometry();
+    app.sync_copy_mode_search_geometry(terminal_runtimes);
 
     // Auto-open the fork Workspace Switcher ONLY for the mobile
     // zero-workspace Navigate state, so the user sees the "no workspaces"

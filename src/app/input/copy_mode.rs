@@ -907,7 +907,10 @@ impl AppState {
         self.sync_copy_mode_with_focus();
     }
 
-    pub(crate) fn sync_copy_mode_search_geometry(&mut self) {
+    pub(crate) fn sync_copy_mode_search_geometry(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) {
         let geometry = self.copy_mode.as_ref().and_then(|copy_mode| {
             self.view
                 .pane_infos
@@ -915,11 +918,21 @@ impl AppState {
                 .find(|info| info.id == copy_mode.pane_id)
                 .map(|info| (info.inner_rect.width, info.inner_rect.height))
         });
-        let snapshot_resized = geometry.is_some_and(|geometry| {
+        let runtime_geometry = self.copy_mode.as_ref().and_then(|copy_mode| {
+            self.active
+                .and_then(|ws_idx| {
+                    self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, copy_mode.pane_id)
+                })
+                .map(|runtime| {
+                    let (rows, cols) = runtime.current_size();
+                    (cols, rows)
+                })
+        });
+        let snapshot_resized = runtime_geometry.is_some_and(|runtime_geometry| {
             self.fork_features
                 .frozen_copy_view
                 .as_ref()
-                .is_some_and(|view| (view.cells.cols, view.cells.rows) != geometry)
+                .is_some_and(|view| (view.cells.cols, view.cells.rows) != runtime_geometry)
         });
         if snapshot_resized {
             self.clear_selection();
@@ -1913,12 +1926,19 @@ mod tests {
 
     #[tokio::test]
     async fn easymotion_resize_invalidates_frozen_view_but_keeps_copy_mode() {
-        let (mut app, _) = app_with_copy_screen(b"alpha\r\n");
+        let (mut app, pane_id) = app_with_copy_screen(b"alpha\r\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()));
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let (rows, cols) = runtime.current_size();
+        runtime.resize(rows, cols - 1, 0, 0);
         app.state.view.pane_infos[0].inner_rect.width -= 1;
 
-        app.state.sync_copy_mode_search_geometry();
+        app.state
+            .sync_copy_mode_search_geometry(&app.terminal_runtimes);
 
         assert!(app.state.copy_mode.is_some());
         assert!(app.state.fork_features.easymotion.is_none());
@@ -1958,8 +1978,15 @@ mod tests {
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
             .expect("runtime")
             .test_process_pty_bytes(b"\x1b[2J\x1b[Hlive replacement\r\n");
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let (rows, cols) = runtime.current_size();
+        runtime.resize(rows, cols - 1, 0, 0);
         app.state.view.pane_infos[0].inner_rect.width -= 1;
-        app.state.sync_copy_mode_search_geometry();
+        app.state
+            .sync_copy_mode_search_geometry(&app.terminal_runtimes);
 
         assert!(app.state.copy_mode.is_some());
         assert!(app.state.fork_features.frozen_copy_view.is_none());
@@ -2521,7 +2548,8 @@ mod tests {
             .inner_rect
             .width
             .saturating_sub(1);
-        app.state.sync_copy_mode_search_geometry();
+        app.state
+            .sync_copy_mode_search_geometry(&app.terminal_runtimes);
 
         let search = &app.state.copy_mode.as_ref().expect("copy mode").search;
         assert_eq!(search.query, "needle");
@@ -2543,7 +2571,8 @@ mod tests {
             .clone();
 
         app.state.view.pane_infos.clear();
-        app.state.sync_copy_mode_search_geometry();
+        app.state
+            .sync_copy_mode_search_geometry(&app.terminal_runtimes);
 
         assert_eq!(
             app.state.copy_mode.as_ref().expect("copy mode").search,
@@ -2799,17 +2828,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_copy_mode_with_easymotion_initial_action_activates_easymotion() {
+    async fn easymotion_snapshot_survives_nonforeground_client_layout() {
         let (mut app, _) = app_with_copy_screen(b"the thing\r\nother th\r\n");
+        let foreground_area = Rect::new(0, 0, 80, 20);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            foreground_area,
+        );
         app.state.enter_copy_mode_with_initial_action(
             &app.terminal_runtimes,
             Some(CopyModeInitialAction::EasyMotion),
+        );
+
+        assert!(app.state.fork_features.easymotion.is_some());
+        assert!(app.state.fork_features.frozen_copy_view.is_some());
+
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 100, 24),
         );
 
         assert_eq!(app.state.mode, Mode::Copy);
         assert!(app.state.copy_mode.is_some());
         assert!(app.state.fork_features.easymotion.is_some());
         assert!(app.state.fork_features.frozen_copy_view.is_some());
+        assert!(app.state.fork_features.copy_mode_notice.is_none());
     }
 
     #[tokio::test]
