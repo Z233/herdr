@@ -11,7 +11,7 @@ use ratatui::{
 
 use super::{
     scrollbar::{render_scrollbar, should_show_scrollbar},
-    status::state_dot,
+    status::state_icon,
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::{
@@ -2291,7 +2291,7 @@ fn render_row(
         return;
     }
 
-    let (dot, dot_style) = state_dot(row.state, row.seen, p);
+    let (dot, dot_style) = state_icon(row.state, row.seen, app.status_indicators, p);
 
     let caret = if row.is_tab {
         " "
@@ -6149,7 +6149,10 @@ mod tests {
         }
         assert_eq!(
             buffer[(3, 0)].fg,
-            state_dot(row.state, row.seen, &app.palette).1.fg.unwrap()
+            state_icon(row.state, row.seen, app.status_indicators, &app.palette)
+                .1
+                .fg
+                .unwrap()
         );
     }
 

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  Fork of <a href="https://github.com/ogulcancelik/herdr">herdr</a> — agent multiplexer that lives in your terminal.
+  Fork of <a href="https://github.com/herdrdev/herdr">herdr</a> — agent multiplexer that lives in your terminal.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 ---
 
-> **Looking for the original README?** Herdr is developed upstream at **[ogulcancelik/herdr](https://github.com/ogulcancelik/herdr)** — install instructions, full documentation, sponsors, and contribution guide all live there.
+> **Looking for the original README?** Herdr is developed upstream at **[herdrdev/herdr](https://github.com/herdrdev/herdr)** — install instructions, full documentation, sponsors, and contribution guide all live there.
 >
 > This README covers **only what this fork adds**.
 
@@ -138,7 +138,7 @@ cd herdr
 cargo build --release
 ```
 
-For prebuilt binaries, install scripts, Homebrew, and all other installation methods, see the [upstream README](https://github.com/ogulcancelik/herdr#install).
+For prebuilt binaries, install scripts, Homebrew, and all other installation methods, see the [upstream README](https://github.com/herdrdev/herdr#install).
 
 ## Upstream Sync
 

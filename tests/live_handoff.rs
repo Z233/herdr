@@ -302,6 +302,34 @@ fn wait_for_api(socket_path: &Path, timeout: Duration) {
     );
 }
 
+fn wait_for_pane_shell(socket_path: &Path, pane_id: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_response = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        last_response = request(
+            socket_path,
+            serde_json::json!({
+                "id": "test:pane:process-info",
+                "method": "pane.process_info",
+                "params": {"pane_id": pane_id}
+            }),
+        );
+        let process_info = &last_response["result"]["process_info"];
+        let shell_pid = process_info["shell_pid"].as_u64();
+        let foreground_processes = process_info["foreground_processes"].as_array();
+        let ready = shell_pid.is_some()
+            && process_info["foreground_process_group_id"].as_u64() == shell_pid
+            && foreground_processes.is_some_and(|processes| {
+                processes.len() == 1 && processes[0]["pid"].as_u64() == shell_pid
+            });
+        if ready {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("pane shell did not become ready for {pane_id}: {last_response}");
+}
+
 fn write_plugin_manifest(root: &Path, plugin_id: &str) {
     fs::create_dir_all(root).unwrap();
     fs::write(
@@ -1415,20 +1443,36 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
         .as_str()
         .unwrap()
         .to_string();
+    wait_for_pane_shell(&api_socket, &pane_id, Duration::from_secs(5));
 
-    let started = request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:agent-start",
-            "method": "agent.start",
-            "params": {
-                "name": "handoff-agent",
-                "kind": "pi",
-                "pane_id": pane_id,
-                "timeout_ms": 5000
-            }
-        }),
-    );
+    let start_deadline = Instant::now() + Duration::from_secs(5);
+    let started = loop {
+        let response = request(
+            &api_socket,
+            serde_json::json!({
+                "id": "test:agent-start",
+                "method": "agent.start",
+                "params": {
+                    "name": "handoff-agent",
+                    "kind": "pi",
+                    "pane_id": pane_id,
+                    "timeout_ms": 5000
+                }
+            }),
+        );
+        if response.get("result").is_some() {
+            break response;
+        }
+        assert_eq!(
+            response["error"]["code"], "agent_pane_busy",
+            "agent start failed: {response}"
+        );
+        assert!(
+            Instant::now() < start_deadline,
+            "agent pane did not become available: {response}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
     assert_ok(started);
     support::wait_for_file(&started_marker, Duration::from_secs(5));
 

@@ -304,6 +304,7 @@ impl KeyboardProtocol {
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseProtocolMode {
@@ -314,7 +315,9 @@ pub enum MouseProtocolMode {
     AnyMotion,
 }
 
+#[cfg(any(unix, test))]
 impl MouseProtocolMode {
+    #[cfg(test)]
     pub fn reporting_enabled(self) -> bool {
         self != Self::None
     }
@@ -326,6 +329,7 @@ pub enum MouseProtocolEncoding {
     Default,
     Utf8,
     Sgr,
+    SgrPixels,
 }
 
 #[cfg(test)]
