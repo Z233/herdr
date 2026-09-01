@@ -267,6 +267,15 @@ pub(crate) enum WorkspaceSwitcherMode {
     Search,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MobileSwitchGesture {
+    AwaitingAnchor,
+    Anchored {
+        anchor_row: u16,
+        anchor_target: WorkspaceSwitcherTarget,
+    },
+}
+
 impl WorkspaceSwitcherMode {
     pub(crate) fn search_visible(self) -> bool {
         self == Self::Search
@@ -333,6 +342,7 @@ pub(crate) struct WorkspaceSwitcherState {
     pub query: String,
     pub selected: usize,
     pub selected_target: Option<WorkspaceSwitcherTarget>,
+    pub mobile_switch_gesture: Option<MobileSwitchGesture>,
     pub scroll: usize,
     /// Physical line offset of the selected row within the current
     /// viewport, captured whenever the selection, scroll, or target capture
@@ -421,6 +431,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
+        self.workspace_switcher.mobile_switch_gesture = None;
         self.workspace_switcher.mode = WorkspaceSwitcherMode::QuickSwitch;
         self.workspace_switcher.query.clear();
         self.workspace_switcher.scroll = 0;
@@ -1016,6 +1027,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
+        self.workspace_switcher.mobile_switch_gesture = None;
         self.workspace_switcher.mode = WorkspaceSwitcherMode::Search;
         self.workspace_switcher.query.clear();
         self.workspace_switcher.expanded_workspaces.clear();
@@ -1058,6 +1070,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
+        self.workspace_switcher.mobile_switch_gesture = None;
         // Prevent repeated acceptance while a directory open is in flight.
         if self.workspace_switcher.pending_directory.is_some() {
             return false;
@@ -1673,8 +1686,18 @@ pub(crate) fn handle_workspace_switcher_mouse(
     terminal_runtimes: &TerminalRuntimeRegistry,
     mouse: MouseEvent,
 ) {
+    if state.workspace_switcher.mobile_switch_gesture.is_some()
+        && (state.view.layout != ViewLayout::Mobile
+            || state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch)
+    {
+        state.workspace_switcher.mobile_switch_gesture = None;
+    }
+
     match mouse.kind {
         MouseEventKind::Moved => {
+            if state.workspace_switcher.mobile_switch_gesture.is_some() {
+                return;
+            }
             if let Some(idx) = state.workspace_switcher_row_index_at_from(
                 terminal_runtimes,
                 mouse.column,
@@ -1706,6 +1729,12 @@ pub(crate) fn handle_workspace_switcher_mouse(
                 close_workspace_switcher(state);
             }
         }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            handle_mobile_switch_drag(state, terminal_runtimes, mouse.column, mouse.row);
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            finish_mobile_switch_gesture(state, terminal_runtimes, mouse.row);
+        }
         MouseEventKind::ScrollUp => {
             state.workspace_switcher.scroll = state.workspace_switcher.scroll.saturating_sub(3);
             state.workspace_switcher.selected = state.workspace_switcher.scroll;
@@ -1725,7 +1754,121 @@ pub(crate) fn handle_workspace_switcher_mouse(
     }
 }
 
+fn handle_mobile_switch_drag(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    column: u16,
+    row: u16,
+) {
+    let Some(gesture) = state.workspace_switcher.mobile_switch_gesture.clone() else {
+        return;
+    };
+
+    match gesture {
+        MobileSwitchGesture::AwaitingAnchor => {
+            if !rect_contains(state.workspace_switcher_body_rect(), column, row) {
+                return;
+            }
+            let rows = state.workspace_switcher_rows_from(terminal_runtimes);
+            let Some(anchor_target) = rows
+                .get(state.workspace_switcher.selected)
+                .map(|item| item.target.clone())
+            else {
+                state.workspace_switcher.mobile_switch_gesture = None;
+                return;
+            };
+            state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
+                anchor_row: row,
+                anchor_target,
+            });
+        }
+        MobileSwitchGesture::Anchored {
+            anchor_row,
+            anchor_target,
+        } => {
+            let rows = state.workspace_switcher_rows_from(terminal_runtimes);
+            let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target)
+            else {
+                reanchor_mobile_switch_gesture(state, terminal_runtimes, row, &rows);
+                return;
+            };
+            let steps = signed_row_displacement(row, anchor_row) / 2;
+            state.workspace_switcher.selected =
+                (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
+            settle_workspace_switcher_selection(state, terminal_runtimes);
+        }
+    }
+}
+
+fn finish_mobile_switch_gesture(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    row: u16,
+) {
+    let Some(gesture) = state.workspace_switcher.mobile_switch_gesture.take() else {
+        return;
+    };
+    let MobileSwitchGesture::Anchored {
+        anchor_row,
+        anchor_target,
+    } = gesture
+    else {
+        return;
+    };
+
+    let rows = state.workspace_switcher_rows_from(terminal_runtimes);
+    let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target) else {
+        state.clamp_workspace_switcher_selection_from(terminal_runtimes);
+        return;
+    };
+    let steps = signed_row_displacement(row, anchor_row) / 2;
+    state.workspace_switcher.selected =
+        (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
+    settle_workspace_switcher_selection(state, terminal_runtimes);
+    if steps != 0 {
+        state.accept_workspace_switcher_selection_from(terminal_runtimes);
+    }
+}
+
+fn reanchor_mobile_switch_gesture(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    row: u16,
+    rows: &[WorkspaceSwitcherRow],
+) {
+    let Some(item) = rows.get(
+        state
+            .workspace_switcher
+            .selected
+            .min(rows.len().saturating_sub(1)),
+    ) else {
+        state.workspace_switcher.mobile_switch_gesture = None;
+        state.clamp_workspace_switcher_selection_from(terminal_runtimes);
+        return;
+    };
+    state.workspace_switcher.selected = state.workspace_switcher.selected.min(rows.len() - 1);
+    state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
+        anchor_row: row,
+        anchor_target: item.target.clone(),
+    });
+    settle_workspace_switcher_selection(state, terminal_runtimes);
+}
+
+fn settle_workspace_switcher_selection(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) {
+    state.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
+    state.refresh_workspace_switcher_preview_from(terminal_runtimes);
+    state.capture_workspace_switcher_target_from(terminal_runtimes);
+}
+
+fn signed_row_displacement(row: u16, anchor_row: u16) -> isize {
+    row as isize - anchor_row as isize
+}
+
 fn close_workspace_switcher(state: &mut AppState) {
+    state.workspace_switcher.mobile_switch_gesture = None;
     state.workspace_switcher.active = false;
     state.workspace_switcher.selected_target = None;
     state.workspace_switcher.branch_refresh_requested = false;
@@ -4389,6 +4532,26 @@ mod tests {
             !accepted,
             "Shift release should not trigger quick-switch accept"
         );
+    }
+
+    #[test]
+    fn quick_switch_bound_modifier_release_still_accepts_selection() {
+        let (mut state, terminal_runtimes, _) = state_with_quick_switch_binding("ctrl+tab", None);
+        state.move_workspace_switcher_selection_from(&terminal_runtimes, 1);
+        let expected = selected_workspace_switcher_ws_idx(&state, &terminal_runtimes);
+
+        let accepted = handle_workspace_switcher_key_release(
+            &mut state,
+            &terminal_runtimes,
+            TerminalKey::new(
+                KeyCode::Modifier(ModifierKeyCode::LeftControl),
+                KeyModifiers::empty(),
+            ),
+        );
+
+        assert!(accepted);
+        assert_eq!(state.active, Some(expected));
+        assert!(!state.workspace_switcher.active);
     }
 
     #[test]
