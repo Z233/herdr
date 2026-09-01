@@ -80,17 +80,6 @@ herdr server stop
 
 Herdr has terminal mode, prefix mode, and navigate mode.
 
-Terminal mode sends keys to the focused pane. Prefix mode waits for one Herdr action after the prefix key. Navigate mode is the persistent sidebar navigation surface.
+Terminal mode sends keys to the focused pane. Prefix mode waits for one Herdr action after the prefix key. Navigate mode is the persistent workspace navigation surface.
 
 Press the prefix key, default `ctrl+b`, then an action key such as `c` for a new tab or `w` for workspace navigation. See [Keyboard](/docs/keyboard/) if the prefix idea is new to you.
-
-## Mouse UI
-
-Herdr is mouse-native. You can click panes, tabs, workspaces, and agents. You can drag split borders, select text, and use right-click menus.
-
-If you prefer keyboard-only control, or you want Herdr to stop capturing mouse input, disable mouse capture:
-
-```toml
-[ui]
-mouse_capture = false
-```

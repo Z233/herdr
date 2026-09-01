@@ -2,12 +2,6 @@
 
 ## Unreleased
 
-### Added
-- Workspace Switcher now shows repository-qualified labels (`repo / label`) for Herdr-managed linked worktrees.
-
-### Changed
-- The mobile Workspace Switcher now keeps the two-line workspace and agent status header visible while open.
-
 ## [0.8.2] - 2026-08-19
 
 ### Added
@@ -432,12 +426,6 @@ This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature r
 - Linux clipboard image reads now validate image payloads before accepting them, preventing malformed clipboard data from reaching pane image paste flows. (#534)
 
 ### Added
-- Added native prefix chord keybindings such as `prefix+w+h`, with configurable `keys.chord_timeout_ms` and longer-match behavior for overlapping bindings.
-- Added directional pane opening at `prefix+w+h/j/k/l` for opening a new pane left/down/up/right of the focused pane.
-- Added an in-app workspace picker at `prefix+w+w` with fuzzy name search and a focused-pane preview for the selected workspace.
-- Added `ctrl+tab` as an MRU quick workspace switcher with release-to-select, expandable tab rows, focused-pane previews, and optional in-overlay search.
-- Added `keys.quick_switch_workspace_backward` and made quick-switch cycle/follow-up keys derive from the configured `quick_switch_workspace` binding, enabling shortcuts such as `cmd+tab` and `cmd+f13`.
-- Added EasyMotion-style copy-mode jumps: press `s`, type two target characters, then press a visible label to jump the cursor to that match.
 - Added remote auto-updates for agent detection manifests, with per-agent validation, local override precedence, `herdr server agent-manifests` diagnostics, and explain output showing remote manifest status.
 - Added `herdr server update-agent-manifests` to fetch remote agent detection manifests immediately, reload the running server, and print the updated manifest status.
 - Added `herdr agent explain` to show the manifest source, matched rule, evaluated matcher and region evidence, visible evidence flags, skipped-update reason, and idle fallback reason for live panes or saved screen fixtures.

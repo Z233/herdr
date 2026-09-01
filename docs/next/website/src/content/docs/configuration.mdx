@@ -106,9 +106,7 @@ Worktree actions are available from Git workspace rows. `New worktree` creates a
 
 Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
 
-In the workspace switcher, each managed linked worktree shows its repository name followed by the workspace label (for example, `herdr / issue-137`). Search matches both repository names and workspace labels. Parent workspaces, standalone workspaces, and unmanaged directories are unaffected.
-
-Deleting a worktree checkout is explicit. Use `Delete worktree checkout...` on a grouped child workspace to run `git worktree remove`. Herdr first asks Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
+To delete a worktree checkout, use `Delete worktree checkout...` on a grouped child workspace. Herdr runs `git worktree remove`, first asking Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
 
 ## Remote attach
 
@@ -151,11 +149,7 @@ A binding may also be an array when one action needs multiple shortcuts:
 next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 
-`workspace_switcher` opens a searchable workspace list with a preview of the selected workspace's focused pane. With a direct modifier binding, hold the shortcut, press the same key again to cycle forward, press it with Shift to cycle backward, and release the shortcut modifier to switch; press `left` to collapse or `right` to expand Tab rows (`h`/`l` are aliases), and press `s` to search. These commands also work while you hold the shortcut modifier. Set `workspace_switcher_backward` only when you want a different backward cycle key than the derived Shift shortcut.
-
-Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or use an explicit modified chord when you intentionally want a direct shortcut.
-
-For example, tmux-style one-keystroke pane resizing without entering resize mode:
+Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or use an explicit modified chord when you intentionally want a direct shortcut. For example, tmux-style one-keystroke pane resizing without entering resize mode:
 
 ```toml
 [keys]
