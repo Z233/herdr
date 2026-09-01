@@ -1816,12 +1816,15 @@ fn finish_mobile_switch_gesture(
         return;
     };
 
+    let steps = signed_row_displacement(row, anchor_row) / 2;
     let rows = state.workspace_switcher_rows_from(terminal_runtimes);
     let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target) else {
-        state.clamp_workspace_switcher_selection_from(terminal_runtimes);
+        state.reanchor_workspace_switcher_selection_from(terminal_runtimes);
+        if steps != 0 && state.workspace_switcher.selected_target.is_some() {
+            state.accept_workspace_switcher_selection_from(terminal_runtimes);
+        }
         return;
     };
-    let steps = signed_row_displacement(row, anchor_row) / 2;
     state.workspace_switcher.selected =
         (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
     settle_workspace_switcher_selection(state, terminal_runtimes);

@@ -4737,6 +4737,53 @@ mod tests {
     }
 
     #[test]
+    fn mobile_switch_release_handles_removed_anchor_for_zero_and_nonzero_steps() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+
+        app.state.workspaces.remove(0);
+        let expected_id = app.state.workspaces[0].id.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 2,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[app.state.active.unwrap()].id,
+            expected_id
+        );
+        assert!(!app.state.workspace_switcher.active);
+
+        let mut zero = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut zero);
+        let body = zero.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        zero.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        zero.state.workspaces.remove(0);
+        let expected_id = zero.state.workspaces[0].id.clone();
+        zero.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 1,
+        ));
+
+        assert!(zero.state.workspace_switcher.active);
+        assert_eq!(selected_workspace_id(&zero), expected_id);
+    }
+
+    #[test]
     fn desktop_and_search_switcher_hover_behavior_is_unchanged() {
         let mut desktop = mobile_switcher_test_app(3);
         crate::ui::compute_view(&mut desktop.state, Rect::new(0, 0, 120, 40));
