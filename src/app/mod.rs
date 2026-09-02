@@ -1858,6 +1858,7 @@ impl App {
                 });
             if matches.is_some() {
                 self.state.switch_workspace(*ws_idx);
+                self.state.workspace_switcher.mobile_switch_gesture = None;
                 self.state.workspace_switcher.active = false;
                 self.state.mode = Mode::Terminal;
                 return true;
@@ -1875,6 +1876,7 @@ impl App {
         create_succeeded: bool,
     ) {
         if create_succeeded {
+            self.state.workspace_switcher.mobile_switch_gesture = None;
             self.state.workspace_switcher.active = false;
             self.state.mode = Mode::Terminal;
         } else {

@@ -1170,6 +1170,8 @@ impl AppState {
             // retained Mobile Navigation Panel is never reached.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_switch {
                 self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
+                self.workspace_switcher.mobile_switch_gesture =
+                    Some(crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor);
             }
             return MobileMouseResult::Consumed;
         }
@@ -1184,6 +1186,8 @@ impl AppState {
 
         if on_switch {
             self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
+            self.workspace_switcher.mobile_switch_gesture =
+                Some(crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor);
             return MobileMouseResult::Consumed;
         }
 
@@ -4362,6 +4366,442 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 0);
+    }
+
+    fn mobile_switcher_test_app(workspace_count: usize) -> crate::app::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = (0..workspace_count)
+            .map(|idx| Workspace::test_new(&format!("ws-{idx}")))
+            .collect();
+        app.state.ensure_test_terminals();
+        app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
+        app.state.selected = 0;
+        app.state.mode = if app.state.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        app
+    }
+
+    fn open_mobile_switcher_with_mouse(app: &mut crate::app::App) {
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+    }
+
+    fn switcher_row_point(app: &crate::app::App, index: usize) -> (u16, u16) {
+        let body = app.state.workspace_switcher_body_rect();
+        (body.y..body.y + body.height)
+            .find_map(|row| {
+                (app.state.workspace_switcher_row_index_at_from(
+                    &app.terminal_runtimes,
+                    body.x + 1,
+                    row,
+                ) == Some(index))
+                .then_some((body.x + 1, row))
+            })
+            .expect("switcher row should be visible")
+    }
+
+    fn selected_workspace_id(app: &crate::app::App) -> String {
+        let rows = app
+            .state
+            .workspace_switcher_rows_from(&app.terminal_runtimes);
+        match &rows[app.state.workspace_switcher.selected].target {
+            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
+                workspace_id.clone()
+            }
+            target => panic!("expected workspace target, got {target:?}"),
+        }
+    }
+
+    #[test]
+    fn mobile_switch_down_opens_at_current_and_tap_release_keeps_switcher_open() {
+        let mut app = mobile_switcher_test_app(3);
+        let current_id = app.state.workspaces[0].id.clone();
+
+        open_mobile_switcher_with_mouse(&mut app);
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(selected_workspace_id(&app), current_id);
+
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_drag_uses_fixed_two_row_steps_and_dead_zone_release() {
+        let mut app = mobile_switcher_test_app(6);
+        open_mobile_switcher_with_mouse(&mut app);
+        let initial = app.state.workspace_switcher.selected;
+        let body = app.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 4;
+        let column = body.x + 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row - 1,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+
+        for (offset, expected) in [(1, initial), (2, initial + 1), (4, initial + 2)] {
+            app.handle_mouse(mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                column,
+                anchor_row + offset,
+            ));
+            assert_eq!(app.state.workspace_switcher.selected, expected);
+        }
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, initial + 1);
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 1,
+        ));
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_nonzero_release_accepts_and_clamps_at_both_boundaries() {
+        let mut app = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        let target = app
+            .state
+            .workspace_switcher_rows_from(&app.terminal_runtimes)[1]
+            .target
+            .clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 2,
+        ));
+        let accepted_id = match target {
+            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
+                workspace_id
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            app.state.workspaces[app.state.active.unwrap()].id,
+            accepted_id
+        );
+        assert!(!app.state.workspace_switcher.active);
+
+        let mut bottom = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut bottom);
+        let body = bottom.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 1;
+        let last_id = bottom
+            .state
+            .workspace_switcher_rows_from(&bottom.terminal_runtimes)
+            .last()
+            .map(|row| match &row.target {
+                crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace {
+                    workspace_id,
+                } => workspace_id.clone(),
+                _ => unreachable!(),
+            })
+            .unwrap();
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 10,
+        ));
+        assert_eq!(
+            bottom.state.workspaces[bottom.state.active.unwrap()].id,
+            last_id
+        );
+
+        let mut top = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut top);
+        for _ in 0..3 {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut top.state,
+                &top.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        let first_id = top
+            .state
+            .workspace_switcher_rows_from(&top.terminal_runtimes)[0]
+            .target
+            .clone();
+        let body = top.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 8;
+        top.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        let header = top.state.workspace_switcher_top_bar_rect();
+        top.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            header.x + 1,
+            header.y,
+        ));
+        assert_eq!(top.state.workspace_switcher.selected, 0);
+        top.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            header.x + 1,
+            header.y,
+        ));
+        let first_id = match first_id {
+            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
+                workspace_id
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(top.state.workspaces[top.state.active.unwrap()].id, first_id);
+        assert!(!top.state.workspace_switcher.active);
+    }
+
+    #[test]
+    fn mobile_switch_ignores_hover_until_gesture_cancels() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let initial = app.state.workspace_switcher.selected;
+        let (column, row) = switcher_row_point(&app, initial + 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(app.state.workspace_switcher.selected, initial + 1);
+    }
+
+    #[test]
+    fn mobile_switch_gesture_cancels_on_search_desktop_and_reopen() {
+        let mut search = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut search);
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut search.state,
+            &search.terminal_runtimes,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()),
+        );
+        assert_eq!(
+            search.state.workspace_switcher.mode,
+            crate::ui::workspace_switcher::WorkspaceSwitcherMode::Search
+        );
+        search.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 1, 10));
+        assert!(search.state.workspace_switcher.active);
+
+        let mut desktop = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut desktop);
+        crate::ui::compute_view(&mut desktop.state, Rect::new(0, 0, 120, 40));
+        desktop.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 50, 20));
+        assert_eq!(desktop.state.view.layout, ViewLayout::Desktop);
+        assert!(desktop.state.workspace_switcher.active);
+        assert_eq!(desktop.state.active, Some(0));
+
+        let mut reopened = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut reopened);
+        reopened
+            .state
+            .open_workspace_switcher_at_active_workspace_from(&reopened.terminal_runtimes);
+        reopened.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 1, 10));
+        assert!(reopened.state.workspace_switcher.active);
+        assert_eq!(reopened.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_gesture_tracks_stable_targets_and_cancels_when_empty() {
+        let mut reordered = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut reordered);
+        for _ in 0..2 {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut reordered.state,
+                &reordered.terminal_runtimes,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+            );
+        }
+        let body = reordered.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 6;
+        reordered.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        let ids = reordered
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect::<Vec<_>>();
+        reordered.state.workspace_mru = vec![
+            ids[0].clone(),
+            ids[2].clone(),
+            ids[1].clone(),
+            ids[3].clone(),
+        ];
+        reordered.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 2,
+        ));
+        assert_eq!(
+            reordered.state.workspaces[reordered.state.active.unwrap()].id,
+            ids[1]
+        );
+
+        let mut removed = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut removed);
+        let body = removed.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        removed.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        removed.state.workspaces.remove(0);
+        removed.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 2,
+        ));
+        assert!(removed.state.workspace_switcher.active);
+        removed.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 4,
+        ));
+        removed.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 4,
+        ));
+        assert!(!removed.state.workspace_switcher.active);
+
+        let mut empty = mobile_switcher_test_app(1);
+        open_mobile_switcher_with_mouse(&mut empty);
+        let body = empty.state.workspace_switcher_body_rect();
+        empty.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            body.y + 1,
+        ));
+        empty.state.workspaces.clear();
+        empty.state.active = None;
+        empty.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            body.y + 3,
+        ));
+        empty.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            body.y + 3,
+        ));
+        assert!(empty.state.workspace_switcher.active);
+        assert!(empty.state.active.is_none());
+    }
+
+    #[test]
+    fn mobile_switch_release_handles_removed_anchor_for_zero_and_nonzero_steps() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+
+        app.state.workspaces.remove(0);
+        let expected_id = app.state.workspaces[0].id.clone();
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 2,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[app.state.active.unwrap()].id,
+            expected_id
+        );
+        assert!(!app.state.workspace_switcher.active);
+
+        let mut zero = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut zero);
+        let body = zero.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        zero.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 1,
+            anchor_row,
+        ));
+        zero.state.workspaces.remove(0);
+        let expected_id = zero.state.workspaces[0].id.clone();
+        zero.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 1,
+            anchor_row + 1,
+        ));
+
+        assert!(zero.state.workspace_switcher.active);
+        assert_eq!(selected_workspace_id(&zero), expected_id);
+    }
+
+    #[test]
+    fn desktop_and_search_switcher_hover_behavior_is_unchanged() {
+        let mut desktop = mobile_switcher_test_app(3);
+        crate::ui::compute_view(&mut desktop.state, Rect::new(0, 0, 120, 40));
+        desktop
+            .state
+            .open_workspace_switcher_at_active_workspace_from(&desktop.terminal_runtimes);
+        let (column, row) = switcher_row_point(&desktop, 1);
+        desktop.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(desktop.state.workspace_switcher.selected, 1);
+
+        let mut search = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut search);
+        search
+            .state
+            .enter_workspace_switcher_search_from(&search.terminal_runtimes);
+        let (column, row) = switcher_row_point(&search, 1);
+        search.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(search.state.workspace_switcher.selected, 1);
     }
 
     #[test]

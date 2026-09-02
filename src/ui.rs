@@ -235,6 +235,8 @@ fn compute_view_internal(
         return;
     }
 
+    app.workspace_switcher.mobile_switch_gesture = None;
+
     let sidebar_w = if app.sidebar_collapsed {
         match app.sidebar_collapsed_mode {
             crate::config::SidebarCollapsedModeConfig::Compact => COLLAPSED_WIDTH,
