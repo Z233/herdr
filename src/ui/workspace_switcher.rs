@@ -273,6 +273,7 @@ pub(crate) enum MobileSwitchGesture {
     Anchored {
         anchor_row: u16,
         anchor_target: WorkspaceSwitcherTarget,
+        had_effective_movement: bool,
     },
 }
 
@@ -1780,19 +1781,33 @@ fn handle_mobile_switch_drag(
             state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
                 anchor_row: row,
                 anchor_target,
+                had_effective_movement: false,
             });
         }
         MobileSwitchGesture::Anchored {
             anchor_row,
             anchor_target,
+            had_effective_movement,
         } => {
             let rows = state.workspace_switcher_rows_from(terminal_runtimes);
             let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target)
             else {
-                reanchor_mobile_switch_gesture(state, terminal_runtimes, row, &rows);
+                let steps = signed_row_displacement(row, anchor_row) / 2;
+                reanchor_mobile_switch_gesture(
+                    state,
+                    terminal_runtimes,
+                    row,
+                    &rows,
+                    had_effective_movement || steps != 0,
+                );
                 return;
             };
             let steps = signed_row_displacement(row, anchor_row) / 2;
+            state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
+                anchor_row,
+                anchor_target,
+                had_effective_movement: had_effective_movement || steps != 0,
+            });
             state.workspace_switcher.selected =
                 (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
             settle_workspace_switcher_selection(state, terminal_runtimes);
@@ -1811,16 +1826,18 @@ fn finish_mobile_switch_gesture(
     let MobileSwitchGesture::Anchored {
         anchor_row,
         anchor_target,
+        had_effective_movement,
     } = gesture
     else {
         return;
     };
 
     let steps = signed_row_displacement(row, anchor_row) / 2;
+    let should_accept = had_effective_movement || steps != 0;
     let rows = state.workspace_switcher_rows_from(terminal_runtimes);
     let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target) else {
         state.reanchor_workspace_switcher_selection_from(terminal_runtimes);
-        if steps != 0 && state.workspace_switcher.selected_target.is_some() {
+        if should_accept && state.workspace_switcher.selected_target.is_some() {
             state.accept_workspace_switcher_selection_from(terminal_runtimes);
         }
         return;
@@ -1828,7 +1845,7 @@ fn finish_mobile_switch_gesture(
     state.workspace_switcher.selected =
         (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
     settle_workspace_switcher_selection(state, terminal_runtimes);
-    if steps != 0 {
+    if should_accept {
         state.accept_workspace_switcher_selection_from(terminal_runtimes);
     }
 }
@@ -1838,6 +1855,7 @@ fn reanchor_mobile_switch_gesture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     row: u16,
     rows: &[WorkspaceSwitcherRow],
+    had_effective_movement: bool,
 ) {
     let Some(item) = rows.get(
         state
@@ -1853,6 +1871,7 @@ fn reanchor_mobile_switch_gesture(
     state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
         anchor_row: row,
         anchor_target: item.target.clone(),
+        had_effective_movement,
     });
     settle_workspace_switcher_selection(state, terminal_runtimes);
 }

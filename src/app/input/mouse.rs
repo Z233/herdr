@@ -4442,7 +4442,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switch_drag_uses_fixed_two_row_steps_and_dead_zone_release() {
+    fn mobile_switch_drag_accepts_initial_item_after_moving_away_and_returning() {
         let mut app = mobile_switcher_test_app(6);
         open_mobile_switcher_with_mouse(&mut app);
         let initial = app.state.workspace_switcher.selected;
@@ -4478,6 +4478,36 @@ mod tests {
             anchor_row + 2,
         ));
         assert_eq!(app.state.workspace_switcher.selected, initial + 1);
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 1,
+        ));
+
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_dead_zone_without_effective_movement_stays_open() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let initial = app.state.workspace_switcher.selected;
+        let body = app.state.workspace_switcher_body_rect();
+        let anchor_row = body.y + 2;
+        let column = body.x + 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 1,
+        ));
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
             column,
