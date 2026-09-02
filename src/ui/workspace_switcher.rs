@@ -1693,9 +1693,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
     // behind on the shared AppState, so it is not an authoritative fact. The
     // authoritative Mobile→Desktop layout transition cancels the gesture in
     // `compute_view_internal` instead.
-    if state.workspace_switcher.mobile_switch_gesture.is_some()
-        && state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch
-    {
+    if state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch {
         state.workspace_switcher.mobile_switch_gesture = None;
     }
 
