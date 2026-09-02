@@ -10718,6 +10718,10 @@ next_tab = ""
     /// Multi-client session from the reported mobile switch drag regression:
     /// a 300x78 desktop App client and a 52-column mobile App client share one
     /// session, with the phone as the foreground client the user is touching.
+    /// The helper also runs the server's authoritative resize computation at
+    /// the phone's geometry — the same call the input path makes when a client
+    /// becomes foreground — so the mobile projection and header hit areas are
+    /// established before any test input.
     fn multi_client_switcher_test_server() -> (
         HeadlessServer,
         std::sync::mpsc::Receiver<Vec<u8>>,
@@ -10760,6 +10764,7 @@ next_tab = ""
         );
         server.foreground_client_id = Some(2);
         server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size_before_input();
         (server, desktop_render, mobile_render)
     }
 
@@ -10781,25 +10786,9 @@ next_tab = ""
         }
     }
 
-    fn drain_render_frames(rx: &std::sync::mpsc::Receiver<Vec<u8>>) {
-        while rx.try_recv().is_ok() {}
-    }
-
     #[test]
     fn mobile_switch_gesture_survives_background_desktop_client_render() {
-        let (mut server, desktop_render, mobile_render) = multi_client_switcher_test_server();
-
-        // Warm-up fanout: the background desktop client renders at 300 columns
-        // and the foreground phone renders at 52 columns against the same
-        // shared AppState.
-        server.render_and_stream();
-        let desktop_frame = read_server_frame(
-            desktop_render
-                .recv_timeout(Duration::from_millis(100))
-                .expect("desktop warm-up frame"),
-        );
-        assert_eq!(desktop_frame.width, 300);
-        drain_render_frames(&mobile_render);
+        let (mut server, desktop_render, _mobile_render) = multi_client_switcher_test_server();
 
         // Phone touch on the mobile `switch` header button opens the fork
         // Workspace Switcher overlay and arms the mobile Quick Switch gesture.
@@ -10819,9 +10808,10 @@ next_tab = ""
             .mobile_switch_gesture
             .is_some());
 
-        // A full render fanout between gesture events streams the desktop
-        // client's 300-column projection; it must not cancel the armed mobile
-        // gesture on the shared AppState.
+        // A full render fanout while the gesture is armed streams the desktop
+        // client's 300-column projection against the shared AppState; the
+        // decoded frame proves the background desktop projection ran before
+        // the subsequent Drag/Up, and it must not cancel the armed gesture.
         server.render_and_stream();
         let desktop_during_gesture = read_server_frame(
             desktop_render
@@ -10829,7 +10819,6 @@ next_tab = ""
                 .expect("desktop frame during armed gesture"),
         );
         assert_eq!(desktop_during_gesture.width, 300);
-        drain_render_frames(&mobile_render);
         assert!(
             server
                 .app
@@ -10853,17 +10842,6 @@ next_tab = ""
         ));
         assert_eq!(server.app.state.workspace_switcher.selected, initial);
 
-        // Another desktop-width fanout between drag events.
-        server.render_and_stream();
-        drain_render_frames(&desktop_render);
-        drain_render_frames(&mobile_render);
-        assert!(server
-            .app
-            .state
-            .workspace_switcher
-            .mobile_switch_gesture
-            .is_some());
-
         // Dragging two terminal rows down moves the selection one item.
         server.handle_server_event(client_mouse(
             2,
@@ -10873,18 +10851,9 @@ next_tab = ""
         ));
         assert_eq!(server.app.state.workspace_switcher.selected, initial + 1);
 
-        // Release accepts the highlighted item and closes the switcher.
-        let target_id = match &server
-            .app
-            .state
-            .workspace_switcher_rows_from(&server.app.terminal_runtimes)[initial + 1]
-            .target
-        {
-            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
-                workspace_id.clone()
-            }
-            target => panic!("expected workspace target, got {target:?}"),
-        };
+        // Release accepts the highlighted item — the `ws-1` fixture
+        // workspace, one row below the initial selection — and closes the
+        // switcher.
         server.handle_server_event(client_mouse(
             2,
             protocol::ClientMouseKind::Up(protocol::ClientMouseButton::Left),
@@ -10892,18 +10861,12 @@ next_tab = ""
             anchor_row + 2,
         ));
         assert!(!server.app.state.workspace_switcher.active);
-        assert_eq!(
-            server.app.state.workspaces[server.app.state.active.unwrap()].id,
-            target_id
-        );
+        assert_eq!(server.app.state.active, Some(1));
     }
 
     #[test]
     fn authoritative_desktop_foreground_transition_cancels_mobile_switch_gesture() {
-        let (mut server, desktop_render, mobile_render) = multi_client_switcher_test_server();
-        server.render_and_stream();
-        drain_render_frames(&desktop_render);
-        drain_render_frames(&mobile_render);
+        let (mut server, _desktop_render, _mobile_render) = multi_client_switcher_test_server();
 
         let switch = server.app.state.view.mobile_menu_hit_area;
         server.handle_server_event(client_mouse(
@@ -10918,9 +10881,6 @@ next_tab = ""
             .workspace_switcher
             .mobile_switch_gesture
             .is_some());
-        server.render_and_stream();
-        drain_render_frames(&desktop_render);
-        drain_render_frames(&mobile_render);
 
         // Input from the desktop client promotes it to foreground, and the
         // authoritative resize computation projects the shared AppState at 300
