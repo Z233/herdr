@@ -10715,6 +10715,245 @@ next_tab = ""
         );
     }
 
+    /// Multi-client session from the reported mobile switch drag regression:
+    /// a 300x78 desktop App client and a 52-column mobile App client share one
+    /// session, with the phone as the foreground client the user is touching.
+    fn multi_client_switcher_test_server() -> (
+        HeadlessServer,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = (0..3)
+            .map(|idx| crate::workspace::Workspace::test_new(&format!("ws-{idx}")))
+            .collect();
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+
+        let (desktop_writer, _desktop_control, desktop_render) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (300, 78),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                10,
+                RenderEncoding::SemanticFrame,
+                Some(desktop_writer),
+            ),
+        );
+        let (mobile_writer, _mobile_control, mobile_render) = test_client_writer();
+        server.clients.insert(
+            2,
+            ClientConnection::new(
+                (52, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                20,
+                RenderEncoding::SemanticFrame,
+                Some(mobile_writer),
+            ),
+        );
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+        (server, desktop_render, mobile_render)
+    }
+
+    /// Structured client mouse input through the real server input path.
+    fn client_mouse(
+        client_id: u64,
+        kind: protocol::ClientMouseKind,
+        column: u16,
+        row: u16,
+    ) -> ServerEvent {
+        ServerEvent::ClientInputEvents {
+            client_id,
+            events: vec![protocol::ClientInputEvent::Mouse {
+                kind,
+                column,
+                row,
+                modifiers: 0,
+            }],
+        }
+    }
+
+    fn drain_render_frames(rx: &std::sync::mpsc::Receiver<Vec<u8>>) {
+        while rx.try_recv().is_ok() {}
+    }
+
+    #[test]
+    fn mobile_switch_gesture_survives_background_desktop_client_render() {
+        let (mut server, desktop_render, mobile_render) = multi_client_switcher_test_server();
+
+        // Warm-up fanout: the background desktop client renders at 300 columns
+        // and the foreground phone renders at 52 columns against the same
+        // shared AppState.
+        server.render_and_stream();
+        let desktop_frame = read_server_frame(
+            desktop_render
+                .recv_timeout(Duration::from_millis(100))
+                .expect("desktop warm-up frame"),
+        );
+        assert_eq!(desktop_frame.width, 300);
+        drain_render_frames(&mobile_render);
+
+        // Phone touch on the mobile `switch` header button opens the fork
+        // Workspace Switcher overlay and arms the mobile Quick Switch gesture.
+        let switch = server.app.state.view.mobile_menu_hit_area;
+        assert!(switch.width > 0, "mobile header projection must exist");
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Down(protocol::ClientMouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert!(server.app.state.workspace_switcher.active);
+        assert!(server
+            .app
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_some());
+
+        // A full render fanout between gesture events streams the desktop
+        // client's 300-column projection; it must not cancel the armed mobile
+        // gesture on the shared AppState.
+        server.render_and_stream();
+        let desktop_during_gesture = read_server_frame(
+            desktop_render
+                .recv_timeout(Duration::from_millis(100))
+                .expect("desktop frame during armed gesture"),
+        );
+        assert_eq!(desktop_during_gesture.width, 300);
+        drain_render_frames(&mobile_render);
+        assert!(
+            server
+                .app
+                .state
+                .workspace_switcher
+                .mobile_switch_gesture
+                .is_some(),
+            "background desktop client projection must not cancel the mobile gesture"
+        );
+
+        // First body drag anchors without moving the selection.
+        let body = server.app.state.workspace_switcher_body_rect();
+        let column = body.x + 1;
+        let anchor_row = body.y + 2;
+        let initial = server.app.state.workspace_switcher.selected;
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Drag(protocol::ClientMouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        assert_eq!(server.app.state.workspace_switcher.selected, initial);
+
+        // Another desktop-width fanout between drag events.
+        server.render_and_stream();
+        drain_render_frames(&desktop_render);
+        drain_render_frames(&mobile_render);
+        assert!(server
+            .app
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_some());
+
+        // Dragging two terminal rows down moves the selection one item.
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Drag(protocol::ClientMouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(server.app.state.workspace_switcher.selected, initial + 1);
+
+        // Release accepts the highlighted item and closes the switcher.
+        let target_id = match &server
+            .app
+            .state
+            .workspace_switcher_rows_from(&server.app.terminal_runtimes)[initial + 1]
+            .target
+        {
+            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
+                workspace_id.clone()
+            }
+            target => panic!("expected workspace target, got {target:?}"),
+        };
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Up(protocol::ClientMouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(!server.app.state.workspace_switcher.active);
+        assert_eq!(
+            server.app.state.workspaces[server.app.state.active.unwrap()].id,
+            target_id
+        );
+    }
+
+    #[test]
+    fn authoritative_desktop_foreground_transition_cancels_mobile_switch_gesture() {
+        let (mut server, desktop_render, mobile_render) = multi_client_switcher_test_server();
+        server.render_and_stream();
+        drain_render_frames(&desktop_render);
+        drain_render_frames(&mobile_render);
+
+        let switch = server.app.state.view.mobile_menu_hit_area;
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Down(protocol::ClientMouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert!(server
+            .app
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_some());
+        server.render_and_stream();
+        drain_render_frames(&desktop_render);
+        drain_render_frames(&mobile_render);
+
+        // Input from the desktop client promotes it to foreground, and the
+        // authoritative resize computation projects the shared AppState at 300
+        // columns: a true Mobile→Desktop transition of the active interaction
+        // layout, which must cancel the mobile gesture.
+        server.handle_server_event(client_mouse(1, protocol::ClientMouseKind::Moved, 299, 77));
+        assert_eq!(server.foreground_client_id, Some(1));
+        assert_eq!(
+            server.app.state.view.layout,
+            crate::app::state::ViewLayout::Desktop
+        );
+        assert!(
+            server
+                .app
+                .state
+                .workspace_switcher
+                .mobile_switch_gesture
+                .is_none(),
+            "authoritative foreground desktop transition must cancel the gesture"
+        );
+
+        // The phone's stale release must not accept a target afterwards: the
+        // switcher stays open and the active workspace is unchanged.
+        server.handle_server_event(client_mouse(
+            2,
+            protocol::ClientMouseKind::Up(protocol::ClientMouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        assert!(server.app.state.workspace_switcher.active);
+        assert_eq!(server.app.state.active, Some(0));
+    }
+
     #[tokio::test]
     async fn popup_forces_host_mouse_capture_for_headless_client() {
         let mut server = test_headless_server();
