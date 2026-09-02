@@ -1687,10 +1687,13 @@ pub(crate) fn handle_workspace_switcher_mouse(
     terminal_runtimes: &TerminalRuntimeRegistry,
     mouse: MouseEvent,
 ) {
-    if state.workspace_switcher.mobile_switch_gesture.is_some()
-        && (state.view.layout != ViewLayout::Mobile
-            || state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch)
-    {
+    // Cancel a stale gesture only on a semantic transition (Search mode).
+    // `state.view.layout` is deliberately not consulted here: it is a render
+    // projection that a non-foreground client's desktop-width frame can leave
+    // behind on the shared AppState, so it is not an authoritative fact. The
+    // authoritative Mobile→Desktop layout transition cancels the gesture in
+    // `compute_view_internal` instead.
+    if state.workspace_switcher.mode != WorkspaceSwitcherMode::QuickSwitch {
         state.workspace_switcher.mobile_switch_gesture = None;
     }
 

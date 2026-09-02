@@ -235,7 +235,15 @@ fn compute_view_internal(
         return;
     }
 
-    app.workspace_switcher.mobile_switch_gesture = None;
+    // Only the authoritative (pane-resizing) computation may cancel a mobile
+    // gesture here. A non-foreground client's desktop-width projection shares
+    // this AppState, and canceling on it would kill a mobile Quick Switch drag
+    // in progress on the foreground client. An authoritative desktop-width
+    // computation is the true Mobile→Desktop layout transition of the active
+    // interaction, so it still cancels the gesture below.
+    if resize_panes {
+        app.workspace_switcher.mobile_switch_gesture = None;
+    }
 
     let sidebar_w = if app.sidebar_collapsed {
         match app.sidebar_collapsed_mode {

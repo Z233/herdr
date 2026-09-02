@@ -4675,6 +4675,61 @@ mod tests {
     }
 
     #[test]
+    fn mobile_switch_drag_survives_nonforeground_desktop_projection() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let initial = app.state.workspace_switcher.selected;
+        assert!(app.state.workspace_switcher.mobile_switch_gesture.is_some());
+
+        // A non-foreground desktop client's render projection shares this
+        // AppState: it recomputes the view at desktop width without resizing
+        // pane runtimes and must not cancel the armed mobile gesture.
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(app.state.view.layout, ViewLayout::Desktop);
+        assert!(
+            app.state.workspace_switcher.mobile_switch_gesture.is_some(),
+            "non-foreground desktop projection must not cancel the mobile gesture"
+        );
+
+        // Mouse input is hit-tested against the current projection, whatever
+        // client left it: the drag anchors on the first body drag and still
+        // follows the two-terminal-row rule even though view.layout was left
+        // Desktop by the non-foreground client.
+        let body = app.state.workspace_switcher_body_rect();
+        let column = body.x + 1;
+        let anchor_row = body.y + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, initial);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, initial + 1);
+
+        let target_id = selected_workspace_id(&app);
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(
+            app.state.workspaces[app.state.active.unwrap()].id,
+            target_id
+        );
+    }
+
+    #[test]
     fn mobile_switch_gesture_tracks_stable_targets_and_cancels_when_empty() {
         let mut reordered = mobile_switcher_test_app(4);
         open_mobile_switcher_with_mouse(&mut reordered);
