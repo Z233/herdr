@@ -2995,6 +2995,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonforeground_client_layout_does_not_clamp_copy_mode_selection() {
+        let (mut app, _) = app_with_copy_screen(b"the thing\r\nother th\r\n");
+        let foreground_area = Rect::new(0, 0, 80, 20);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            foreground_area,
+        );
+        app.state.enter_copy_mode_with_initial_action(
+            &app.terminal_runtimes,
+            Some(CopyModeInitialAction::EasyMotion),
+        );
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
+
+        let foreground_geometry = app.state.view.pane_infos[0].inner_rect;
+        let start = (
+            foreground_geometry.height.saturating_sub(2),
+            foreground_geometry.width.saturating_sub(2),
+        );
+        let expected_cursor = (
+            foreground_geometry.height.saturating_sub(1),
+            foreground_geometry.width.saturating_sub(1),
+        );
+        let copy_mode = app.state.copy_mode.as_mut().expect("copy mode");
+        copy_mode.cursor_row = start.0;
+        copy_mode.cursor_col = start.1;
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Down, KeyModifiers::empty()));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Right, KeyModifiers::empty()));
+        let expected_selection = app
+            .state
+            .selection
+            .as_ref()
+            .expect("selection")
+            .ordered_cells();
+
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 40, 10),
+        );
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app.state,
+            &app.terminal_runtimes,
+            foreground_area,
+        );
+
+        let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+        assert_eq!(
+            (copy_mode.cursor_row, copy_mode.cursor_col),
+            expected_cursor
+        );
+        assert_eq!(
+            app.state
+                .selection
+                .as_ref()
+                .expect("selection")
+                .ordered_cells(),
+            expected_selection
+        );
+        assert!(app.state.fork_features.frozen_copy_view.is_some());
+    }
+
+    #[tokio::test]
     async fn enter_copy_mode_with_scroll_up_initial_action_scrolls_up() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
