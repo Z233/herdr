@@ -232,6 +232,12 @@ fn compute_view_internal(
         if app.workspace_switcher.active {
             app.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
         }
+        if resize_panes {
+            // Only the authoritative (pane-resizing) mobile computation may
+            // refresh the bounds a foreground Quick Switch hold is checked
+            // against; non-foreground client projections never touch them.
+            app.refresh_mobile_switch_gesture_bounds();
+        }
         return;
     }
 

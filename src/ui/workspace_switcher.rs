@@ -269,12 +269,44 @@ pub(crate) enum WorkspaceSwitcherMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitchGesture {
-    AwaitingAnchor,
-    Anchored {
-        anchor_row: u16,
-        anchor_target: WorkspaceSwitcherTarget,
-        had_effective_movement: bool,
+    /// Pressed on the mobile `switch` header; waits for the first drag
+    /// coordinate inside the retained mobile body bounds.
+    AwaitingAnchor {
+        /// Body bounds of the authoritative mobile layout, captured when the
+        /// gesture is armed and refreshed only by pane-resizing (authoritative)
+        /// mobile view computations. A non-foreground client's projection can
+        /// replace `state.view`, so gesture bounds checks must never read the
+        /// current projected body rect.
+        bounds: Rect,
     },
+    Anchored(MobileSwitchAnchors),
+}
+
+/// Anchored mobile Quick Switch hold state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MobileSwitchAnchors {
+    /// Retained authoritative mobile body bounds (see
+    /// [`MobileSwitchGesture::AwaitingAnchor`]).
+    pub bounds: Rect,
+    /// Vertical selection anchor: the pointer row and the stable target
+    /// identity selected there. Kept absolute across vertical movement
+    /// (two terminal rows per item step); only a qualifying horizontal
+    /// command resets it.
+    pub anchor_row: u16,
+    pub anchor_target: WorkspaceSwitcherTarget,
+    /// The gesture's current selected destination. Updated on every
+    /// effective vertical selection change and after each horizontal
+    /// command. Its disappearance cancels the gesture; a deliberate
+    /// collapse records the parent here, so removing child rows never
+    /// counts as disappearance.
+    pub gesture_target: WorkspaceSwitcherTarget,
+    /// Direction baseline for horizontal-command detection. Reset to the
+    /// pointer after each effective vertical selection change and after
+    /// each horizontal command, so a long vertical drag never inflates
+    /// the required horizontal travel.
+    pub direction_col: u16,
+    pub direction_row: u16,
+    pub had_effective_movement: bool,
 }
 
 impl WorkspaceSwitcherMode {
@@ -474,6 +506,22 @@ impl AppState {
         self.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
         self.refresh_workspace_switcher_preview_from(terminal_runtimes);
         self.capture_workspace_switcher_target_from(terminal_runtimes);
+    }
+
+    /// Refresh the gesture's retained bounds from the current mobile body
+    /// geometry. Called only by the authoritative (pane-resizing) mobile view
+    /// computation, so a non-foreground client projection never rewrites the
+    /// bounds a foreground hold is checked against.
+    pub(crate) fn refresh_mobile_switch_gesture_bounds(&mut self) {
+        if self.workspace_switcher.mobile_switch_gesture.is_none() {
+            return;
+        }
+        let bounds = self.workspace_switcher_body_rect();
+        match &mut self.workspace_switcher.mobile_switch_gesture {
+            Some(MobileSwitchGesture::AwaitingAnchor { bounds: retained }) => *retained = bounds,
+            Some(MobileSwitchGesture::Anchored(anchors)) => anchors.bounds = bounds,
+            None => {}
+        }
     }
 
     #[cfg(test)]
@@ -1737,7 +1785,7 @@ pub(crate) fn handle_workspace_switcher_mouse(
             handle_mobile_switch_drag(state, terminal_runtimes, mouse.column, mouse.row);
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            finish_mobile_switch_gesture(state, terminal_runtimes, mouse.row);
+            finish_mobile_switch_gesture(state, terminal_runtimes, mouse.column, mouse.row);
         }
         MouseEventKind::ScrollUp => {
             state.workspace_switcher.scroll = state.workspace_switcher.scroll.saturating_sub(3);
@@ -1769,8 +1817,10 @@ fn handle_mobile_switch_drag(
     };
 
     match gesture {
-        MobileSwitchGesture::AwaitingAnchor => {
-            if !rect_contains(state.workspace_switcher_body_rect(), column, row) {
+        MobileSwitchGesture::AwaitingAnchor { bounds } => {
+            // Before the first entry into the list, outside coordinates are
+            // ignored: they neither anchor nor cancel the gesture.
+            if !rect_contains(bounds, column, row) {
                 return;
             }
             let rows = state.workspace_switcher_rows_from(terminal_runtimes);
@@ -1781,102 +1831,150 @@ fn handle_mobile_switch_drag(
                 state.workspace_switcher.mobile_switch_gesture = None;
                 return;
             };
-            state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
-                anchor_row: row,
-                anchor_target,
-                had_effective_movement: false,
-            });
+            state.workspace_switcher.mobile_switch_gesture =
+                Some(MobileSwitchGesture::Anchored(MobileSwitchAnchors {
+                    bounds,
+                    anchor_row: row,
+                    anchor_target: anchor_target.clone(),
+                    gesture_target: anchor_target,
+                    direction_col: column,
+                    direction_row: row,
+                    had_effective_movement: false,
+                }));
         }
-        MobileSwitchGesture::Anchored {
-            anchor_row,
-            anchor_target,
-            had_effective_movement,
-        } => {
-            let rows = state.workspace_switcher_rows_from(terminal_runtimes);
-            let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target)
-            else {
-                let steps = signed_row_displacement(row, anchor_row) / 2;
-                reanchor_mobile_switch_gesture(
-                    state,
-                    terminal_runtimes,
-                    row,
-                    &rows,
-                    had_effective_movement || steps != 0,
-                );
-                return;
-            };
-            let steps = signed_row_displacement(row, anchor_row) / 2;
-            state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
-                anchor_row,
-                anchor_target,
-                had_effective_movement: had_effective_movement || steps != 0,
-            });
-            state.workspace_switcher.selected =
-                (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
-            settle_workspace_switcher_selection(state, terminal_runtimes);
+        MobileSwitchGesture::Anchored(anchors) => {
+            state.workspace_switcher.mobile_switch_gesture =
+                apply_mobile_switch_event(state, terminal_runtimes, anchors, column, row)
+                    .map(MobileSwitchGesture::Anchored);
         }
     }
+}
+
+/// Axis classification of one pointer event against the direction baseline.
+enum MobileSwitchCommand {
+    Vertical,
+    Expand,
+    Collapse,
+}
+
+/// A horizontal command needs at least four columns of travel dominating the
+/// vertical travel (in terminal rows) by more than two to one; anything else
+/// stays vertical, so each event performs one axis only.
+fn mobile_switch_command(dx: isize, dy: isize) -> MobileSwitchCommand {
+    if dx.abs() >= 4 && dx.abs() > 2 * dy.abs() {
+        if dx > 0 {
+            MobileSwitchCommand::Expand
+        } else {
+            MobileSwitchCommand::Collapse
+        }
+    } else {
+        MobileSwitchCommand::Vertical
+    }
+}
+
+/// Apply one anchored pointer event — a drag, or the displacement evaluation
+/// of a release — to the switcher selection and expansion state. Returns the
+/// updated anchors, or `None` when the event cancels the gesture: the anchor
+/// or the gesture's current destination disappeared (checked before any
+/// selection re-anchoring could mask the deletion), or the pointer left the
+/// retained authoritative mobile body bounds. Cancellation performs no
+/// mutation, so later events cannot accept replacement targets.
+fn apply_mobile_switch_event(
+    state: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    anchors: MobileSwitchAnchors,
+    column: u16,
+    row: u16,
+) -> Option<MobileSwitchAnchors> {
+    let rows = state.workspace_switcher_rows_from(terminal_runtimes);
+    if !rows.iter().any(|item| item.target == anchors.anchor_target)
+        || !rows
+            .iter()
+            .any(|item| item.target == anchors.gesture_target)
+    {
+        return None;
+    }
+    if !rect_contains(anchors.bounds, column, row) {
+        return None;
+    }
+
+    let dx = column as isize - anchors.direction_col as isize;
+    let dy = row as isize - anchors.direction_row as isize;
+    let command = mobile_switch_command(dx, dy);
+    if !matches!(command, MobileSwitchCommand::Vertical) {
+        if matches!(command, MobileSwitchCommand::Expand) {
+            state.expand_selected_workspace_switcher_workspace_from(terminal_runtimes);
+        } else {
+            state.collapse_selected_workspace_switcher_workspace_from(terminal_runtimes);
+        }
+        // A qualifying horizontal command is effective even when the
+        // workspace was already expanded/collapsed: it resets both the
+        // vertical anchor and the direction baseline at the pointer and at
+        // the resulting destination. A deliberate collapse lands on the
+        // parent, so the removed child rows never count as a disappearance.
+        let rows_after = state.workspace_switcher_rows_from(terminal_runtimes);
+        let result_target = rows_after
+            .get(state.workspace_switcher.selected)
+            .map(|row| row.target.clone())?;
+        return Some(MobileSwitchAnchors {
+            anchor_row: row,
+            anchor_target: result_target.clone(),
+            gesture_target: result_target,
+            direction_col: column,
+            direction_row: row,
+            had_effective_movement: true,
+            ..anchors
+        });
+    }
+
+    let anchor_index = rows
+        .iter()
+        .position(|item| item.target == anchors.anchor_target)?;
+    let steps = signed_row_displacement(row, anchors.anchor_row) / 2;
+    let selected = (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
+    let selection_changed = selected != state.workspace_switcher.selected;
+    state.workspace_switcher.selected = selected;
+    settle_workspace_switcher_selection(state, terminal_runtimes);
+    let mut next = MobileSwitchAnchors {
+        had_effective_movement: anchors.had_effective_movement || steps != 0,
+        ..anchors
+    };
+    if selection_changed {
+        // Only the direction baseline and the gesture destination follow
+        // vertical selection changes; the vertical anchor keeps its original
+        // absolute two-row math.
+        next.direction_col = column;
+        next.direction_row = row;
+        next.gesture_target = rows[selected].target.clone();
+    }
+    Some(next)
 }
 
 fn finish_mobile_switch_gesture(
     state: &mut AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
+    column: u16,
     row: u16,
 ) {
     let Some(gesture) = state.workspace_switcher.mobile_switch_gesture.take() else {
         return;
     };
-    let MobileSwitchGesture::Anchored {
-        anchor_row,
-        anchor_target,
-        had_effective_movement,
-    } = gesture
+    let MobileSwitchGesture::Anchored(anchors) = gesture else {
+        // A mere press on the switch header, or a hold that never entered the
+        // list, leaves the switcher open without a selection change.
+        return;
+    };
+
+    // The release position is evaluated once through the same displacement
+    // rules, before final acceptance: it can still expand/collapse or move
+    // the selection, but bounds or identity cancellation accepts nothing.
+    let Some(anchors) = apply_mobile_switch_event(state, terminal_runtimes, anchors, column, row)
     else {
         return;
     };
-
-    let steps = signed_row_displacement(row, anchor_row) / 2;
-    let should_accept = had_effective_movement || steps != 0;
-    let rows = state.workspace_switcher_rows_from(terminal_runtimes);
-    let Some(anchor_index) = rows.iter().position(|item| item.target == anchor_target) else {
-        state.reanchor_workspace_switcher_selection_from(terminal_runtimes);
-        if should_accept && state.workspace_switcher.selected_target.is_some() {
-            state.accept_workspace_switcher_selection_from(terminal_runtimes);
-        }
-        return;
-    };
-    state.workspace_switcher.selected =
-        (anchor_index as isize + steps).clamp(0, rows.len() as isize - 1) as usize;
-    settle_workspace_switcher_selection(state, terminal_runtimes);
-    if should_accept {
+    if anchors.had_effective_movement {
         state.accept_workspace_switcher_selection_from(terminal_runtimes);
     }
-}
-
-fn reanchor_mobile_switch_gesture(
-    state: &mut AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    row: u16,
-    rows: &[WorkspaceSwitcherRow],
-    had_effective_movement: bool,
-) {
-    let Some(item) = rows.get(
-        state
-            .workspace_switcher
-            .selected
-            .min(rows.len().saturating_sub(1)),
-    ) else {
-        state.workspace_switcher.mobile_switch_gesture = None;
-        state.clamp_workspace_switcher_selection_from(terminal_runtimes);
-        return;
-    };
-    state.workspace_switcher.selected = state.workspace_switcher.selected.min(rows.len() - 1);
-    state.workspace_switcher.mobile_switch_gesture = Some(MobileSwitchGesture::Anchored {
-        anchor_row: row,
-        anchor_target: item.target.clone(),
-        had_effective_movement,
-    });
-    settle_workspace_switcher_selection(state, terminal_runtimes);
 }
 
 fn settle_workspace_switcher_selection(
@@ -6753,5 +6851,91 @@ mod tests {
         assert!(!bottom_thumb.is_empty());
         assert_eq!(bottom_thumb.last(), Some(&(body.y + body.height - 1)));
         assert!(bottom_thumb.first() > top_thumb.first());
+    }
+
+    #[test]
+    fn mobile_switch_gesture_bounds_use_retained_nonzero_origin() {
+        // Retained bounds with a nonzero origin: a drag left of the origin
+        // exits the list and cancels the anchored gesture.
+        let names = (0..3).map(|idx| format!("ws-{idx}")).collect::<Vec<_>>();
+        let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut state = app_with_workspaces(&name_refs);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        set_switcher_view(&mut state, 80, 20);
+        state.open_workspace_switcher_from(&terminal_runtimes);
+        let target = state.workspace_switcher_rows_from(&terminal_runtimes)[0]
+            .target
+            .clone();
+        let bounds = Rect::new(5, 5, 20, 10);
+        let anchors = || MobileSwitchAnchors {
+            bounds,
+            anchor_row: 6,
+            anchor_target: target.clone(),
+            gesture_target: target.clone(),
+            direction_col: 6,
+            direction_row: 6,
+            had_effective_movement: true,
+        };
+        state.workspace_switcher.mobile_switch_gesture =
+            Some(MobileSwitchGesture::Anchored(anchors()));
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 4,
+                row: 6,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert!(state.workspace_switcher.mobile_switch_gesture.is_none());
+        // The cancelled gesture accepts nothing on release.
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 6,
+                row: 6,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert!(state.workspace_switcher.active);
+        assert_eq!(state.active, Some(0));
+
+        // Control: the same row at the bounds' left edge keeps the gesture
+        // alive.
+        state.workspace_switcher.mobile_switch_gesture =
+            Some(MobileSwitchGesture::Anchored(anchors()));
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 5,
+                row: 6,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert!(state.workspace_switcher.mobile_switch_gesture.is_some());
+
+        // Before the first entry into the list the same outside column is
+        // ignored: the awaiting gesture neither anchors nor cancels.
+        state.workspace_switcher.mobile_switch_gesture =
+            Some(MobileSwitchGesture::AwaitingAnchor { bounds });
+        handle_workspace_switcher_mouse(
+            &mut state,
+            &terminal_runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 4,
+                row: 6,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        assert!(matches!(
+            state.workspace_switcher.mobile_switch_gesture,
+            Some(MobileSwitchGesture::AwaitingAnchor { .. })
+        ));
     }
 }

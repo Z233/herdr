@@ -1170,8 +1170,10 @@ impl AppState {
             // retained Mobile Navigation Panel is never reached.
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && on_switch {
                 self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
-                self.workspace_switcher.mobile_switch_gesture =
-                    Some(crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor);
+                let bounds = self.workspace_switcher_body_rect();
+                self.workspace_switcher.mobile_switch_gesture = Some(
+                    crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor { bounds },
+                );
             }
             return MobileMouseResult::Consumed;
         }
@@ -1186,8 +1188,9 @@ impl AppState {
 
         if on_switch {
             self.open_workspace_switcher_at_active_workspace_from(terminal_runtimes);
+            let bounds = self.workspace_switcher_body_rect();
             self.workspace_switcher.mobile_switch_gesture =
-                Some(crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor);
+                Some(crate::ui::workspace_switcher::MobileSwitchGesture::AwaitingAnchor { bounds });
             return MobileMouseResult::Consumed;
         }
 
@@ -4420,6 +4423,15 @@ mod tests {
         }
     }
 
+    fn mobile_switcher_tab_test_app() -> crate::app::App {
+        let mut app = mobile_switcher_test_app(3);
+        app.state.workspaces[1].test_add_tab(Some("second"));
+        app.state.workspaces[1].test_add_tab(None);
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        app
+    }
+
     #[test]
     fn mobile_switch_down_opens_at_current_and_tap_release_keeps_switcher_open() {
         let mut app = mobile_switcher_test_app(3);
@@ -4603,17 +4615,19 @@ mod tests {
             body.x + 1,
             anchor_row,
         ));
-        let header = top.state.workspace_switcher_top_bar_rect();
+        // In-bounds clamp at the top edge: dragging to the first body row
+        // clamps the selection to the first item. (Leaving the body bounds
+        // would cancel the gesture instead.)
         top.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            header.x + 1,
-            header.y,
+            body.x + 1,
+            body.y,
         ));
         assert_eq!(top.state.workspace_switcher.selected, 0);
         top.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            header.x + 1,
-            header.y,
+            body.x + 1,
+            body.y,
         ));
         let first_id = match first_id {
             crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace { workspace_id } => {
@@ -4784,7 +4798,14 @@ mod tests {
             body.x + 1,
             anchor_row + 2,
         ));
+        // Anchor disappearance cancels the gesture; the overlay stays open
+        // and later drags or releases accept nothing.
         assert!(removed.state.workspace_switcher.active);
+        assert!(removed
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
         removed.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
             body.x + 1,
@@ -4795,7 +4816,7 @@ mod tests {
             body.x + 1,
             anchor_row + 4,
         ));
-        assert!(!removed.state.workspace_switcher.active);
+        assert!(removed.state.workspace_switcher.active);
 
         let mut empty = mobile_switcher_test_app(1);
         open_mobile_switcher_with_mouse(&mut empty);
@@ -4822,7 +4843,9 @@ mod tests {
     }
 
     #[test]
-    fn mobile_switch_release_handles_removed_anchor_for_zero_and_nonzero_steps() {
+    fn mobile_switch_release_does_not_accept_after_anchor_removal() {
+        // A nonzero release displacement must not accept a replacement
+        // target once the anchor disappeared.
         let mut app = mobile_switcher_test_app(3);
         open_mobile_switcher_with_mouse(&mut app);
         let body = app.state.workspace_switcher_body_rect();
@@ -4834,19 +4857,16 @@ mod tests {
         ));
 
         app.state.workspaces.remove(0);
-        let expected_id = app.state.workspaces[0].id.clone();
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
             body.x + 1,
             anchor_row + 2,
         ));
 
-        assert_eq!(
-            app.state.workspaces[app.state.active.unwrap()].id,
-            expected_id
-        );
-        assert!(!app.state.workspace_switcher.active);
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.active, Some(0));
 
+        // A zero-displacement release behaves the same.
         let mut zero = mobile_switcher_test_app(3);
         open_mobile_switcher_with_mouse(&mut zero);
         let body = zero.state.workspace_switcher_body_rect();
@@ -4857,15 +4877,954 @@ mod tests {
             anchor_row,
         ));
         zero.state.workspaces.remove(0);
-        let expected_id = zero.state.workspaces[0].id.clone();
         zero.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
             body.x + 1,
-            anchor_row + 1,
+            anchor_row,
         ));
 
         assert!(zero.state.workspace_switcher.active);
-        assert_eq!(selected_workspace_id(&zero), expected_id);
+        assert_eq!(zero.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_right_expands_and_release_focuses_selected_tab() {
+        let mut app = mobile_switcher_tab_test_app();
+        let expanded_id = app.state.workspaces[1].id.clone();
+        open_mobile_switcher_with_mouse(&mut app);
+        assert_eq!(app.state.workspace_switcher.selected, 0);
+        let body = app.state.workspace_switcher_body_rect();
+        let column = body.x + 1;
+        let anchor_row = body.y + 4;
+
+        // Anchor, then move the selection one item down to workspace 1.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, 1);
+
+        // A right swipe expands the selected workspace; the selection stays.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 2,
+        ));
+        assert!(app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&expanded_id));
+        assert_eq!(app.state.workspace_switcher.selected, 1);
+
+        // Vertical selection continues from the reset anchor: two item steps
+        // land on the workspace's second tab (rows are ws0, ws1, tab0, tab1,
+        // tab2, ws2).
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 6,
+        ));
+        let rows = app
+            .state
+            .workspace_switcher_rows_from(&app.terminal_runtimes);
+        assert_eq!(app.state.workspace_switcher.selected, 3);
+        assert!(rows[app.state.workspace_switcher.selected].is_tab);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 4,
+            anchor_row + 6,
+        ));
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab, 1);
+    }
+
+    #[test]
+    fn mobile_switch_left_collapses_to_parent_and_release_focuses_parent() {
+        let mut app = mobile_switcher_tab_test_app();
+        let parent_id = app.state.workspaces[1].id.clone();
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let column = body.x + 1;
+        let anchor_row = body.y + 4;
+
+        // Expand workspace 1 through the gesture first.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 2,
+        ));
+        assert!(app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&parent_id));
+
+        // Select the first tab, then collapse with a left swipe: the
+        // selection lands on the parent workspace and the gesture survives
+        // the deliberate removal of the child rows.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 4,
+        ));
+        assert!(
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
+                .is_tab
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert!(!app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&parent_id));
+        assert_eq!(
+            app.state
+                .workspace_switcher_rows_from(&app.terminal_runtimes)
+                [app.state.workspace_switcher.selected]
+                .target,
+            crate::ui::workspace_switcher::WorkspaceSwitcherTarget::Workspace {
+                workspace_id: parent_id.clone(),
+            }
+        );
+        assert!(app.state.workspace_switcher.mobile_switch_gesture.is_some());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab, 0);
+    }
+
+    #[test]
+    fn mobile_switch_horizontal_threshold_and_axis_rules() {
+        // Three columns of travel are not a command and stay ineffective.
+        let mut three = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut three);
+        let body = three.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        three.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        three.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 3,
+            anchor_row,
+        ));
+        assert!(three
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .is_empty());
+        three.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 3,
+            anchor_row,
+        ));
+        assert!(three.state.workspace_switcher.active);
+
+        // Four columns expand.
+        let mut four = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut four);
+        let body = four.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        four.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        four.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        assert!(!four.state.workspace_switcher.expanded_workspaces.is_empty());
+
+        // abs(dx) == 2 * abs(dy) is vertical, not horizontal.
+        let mut tied = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut tied);
+        let body = tied.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        tied.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        tied.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 2,
+        ));
+        assert!(tied.state.workspace_switcher.expanded_workspaces.is_empty());
+        assert_eq!(tied.state.workspace_switcher.selected, 1);
+
+        // A dominant horizontal event performs only the horizontal axis: the
+        // vertical selection does not move even though the pointer moved.
+        let mut axis = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut axis);
+        let body = axis.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        axis.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        axis.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 8,
+            anchor_row + 2,
+        ));
+        assert!(!axis.state.workspace_switcher.expanded_workspaces.is_empty());
+        assert_eq!(axis.state.workspace_switcher.selected, 0);
+    }
+
+    #[test]
+    fn mobile_switch_direction_baseline_follows_vertical_selection_change() {
+        // Long vertical travel followed by a short right swipe expands: the
+        // direction baseline moved with each selection change, so four
+        // columns are enough. Variable-height rows do not affect the math.
+        let mut app = mobile_switcher_test_app(12);
+        for (idx, ws) in app.state.workspaces.iter_mut().enumerate() {
+            ws.cached_git_branch = (idx % 2 == 1).then(|| format!("branch-{idx}"));
+        }
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let ids = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect::<Vec<_>>();
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 6,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, 3);
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 10,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, 5);
+        // From the original anchor this swipe would need more than twenty
+        // columns; from the direction baseline four are enough.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 10,
+        ));
+        assert!(app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&ids[5]));
+
+        // Reversing direction within the same hold collapses again.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 10,
+        ));
+        assert!(!app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&ids[5]));
+    }
+
+    #[test]
+    fn mobile_switch_noop_horizontal_command_counts_as_effective() {
+        let mut app = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        let first_id = app.state.workspaces[0].id.clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        // Second identical swipe: already expanded, but the command is still
+        // effective, so the deadzone release accepts the current destination.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 8,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 8,
+            anchor_row,
+        ));
+
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.workspaces[app.state.active.unwrap()].id, first_id);
+    }
+
+    #[test]
+    fn mobile_switch_noop_horizontal_alone_enables_acceptance() {
+        // Left on an initially collapsed workspace is a no-op collapse; as
+        // the only qualifying event it still makes the release eligible.
+        let mut collapsed = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut collapsed);
+        let body = collapsed.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 8, body.y + 4);
+        collapsed.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        collapsed.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column - 4,
+            anchor_row,
+        ));
+        assert!(collapsed
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .is_empty());
+        collapsed.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column - 4,
+            anchor_row,
+        ));
+        assert!(!collapsed.state.workspace_switcher.active);
+        assert_eq!(collapsed.state.active, Some(0));
+
+        // The same no-op collapse resets the vertical anchor to its own
+        // pointer row: the next drag measures steps from there.
+        let mut reset = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut reset);
+        let body = reset.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 8, body.y + 4);
+        reset.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        reset.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column - 4,
+            anchor_row + 1,
+        ));
+        // From the reset anchor row: (anchor_row + 4 - (anchor_row + 1)) / 2
+        // = 1. From the original anchor row it would be 4 / 2 = 2.
+        reset.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column - 4,
+            anchor_row + 4,
+        ));
+        assert_eq!(reset.state.workspace_switcher.selected, 1);
+
+        // Right on an already-expanded workspace (expanded through the
+        // existing keyboard handler before anchoring) is a no-op expand that
+        // alone makes the release eligible.
+        let mut expanded = mobile_switcher_test_app(3);
+        open_mobile_switcher_with_mouse(&mut expanded);
+        crate::ui::workspace_switcher::handle_workspace_switcher_key(
+            &mut expanded.state,
+            &expanded.terminal_runtimes,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::empty()),
+        );
+        let first_id = expanded.state.workspaces[0].id.clone();
+        assert!(expanded
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&first_id));
+        let body = expanded.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        expanded.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        expanded.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        expanded.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        assert!(!expanded.state.workspace_switcher.active);
+        assert_eq!(expanded.state.active, Some(0));
+
+        // Right while a Tab is selected is a no-op expand of the already
+        // expanded parent; the selected tab is retained and accepted.
+        let mut tab = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut tab);
+        // Rows become ws0, ws1, tab0, tab1, tab2, ws2; selection lands on
+        // the second tab.
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Down] {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut tab.state,
+                &tab.terminal_runtimes,
+                KeyEvent::new(code, KeyModifiers::empty()),
+            );
+        }
+        assert_eq!(tab.state.workspace_switcher.selected, 3);
+        let tab_target = tab
+            .state
+            .workspace_switcher_rows_from(&tab.terminal_runtimes)[3]
+            .target
+            .clone();
+        let body = tab.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        assert_eq!(
+            tab.state
+                .workspace_switcher_rows_from(&tab.terminal_runtimes)
+                [tab.state.workspace_switcher.selected]
+                .target,
+            tab_target
+        );
+        tab.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        assert!(!tab.state.workspace_switcher.active);
+        assert_eq!(tab.state.active, Some(1));
+        assert_eq!(tab.state.workspaces[1].active_tab, 1);
+    }
+
+    #[test]
+    fn mobile_switch_tab_target_deletion_cancels() {
+        // The anchor tab disappears while its parent workspace and the
+        // gesture destination remain.
+        let mut anchor_tab = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut anchor_tab);
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut anchor_tab.state,
+                &anchor_tab.terminal_runtimes,
+                KeyEvent::new(code, KeyModifiers::empty()),
+            );
+        }
+        assert_eq!(anchor_tab.state.workspace_switcher.selected, 2);
+        let body = anchor_tab.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        anchor_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        anchor_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(anchor_tab.state.workspace_switcher.selected, 3);
+        anchor_tab.state.workspaces[1].tabs.remove(0);
+        // Ordinary reanchor and view computation must not mask the deletion.
+        anchor_tab
+            .state
+            .reanchor_workspace_switcher_selection_from(&anchor_tab.terminal_runtimes);
+        crate::ui::compute_view(&mut anchor_tab.state, Rect::new(0, 0, 44, 20));
+        anchor_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(anchor_tab
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        anchor_tab.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(anchor_tab.state.workspace_switcher.active);
+        assert_eq!(anchor_tab.state.active, Some(0));
+
+        // The gesture destination tab disappears while its parent workspace
+        // and the anchor remain.
+        let mut target_tab = mobile_switcher_tab_test_app();
+        open_mobile_switcher_with_mouse(&mut target_tab);
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+            crate::ui::workspace_switcher::handle_workspace_switcher_key(
+                &mut target_tab.state,
+                &target_tab.terminal_runtimes,
+                KeyEvent::new(code, KeyModifiers::empty()),
+            );
+        }
+        let body = target_tab.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        target_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        target_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert_eq!(target_tab.state.workspace_switcher.selected, 3);
+        target_tab.state.workspaces[1].tabs.remove(1);
+        target_tab
+            .state
+            .reanchor_workspace_switcher_selection_from(&target_tab.terminal_runtimes);
+        crate::ui::compute_view(&mut target_tab.state, Rect::new(0, 0, 44, 20));
+        target_tab.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(target_tab
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        target_tab.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(target_tab.state.workspace_switcher.active);
+        assert_eq!(target_tab.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_expands_multiple_workspaces_in_one_hold() {
+        let mut app = mobile_switcher_tab_test_app();
+        let ids = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect::<Vec<_>>();
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        // Rows are now ws0, ws0-tab0, ws1, ws2: move three item steps down
+        // to workspace 2 and expand it as well — earlier expansions are
+        // retained.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 4,
+            anchor_row + 6,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, 3);
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column + 8,
+            anchor_row + 6,
+        ));
+        assert!(app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&ids[0]));
+        assert!(app
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&ids[2]));
+    }
+
+    #[test]
+    fn mobile_switch_release_evaluates_final_displacement_once() {
+        // Vertical final movement that only happens on release.
+        let mut app = mobile_switcher_test_app(3);
+        let ids = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect::<Vec<_>>();
+        open_mobile_switcher_with_mouse(&mut app);
+        let body = app.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.workspaces[app.state.active.unwrap()].id, ids[1]);
+
+        // Horizontal final movement that only happens on release: a single
+        // expand command, then acceptance of the resulting destination.
+        let mut horizontal = mobile_switcher_test_app(3);
+        let first_id = horizontal.state.workspaces[0].id.clone();
+        open_mobile_switcher_with_mouse(&mut horizontal);
+        let body = horizontal.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        horizontal.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        horizontal.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column + 4,
+            anchor_row,
+        ));
+        assert!(!horizontal.state.workspace_switcher.active);
+        assert_eq!(horizontal.state.active, Some(0));
+        assert!(horizontal
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .contains(&first_id));
+    }
+
+    #[test]
+    fn mobile_switch_anchor_or_gesture_target_deletion_cancels() {
+        // The anchor disappears while the gesture destination survives.
+        let mut anchor_gone = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut anchor_gone);
+        let body = anchor_gone.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        anchor_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        anchor_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert_eq!(anchor_gone.state.workspace_switcher.selected, 2);
+        anchor_gone.state.workspaces.remove(0);
+        anchor_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert!(anchor_gone
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        anchor_gone.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert!(anchor_gone.state.workspace_switcher.active);
+        assert_eq!(anchor_gone.state.active, Some(0));
+        assert!(anchor_gone
+            .state
+            .workspace_switcher
+            .expanded_workspaces
+            .is_empty());
+
+        // The gesture destination disappears while the anchor survives.
+        let mut target_gone = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut target_gone);
+        let body = target_gone.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        target_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        target_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 4,
+        ));
+        assert_eq!(target_gone.state.workspace_switcher.selected, 2);
+        target_gone.state.workspaces.remove(2);
+        target_gone.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(target_gone
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        target_gone.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(target_gone.state.workspace_switcher.active);
+        assert_eq!(target_gone.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_leaving_bounds_cancels_and_reentry_does_not_accept() {
+        // (The mobile popup starts at column 0, so a left-edge exit is not
+        // representable; the other three edges are covered.)
+
+        // Right edge.
+        let mut right = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut right);
+        let body = right.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        right.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        right.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        right.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + body.width,
+            anchor_row + 2,
+        ));
+        assert!(right
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        // Re-entry does not re-arm the cancelled gesture.
+        right.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        right.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(right.state.workspace_switcher.active);
+        assert_eq!(right.state.active, Some(0));
+
+        // Bottom edge.
+        let mut bottom = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut bottom);
+        let body = bottom.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            body.y + body.height,
+        ));
+        assert!(bottom
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_none());
+        bottom.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(bottom.state.workspace_switcher.active);
+        assert_eq!(bottom.state.active, Some(0));
+
+        // Top edge.
+        let mut top = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut top);
+        let body = top.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (body.x + 1, body.y + 4);
+        top.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        top.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        top.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            body.y - 1,
+        ));
+        assert!(top.state.workspace_switcher.mobile_switch_gesture.is_none());
+        top.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            column,
+            anchor_row + 2,
+        ));
+        assert!(top.state.workspace_switcher.active);
+        assert_eq!(top.state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switch_bounds_follow_authoritative_mobile_geometry() {
+        let mut app = mobile_switcher_test_app(4);
+        open_mobile_switcher_with_mouse(&mut app);
+        let mobile_body = app.state.workspace_switcher_body_rect();
+        let anchor_row = mobile_body.y + 4;
+
+        // A non-foreground desktop client leaves its projection in the
+        // shared view; the retained mobile bounds stay authoritative.
+        crate::ui::compute_view_without_resizing_panes(
+            &mut app.state,
+            &app.terminal_runtimes,
+            Rect::new(0, 0, 120, 40),
+        );
+        assert_eq!(app.state.view.layout, ViewLayout::Desktop);
+        let desktop_body = app.state.workspace_switcher_body_rect();
+        assert_ne!(desktop_body, mobile_body);
+
+        // Inside the retained mobile bounds but outside the projected
+        // desktop body: the gesture anchors and moves normally.
+        let edge_column = mobile_body.x + mobile_body.width - 1;
+        assert!(!rect_contains(desktop_body, edge_column, anchor_row));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            edge_column,
+            anchor_row,
+        ));
+        assert!(matches!(
+            app.state.workspace_switcher.mobile_switch_gesture,
+            Some(crate::ui::workspace_switcher::MobileSwitchGesture::Anchored(_))
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            edge_column,
+            anchor_row + 2,
+        ));
+        assert_eq!(app.state.workspace_switcher.selected, 1);
+
+        // Leaving the retained mobile bounds cancels; a release afterwards
+        // accepts nothing, whether inside the projected desktop body or
+        // inside the retained mobile bounds.
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            edge_column,
+            mobile_body.y + mobile_body.height,
+        ));
+        assert!(app.state.workspace_switcher.mobile_switch_gesture.is_none());
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            desktop_body.x + 1,
+            desktop_body.y + 1,
+        ));
+        assert!(app.state.workspace_switcher.active);
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            mobile_body.x + 1,
+            anchor_row + 2,
+        ));
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.active, Some(0));
+
+        // An authoritative mobile resize refreshes the retained bounds.
+        let mut resized = mobile_switcher_test_app(12);
+        let ids = resized
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.id.clone())
+            .collect::<Vec<_>>();
+        open_mobile_switcher_with_mouse(&mut resized);
+        let old_body = resized.state.workspace_switcher_body_rect();
+        let (column, anchor_row) = (old_body.x + 1, old_body.y + 4);
+        resized.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            column,
+            anchor_row,
+        ));
+        crate::ui::compute_view(&mut resized.state, Rect::new(0, 0, 44, 30));
+        let new_body = resized.state.workspace_switcher_body_rect();
+        assert!(new_body.height > old_body.height);
+        // Inside the refreshed bounds but outside the old ones: the gesture
+        // still moves and its release accepts.
+        let row = old_body.y + old_body.height + 1;
+        resized.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), column, row));
+        assert!(resized
+            .state
+            .workspace_switcher
+            .mobile_switch_gesture
+            .is_some());
+        resized.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
+        assert!(!resized.state.workspace_switcher.active);
+        assert_eq!(
+            resized.state.workspaces[resized.state.active.unwrap()].id,
+            ids[7]
+        );
     }
 
     #[test]

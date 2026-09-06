@@ -57,7 +57,7 @@ A full-screen overlay workspace switcher that replaces upstream's `prefix+shift+
 - **Repository names** shown for worktree switcher items, with structured labels (git branch names for grouped child worktrees)
 - **Zoxide integration** — search any directory by path and open it as a workspace (see below)
 - **Mobile support** — switcher auto-opens in empty state on narrow terminals
-- **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, and release to accept; a tap leaves the switcher open
+- **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right/left to expand/collapse a workspace's tabs, and release to accept; a tap leaves the switcher open
 - Full keyboard **and** mouse support (hover, click, scroll)
 
 Default binding: `ctrl+tab`. Bind to `prefix+w` for the overlay variant.
