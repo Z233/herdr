@@ -99,8 +99,9 @@ pub(crate) use self::{
     tabs::{compute_tab_bar_view, tab_bar_content_area},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::ViewLayout;
+use crate::app::state::{ViewLayout, ZoomNeighbors};
 use crate::app::{AppState, Mode};
+use crate::layout::{find_in_direction, NavDirection};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
@@ -355,6 +356,7 @@ fn compute_view_internal(
         toast_hit_area,
         pane_infos,
         split_borders,
+        zoom_neighbors: None,
     };
     if resize_panes {
         app.sync_copy_mode_search_geometry(terminal_runtimes);
@@ -362,6 +364,26 @@ fn compute_view_internal(
     if app.workspace_switcher.active {
         app.ensure_workspace_switcher_selection_visible_from(terminal_runtimes);
     }
+}
+
+/// Directional pane-neighbor facts for the mobile header zoom indicator.
+/// `Some` only while the active tab is zoomed: zoom deliberately collapses
+/// `view.pane_infos` to the focused pane, so this resolves all four directions
+/// once against the complete `TileLayout` for the current terminal area, using
+/// the same navigation rule pane movement uses.
+fn compute_zoom_neighbors(app: &AppState, terminal_area: Rect) -> Option<ZoomNeighbors> {
+    let ws = app.active.and_then(|idx| app.workspaces.get(idx))?;
+    if !ws.zoomed {
+        return None;
+    }
+    let panes = ws.layout.panes(terminal_area);
+    let focused = panes.iter().find(|pane| pane.is_focused)?;
+    Some(ZoomNeighbors {
+        up: find_in_direction(focused, NavDirection::Up, &panes).is_some(),
+        left: find_in_direction(focused, NavDirection::Left, &panes).is_some(),
+        right: find_in_direction(focused, NavDirection::Right, &panes).is_some(),
+        down: find_in_direction(focused, NavDirection::Down, &panes).is_some(),
+    })
 }
 
 fn compute_mobile_view(
@@ -401,6 +423,7 @@ fn compute_mobile_view(
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
     let header_hits = compute_mobile_header_hit_areas(app, header_rect);
+    let zoom_neighbors = compute_zoom_neighbors(app, terminal_area);
 
     let toast_hit_area = app
         .toast
@@ -423,6 +446,7 @@ fn compute_mobile_view(
         toast_hit_area,
         pane_infos,
         split_borders,
+        zoom_neighbors,
     };
     if resize_panes {
         app.sync_copy_mode_search_geometry(terminal_runtimes);
@@ -797,6 +821,52 @@ mod tests {
         assert_eq!(
             app.view.mobile_menu_hit_area.x + app.view.mobile_menu_hit_area.width,
             44
+        );
+    }
+
+    #[test]
+    fn zoom_neighbors_empty_without_zoom_desktop_or_workspace() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        // Unzoomed mobile keeps the projection empty.
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+        assert_eq!(app.view.zoom_neighbors, None);
+
+        // A zoomed tab computes no projection for the desktop layout.
+        app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces[0].zoomed = true;
+        compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        assert_eq!(app.view.layout, ViewLayout::Desktop);
+        assert_eq!(app.view.zoom_neighbors, None);
+
+        // No active workspace keeps the projection empty on mobile too.
+        app.active = None;
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+        assert_eq!(app.view.zoom_neighbors, None);
+    }
+
+    #[test]
+    fn zoom_neighbors_survive_degenerate_terminal_area() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.zoomed = true;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        // The header consumes the whole frame, leaving a zero terminal area:
+        // the projection stays valid with no direction resolving.
+        compute_view(&mut app, Rect::new(0, 0, 44, 2));
+        assert_eq!(app.view.terminal_area, Rect::default());
+        assert_eq!(
+            app.view.zoom_neighbors,
+            Some(crate::app::state::ZoomNeighbors::default())
         );
     }
 

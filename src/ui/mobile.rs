@@ -13,7 +13,7 @@ use super::sidebar::{
 };
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width_u16, truncate_end};
-use crate::app::state::{Palette, ToastKind, ToastNotification};
+use crate::app::state::{Palette, ToastKind, ToastNotification, ZoomNeighbors};
 use crate::app::AppState;
 use crate::config::StatusIndicatorStyle;
 use crate::detect::AgentState;
@@ -226,7 +226,7 @@ pub(crate) fn render_mobile_header(
     let status_w = switch.x.saturating_sub(area.x).saturating_sub(1);
     let status = Rect::new(area.x, area.y, status_w, area.height);
 
-    render_header_status(app, terminal_runtimes, frame, status);
+    render_base_header_status(app, terminal_runtimes, frame, status);
     render_switch_button(app, frame, switch);
 }
 
@@ -336,8 +336,6 @@ pub(super) fn render_header_status(
         return;
     };
 
-    let (state, seen) = ws.aggregate_state(&app.terminals);
-    let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
     let tab_label = mobile_tab_status(ws);
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
@@ -345,6 +343,130 @@ pub(super) fn render_header_status(
         .min(area.width);
     let name_w = area.width.saturating_sub(tab_w);
 
+    render_workspace_identity(app, terminal_runtimes, frame, row1, name_w);
+    frame.render_widget(
+        Paragraph::new(tab_label)
+            .style(Style::default().fg(p.overlay1).bg(p.panel_bg))
+            .alignment(Alignment::Right),
+        Rect::new(row1.x + name_w, row1.y, tab_w, 1),
+    );
+
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(agent_summary_line(app, p, area.width)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
+}
+
+/// Fixed slots of the zoom indicator: `Z U L[@]R D` — zoom marker, one slot
+/// per cardinal direction around the focused pane `[@]`.
+const ZOOM_MAP_WIDTH: u16 = 11;
+
+/// Base mobile header status: workspace identity on the left, the zoom
+/// indicator on the right while the active tab is zoomed, agent summary on row
+/// two. Unlike the Workspace Switcher top bar (`render_header_status`), the
+/// tab status lives in the switch button and the zoom map appears only here.
+fn render_base_header_status(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    if app.active.and_then(|idx| app.workspaces.get(idx)).is_none() {
+        frame.render_widget(Paragraph::new(" no workspace"), area);
+        return;
+    }
+
+    let row1 = Rect::new(area.x, area.y, area.width, 1);
+    // The complete map renders only when the status area fits every slot; a
+    // narrower area hides the map atomically and keeps just `Z`. Workspace
+    // text always yields this space.
+    let (indicator_w, full_map) = if app.view.zoom_neighbors.is_none() {
+        (0, false)
+    } else if area.width >= ZOOM_MAP_WIDTH {
+        (ZOOM_MAP_WIDTH.saturating_add(1).min(area.width), true)
+    } else {
+        (2.min(area.width), false)
+    };
+    let name_w = area.width.saturating_sub(indicator_w);
+
+    render_workspace_identity(app, terminal_runtimes, frame, row1, name_w);
+
+    if let Some(neighbors) = app.view.zoom_neighbors {
+        let line = if full_map {
+            zoom_map_line(neighbors, p)
+        } else {
+            Line::from(Span::styled("Z", zoom_marker_style(p)))
+        };
+        frame.render_widget(
+            Paragraph::new(line)
+                .style(Style::default().bg(p.panel_bg))
+                .alignment(Alignment::Right),
+            Rect::new(row1.x + name_w, row1.y, indicator_w, 1),
+        );
+    }
+
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(agent_summary_line(app, p, area.width)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
+}
+
+fn zoom_marker_style(p: &Palette) -> Style {
+    Style::default()
+        .fg(p.accent)
+        .bg(p.panel_bg)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn zoom_map_line(neighbors: ZoomNeighbors, p: &Palette) -> Line<'static> {
+    let marker = zoom_marker_style(p);
+    let direction = Style::default().fg(p.overlay1).bg(p.panel_bg);
+    let gap = Style::default().bg(p.panel_bg);
+    let slot = |available: bool, label: &'static str| {
+        if available {
+            Span::styled(label, direction)
+        } else {
+            Span::styled(" ", gap)
+        }
+    };
+    Line::from(vec![
+        Span::styled("Z", marker),
+        Span::styled(" ", gap),
+        slot(neighbors.up, "U"),
+        Span::styled(" ", gap),
+        slot(neighbors.left, "L"),
+        Span::styled("[@]", marker),
+        slot(neighbors.right, "R"),
+        Span::styled(" ", gap),
+        slot(neighbors.down, "D"),
+    ])
+}
+
+/// Workspace dot + display name, truncated within `name_w` columns of `row`.
+fn render_workspace_identity(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    row: Rect,
+    name_w: u16,
+) {
+    if name_w == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) else {
+        return;
+    };
+    let (state, seen) = ws.aggregate_state(&app.terminals);
+    let (dot, dot_style) = state_icon(state, seen, app.status_indicators, p);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
@@ -361,21 +483,8 @@ pub(super) fn render_header_status(
                     .add_modifier(Modifier::BOLD),
             ),
         ])),
-        Rect::new(row1.x, row1.y, name_w, 1),
+        Rect::new(row.x, row.y, name_w, 1),
     );
-    frame.render_widget(
-        Paragraph::new(tab_label)
-            .style(Style::default().fg(p.overlay1).bg(p.panel_bg))
-            .alignment(Alignment::Right),
-        Rect::new(row1.x + name_w, row1.y, tab_w, 1),
-    );
-
-    if area.height > 1 {
-        frame.render_widget(
-            Paragraph::new(agent_summary_line(app, p, area.width)),
-            Rect::new(area.x, area.y + 1, area.width, 1),
-        );
-    }
 }
 
 fn mobile_tab_status(ws: &crate::workspace::Workspace) -> String {
@@ -399,6 +508,18 @@ fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
         frame.buffer_mut()[(area.x, y)]
             .set_symbol("│")
             .set_style(Style::default().fg(p.surface_dim).bg(p.surface0));
+    }
+    // Row one carries the tab status, centered between the left divider and
+    // the final cell, which stays reserved for the blocked-agent badge.
+    if area.height > 1 {
+        if let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) {
+            frame.render_widget(
+                Paragraph::new(mobile_tab_status(ws))
+                    .style(Style::default().fg(p.overlay1).bg(p.surface0))
+                    .alignment(Alignment::Center),
+                Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
+            );
+        }
     }
     let label_y = if area.height > 1 { area.y + 1 } else { area.y };
     frame.render_widget(
@@ -1549,6 +1670,190 @@ mod tests {
         workspace.active_tab = 1;
 
         assert_eq!(mobile_tab_status(&workspace), "tab 2 · 2/2");
+    }
+
+    fn mobile_header_screen(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+        crate::ui::compute_view(app, Rect::new(0, 0, width, height));
+        let header = app.view.mobile_header_rect;
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_mobile_header(app, &TerminalRuntimeRegistry::new(), frame, header))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (header.y..header.y + header.height)
+            .map(|y| {
+                (header.x..header.x + header.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn mobile_app(ws: crate::workspace::Workspace) -> AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Terminal;
+        app
+    }
+
+    #[test]
+    fn mobile_header_unzoomed_shows_identity_only_and_tab_status_in_switch_button() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        ws.test_add_tab(None);
+        let mut app = mobile_app(ws);
+
+        let rows = mobile_header_screen(&mut app, 44, 20);
+
+        assert_eq!(app.view.zoom_neighbors, None);
+        let switch_x = app.view.mobile_menu_hit_area.x as usize;
+        let status_row: String = rows[0].chars().take(switch_x.saturating_sub(1)).collect();
+        let button_row0: String = rows[0].chars().skip(switch_x).collect();
+        let button_row1: String = rows[1].chars().skip(switch_x).collect();
+        assert!(status_row.contains("alpha"), "status row: {status_row:?}");
+        assert!(
+            !status_row.contains("tab 1"),
+            "tab status must move out of the status area: {status_row:?}"
+        );
+        assert!(
+            !rows[0].contains("[@]") && !rows[0].contains('Z'),
+            "unzoomed header must have no zoom marker: {rows:?}"
+        );
+        assert!(
+            button_row0.contains("tab 1"),
+            "switch button row one carries the tab status: {button_row0:?}"
+        );
+        assert!(
+            !button_row0.contains("1/2"),
+            "button width clips the multi-tab position: {button_row0:?}"
+        );
+        assert!(
+            button_row1.contains("switch"),
+            "switch label stays on row two: {button_row1:?}"
+        );
+    }
+
+    #[test]
+    fn mobile_header_zoomed_shows_all_directions_in_fixed_slot_map() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        let p1 = ws.tabs[0].root_pane;
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.tabs[0].layout.focus_pane(p1);
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        let center = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(center);
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+
+        let rows = mobile_header_screen(&mut app, 44, 20);
+
+        assert_eq!(
+            app.view.zoom_neighbors,
+            Some(ZoomNeighbors {
+                up: true,
+                left: true,
+                right: true,
+                down: true,
+            })
+        );
+        assert!(
+            rows[0].contains("Z U L[@]R D"),
+            "zoomed header map: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn mobile_header_zoomed_keeps_fixed_slots_for_unavailable_directions() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+
+        let rows = mobile_header_screen(&mut app, 44, 20);
+
+        // Focus is the bottom pane: only Up resolves, and the L/R/D slots stay
+        // reserved as spaces instead of collapsing the map.
+        assert_eq!(
+            app.view.zoom_neighbors,
+            Some(ZoomNeighbors {
+                up: true,
+                left: false,
+                right: false,
+                down: false,
+            })
+        );
+        assert!(rows[0].contains("Z U  [@]"), "fixed slots: {rows:?}");
+    }
+
+    #[test]
+    fn mobile_header_zoom_map_follows_focus_changes_while_zoomed() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        let p1 = ws.tabs[0].root_pane;
+        let p2 = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+
+        ws_focus(&mut app, p1);
+        let rows = mobile_header_screen(&mut app, 44, 20);
+        assert!(rows[0].contains("[@]R"), "focus left pane: {rows:?}");
+        assert!(!rows[0].contains("L[@]"), "focus left pane: {rows:?}");
+
+        ws_focus(&mut app, p2);
+        let rows = mobile_header_screen(&mut app, 44, 20);
+        assert!(rows[0].contains("L[@]"), "focus right pane: {rows:?}");
+        assert!(!rows[0].contains("[@]R"), "focus right pane: {rows:?}");
+    }
+
+    fn ws_focus(app: &mut AppState, pane_id: PaneId) {
+        app.workspaces[0].tabs[0].layout.focus_pane(pane_id);
+    }
+
+    #[test]
+    fn mobile_header_zoom_map_collapses_atomically_to_z_when_narrow() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+
+        // Status area is 9 columns at this width, too narrow for the full map.
+        let rows = mobile_header_screen(&mut app, 20, 20);
+
+        assert!(app.view.zoom_neighbors.is_some());
+        let status_row: String = rows[0]
+            .chars()
+            .take(app.view.mobile_menu_hit_area.x as usize - 1)
+            .collect();
+        assert!(status_row.trim_end().ends_with('Z'), "Z fallback: {rows:?}");
+        assert!(!status_row.contains("[@]"), "Z fallback: {rows:?}");
+    }
+
+    #[test]
+    fn mobile_header_switch_button_reserves_badge_cell_from_tab_status() {
+        let mut ws = crate::workspace::Workspace::test_new("blocked");
+        ws.test_add_tab(None);
+        let mut app = mobile_app(ws);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = AgentState::Blocked;
+
+        let rows = mobile_header_screen(&mut app, 44, 20);
+
+        let switch = app.view.mobile_menu_hit_area;
+        let button_row0: String = rows[0].chars().skip(switch.x as usize).collect();
+        assert!(button_row0.contains("tab 1"), "button row: {button_row0:?}");
+        assert_eq!(
+            rows[0].chars().nth((switch.x + switch.width - 1) as usize),
+            Some('●'),
+            "badge keeps the final button cell: {button_row0:?}"
+        );
     }
 
     #[test]

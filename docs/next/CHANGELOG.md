@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- The mobile header now marks a zoomed tab with a `Z` indicator and a fixed-slot `U L[@]R D` map showing which directions have neighboring panes around the focused one, while the tab status moves into the switch button's first row.
+
 ## [0.8.2] - 2026-08-19
 
 ### Added
