@@ -807,6 +807,18 @@ pub enum ViewLayout {
     Mobile,
 }
 
+/// Which cardinal directions have a pane reachable from the focused pane under
+/// the canonical directional-navigation rule. TUI presentation projection for
+/// the mobile header zoom indicator; populated only for the mobile layout
+/// while the active tab is zoomed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ZoomNeighbors {
+    pub up: bool,
+    pub left: bool,
+    pub right: bool,
+    pub down: bool,
+}
+
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
@@ -822,6 +834,7 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+    pub zoom_neighbors: Option<ZoomNeighbors>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1906,6 +1919,7 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                zoom_neighbors: None,
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),

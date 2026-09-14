@@ -3085,6 +3085,26 @@ mod tests {
     }
 
     #[test]
+    fn mobile_top_bar_keeps_tab_status_without_zoom_indicator_while_zoomed() {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        state.workspaces[0].zoomed = true;
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        assert!(state.view.zoom_neighbors.is_some());
+        state.open_workspace_switcher();
+
+        let screen = rendered_screen(&state, 60, 20);
+
+        // The overlay top bar preserves the shared header appearance: tab
+        // status on the right, no base-header zoom indicator.
+        let top_bar = &screen[0];
+        assert!(top_bar.contains("alpha"), "top bar: {top_bar}");
+        assert!(top_bar.contains("tab 1"), "top bar: {top_bar}");
+        assert!(!top_bar.contains("[@]"), "top bar: {top_bar}");
+        assert!(!top_bar.contains('Z'), "top bar: {top_bar}");
+    }
+
+    #[test]
     fn mobile_switcher_hides_preview_below_and_at_old_threshold_widths() {
         // The old desktop 48-column list/preview split must never reserve
         // preview or divider geometry on mobile, in QuickSwitch or Search.
