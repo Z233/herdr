@@ -5795,6 +5795,45 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
+    async fn route_client_events_copy_mode_workspace_switcher_opens_switcher() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("one");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_infos = workspace.tabs[0].layout.panes(Rect::new(0, 0, 80, 20));
+        let info = pane_infos[0].clone();
+        let (runtime, mut pane_rx) = TerminalRuntime::test_with_channel_capacity(
+            info.inner_rect.width,
+            info.inner_rect.height,
+            8,
+        );
+        workspace.tabs[0].runtimes.insert(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.view.pane_infos = pane_infos;
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        assert_eq!(app.state.mode, Mode::Copy);
+
+        app.route_client_events(
+            vec![raw_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert!(app.state.copy_mode.is_some());
+        assert!(
+            pane_rx.try_recv().is_err(),
+            "switcher key must not be forwarded to the pane"
+        );
+    }
+
+    #[tokio::test]
     async fn raw_input_release_quick_switch_binding_accepts_selected_workspace() {
         let mut app = test_app();
         app.state.workspaces = vec![
