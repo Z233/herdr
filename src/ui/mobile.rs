@@ -359,14 +359,12 @@ pub(super) fn render_header_status(
     }
 }
 
-/// Fixed slots of the zoom indicator: `Z U L[@]R D` — zoom marker, one slot
-/// per cardinal direction around the focused pane `[@]`.
-const ZOOM_MAP_WIDTH: u16 = 11;
+/// Fixed Vim-direction slots around the focused pane: `k h[@]l j`.
+const ZOOM_MAP_WIDTH: u16 = 9;
 
-/// Base mobile header status: workspace identity on the left, the zoom
-/// indicator on the right while the active tab is zoomed, agent summary on row
-/// two. Unlike the Workspace Switcher top bar (`render_header_status`), the
-/// tab status lives in the switch button and the zoom map appears only here.
+/// Base mobile header status: workspace identity, zoom state, and tab status on
+/// row one; agent summary and the zoom map on row two. The Workspace Switcher
+/// top bar (`render_header_status`) remains unchanged.
 fn render_base_header_status(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -377,45 +375,59 @@ fn render_base_header_status(
         return;
     }
     let p = &app.palette;
-    if app.active.and_then(|idx| app.workspaces.get(idx)).is_none() {
+    let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) else {
         frame.render_widget(Paragraph::new(" no workspace"), area);
         return;
-    }
+    };
 
     let row1 = Rect::new(area.x, area.y, area.width, 1);
-    // The complete map renders only when the status area fits every slot; a
-    // narrower area hides the map atomically and keeps just `Z`. Workspace
-    // text always yields this space.
-    let (indicator_w, full_map) = if app.view.zoom_neighbors.is_none() {
-        (0, false)
-    } else if area.width >= ZOOM_MAP_WIDTH {
-        (ZOOM_MAP_WIDTH.saturating_add(1).min(area.width), true)
+    let tab_label = mobile_tab_status(ws);
+    let tab_w = display_width_u16(&tab_label)
+        .saturating_add(1)
+        .min(area.width);
+    let zoom_w = if app.view.zoom_neighbors.is_some() {
+        2.min(area.width.saturating_sub(tab_w))
     } else {
-        (2.min(area.width), false)
+        0
     };
-    let name_w = area.width.saturating_sub(indicator_w);
+    let name_w = area.width.saturating_sub(tab_w).saturating_sub(zoom_w);
 
     render_workspace_identity(app, terminal_runtimes, frame, row1, name_w);
 
-    if let Some(neighbors) = app.view.zoom_neighbors {
-        let line = if full_map {
-            zoom_map_line(neighbors, p)
-        } else {
-            Line::from(Span::styled("Z", zoom_marker_style(p)))
-        };
+    if zoom_w > 0 {
         frame.render_widget(
-            Paragraph::new(line)
+            Paragraph::new(Span::styled("Z", zoom_marker_style(p)))
                 .style(Style::default().bg(p.panel_bg))
                 .alignment(Alignment::Right),
-            Rect::new(row1.x + name_w, row1.y, indicator_w, 1),
+            Rect::new(row1.x + name_w, row1.y, zoom_w, 1),
         );
     }
+    frame.render_widget(
+        Paragraph::new(tab_label)
+            .style(Style::default().fg(p.overlay1).bg(p.panel_bg))
+            .alignment(Alignment::Right),
+        Rect::new(row1.x + name_w + zoom_w, row1.y, tab_w, 1),
+    );
 
     if area.height > 1 {
+        let map_w = if app.view.zoom_neighbors.is_some() && area.width > ZOOM_MAP_WIDTH {
+            ZOOM_MAP_WIDTH
+        } else {
+            0
+        };
+        let summary_w = area
+            .width
+            .saturating_sub(map_w.saturating_add(u16::from(map_w > 0)));
         frame.render_widget(
-            Paragraph::new(agent_summary_line(app, p, area.width)),
-            Rect::new(area.x, area.y + 1, area.width, 1),
+            Paragraph::new(agent_summary_line(app, p, summary_w)),
+            Rect::new(area.x, area.y + 1, summary_w, 1),
         );
+        if let Some(neighbors) = app.view.zoom_neighbors.filter(|_| map_w > 0) {
+            frame.render_widget(
+                Paragraph::new(zoom_map_line(neighbors, p)),
+                Rect::new(area.x + area.width - map_w, area.y + 1, map_w, 1),
+            );
+        }
     }
 }
 
@@ -438,15 +450,13 @@ fn zoom_map_line(neighbors: ZoomNeighbors, p: &Palette) -> Line<'static> {
         }
     };
     Line::from(vec![
-        Span::styled("Z", marker),
+        slot(neighbors.up, "k"),
         Span::styled(" ", gap),
-        slot(neighbors.up, "U"),
-        Span::styled(" ", gap),
-        slot(neighbors.left, "L"),
+        slot(neighbors.left, "h"),
         Span::styled("[@]", marker),
-        slot(neighbors.right, "R"),
+        slot(neighbors.right, "l"),
         Span::styled(" ", gap),
-        slot(neighbors.down, "D"),
+        slot(neighbors.down, "j"),
     ])
 }
 
@@ -508,18 +518,6 @@ fn render_switch_button(app: &AppState, frame: &mut Frame, area: Rect) {
         frame.buffer_mut()[(area.x, y)]
             .set_symbol("│")
             .set_style(Style::default().fg(p.surface_dim).bg(p.surface0));
-    }
-    // Row one carries the tab status, centered between the left divider and
-    // the final cell, which stays reserved for the blocked-agent badge.
-    if area.height > 1 {
-        if let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) {
-            frame.render_widget(
-                Paragraph::new(mobile_tab_status(ws))
-                    .style(Style::default().fg(p.overlay1).bg(p.surface0))
-                    .alignment(Alignment::Center),
-                Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
-            );
-        }
     }
     let label_y = if area.height > 1 { area.y + 1 } else { area.y };
     frame.render_widget(
@@ -1701,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_header_unzoomed_shows_identity_only_and_tab_status_in_switch_button() {
+    fn mobile_header_unzoomed_keeps_tab_status_in_header() {
         let mut ws = crate::workspace::Workspace::test_new("alpha");
         ws.test_add_tab(None);
         let mut app = mobile_app(ws);
@@ -1715,20 +1713,16 @@ mod tests {
         let button_row1: String = rows[1].chars().skip(switch_x).collect();
         assert!(status_row.contains("alpha"), "status row: {status_row:?}");
         assert!(
-            !status_row.contains("tab 1"),
-            "tab status must move out of the status area: {status_row:?}"
+            status_row.contains("tab 1 · 1/2"),
+            "tab status stays in the status area: {status_row:?}"
         );
         assert!(
             !rows[0].contains("[@]") && !rows[0].contains('Z'),
             "unzoomed header must have no zoom marker: {rows:?}"
         );
         assert!(
-            button_row0.contains("tab 1"),
-            "switch button row one carries the tab status: {button_row0:?}"
-        );
-        assert!(
-            !button_row0.contains("1/2"),
-            "button width clips the multi-tab position: {button_row0:?}"
+            !button_row0.contains("tab") && !button_row0.contains("1/2"),
+            "switch button no longer carries the tab status: {button_row0:?}"
         );
         assert!(
             button_row1.contains("switch"),
@@ -1737,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_header_zoomed_shows_all_directions_in_fixed_slot_map() {
+    fn mobile_header_zoomed_shows_z_and_second_row_vim_map() {
         let mut ws = crate::workspace::Workspace::test_new("alpha");
         let p1 = ws.tabs[0].root_pane;
         ws.test_split(ratatui::layout::Direction::Vertical);
@@ -1760,10 +1754,8 @@ mod tests {
                 down: true,
             })
         );
-        assert!(
-            rows[0].contains("Z U L[@]R D"),
-            "zoomed header map: {rows:?}"
-        );
+        assert!(rows[0].contains("Z tab 1"), "zoomed header state: {rows:?}");
+        assert!(rows[1].contains("k h[@]l j"), "zoomed header map: {rows:?}");
     }
 
     #[test]
@@ -1786,7 +1778,7 @@ mod tests {
                 down: false,
             })
         );
-        assert!(rows[0].contains("Z U  [@]"), "fixed slots: {rows:?}");
+        assert!(rows[1].contains("k  [@]"), "fixed slots: {rows:?}");
     }
 
     #[test]
@@ -1799,13 +1791,13 @@ mod tests {
 
         ws_focus(&mut app, p1);
         let rows = mobile_header_screen(&mut app, 44, 20);
-        assert!(rows[0].contains("[@]R"), "focus left pane: {rows:?}");
-        assert!(!rows[0].contains("L[@]"), "focus left pane: {rows:?}");
+        assert!(rows[1].contains("[@]l"), "focus left pane: {rows:?}");
+        assert!(!rows[1].contains("h[@]"), "focus left pane: {rows:?}");
 
         ws_focus(&mut app, p2);
         let rows = mobile_header_screen(&mut app, 44, 20);
-        assert!(rows[0].contains("L[@]"), "focus right pane: {rows:?}");
-        assert!(!rows[0].contains("[@]R"), "focus right pane: {rows:?}");
+        assert!(rows[1].contains("h[@]"), "focus right pane: {rows:?}");
+        assert!(!rows[1].contains("[@]l"), "focus right pane: {rows:?}");
     }
 
     fn ws_focus(app: &mut AppState, pane_id: PaneId) {
@@ -1813,13 +1805,14 @@ mod tests {
     }
 
     #[test]
-    fn mobile_header_zoom_map_collapses_atomically_to_z_when_narrow() {
+    fn mobile_header_narrow_keeps_z_and_tab_but_hides_map() {
         let mut ws = crate::workspace::Workspace::test_new("alpha");
         ws.test_split(ratatui::layout::Direction::Horizontal);
         ws.zoomed = true;
         let mut app = mobile_app(ws);
 
-        // Status area is 9 columns at this width, too narrow for the full map.
+        // Status area is 9 columns at this width, too narrow for the full map
+        // plus separation from the summary.
         let rows = mobile_header_screen(&mut app, 20, 20);
 
         assert!(app.view.zoom_neighbors.is_some());
@@ -1827,12 +1820,13 @@ mod tests {
             .chars()
             .take(app.view.mobile_menu_hit_area.x as usize - 1)
             .collect();
-        assert!(status_row.trim_end().ends_with('Z'), "Z fallback: {rows:?}");
-        assert!(!status_row.contains("[@]"), "Z fallback: {rows:?}");
+        assert!(status_row.contains('Z'), "zoom state: {rows:?}");
+        assert!(status_row.contains("tab 1"), "tab status: {rows:?}");
+        assert!(!rows[1].contains("[@]"), "map fallback: {rows:?}");
     }
 
     #[test]
-    fn mobile_header_switch_button_reserves_badge_cell_from_tab_status() {
+    fn mobile_header_switch_button_keeps_blocked_badge_without_tab_status() {
         let mut ws = crate::workspace::Workspace::test_new("blocked");
         ws.test_add_tab(None);
         let mut app = mobile_app(ws);
@@ -1848,7 +1842,7 @@ mod tests {
 
         let switch = app.view.mobile_menu_hit_area;
         let button_row0: String = rows[0].chars().skip(switch.x as usize).collect();
-        assert!(button_row0.contains("tab 1"), "button row: {button_row0:?}");
+        assert!(!button_row0.contains("tab"), "button row: {button_row0:?}");
         assert_eq!(
             rows[0].chars().nth((switch.x + switch.width - 1) as usize),
             Some('●'),

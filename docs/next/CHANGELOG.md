@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- The mobile header now marks a zoomed tab with a `Z` indicator and a fixed-slot `U L[@]R D` map showing which directions have neighboring panes around the focused one, while the tab status moves into the switch button's first row.
+- The mobile header now marks a zoomed tab with a `Z` beside the tab status and a second-row fixed-slot `k h[@]l j` map showing which Vim directions have neighboring panes around the focused one.
 
 ## [0.8.2] - 2026-08-19
 
