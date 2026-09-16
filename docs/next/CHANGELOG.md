@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- The mobile header now marks a zoomed tab with a `Z` beside the tab status and a second-row fixed-slot `k h[@]l j` map showing which Vim directions have neighboring panes around the focused one.
+- The mobile header now marks a zoomed tab with a `Z` beside the tab status and a second-row fixed-slot `k h[@]l j` map showing which Vim directions have neighboring panes around the focused one, colored by each pane's agent status. The map stays visible in the mobile Workspace Switcher top bar.
 
 ## [0.8.2] - 2026-08-19
 

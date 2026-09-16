@@ -2329,7 +2329,7 @@ fn render_mobile_top_bar(
     }
     let p = &app.palette;
     let status_width = close.x.saturating_sub(area.x).saturating_sub(1);
-    super::mobile::render_header_status(
+    super::mobile::render_base_header_status(
         app,
         terminal_runtimes,
         frame,
@@ -2992,7 +2992,10 @@ mod tests {
                 render_workspace_switcher_overlay(state, &terminal_runtimes, frame);
             })
             .unwrap();
-        let buffer = terminal.backend().buffer();
+        buffer_rows(terminal.backend().buffer(), width, height)
+    }
+
+    fn buffer_rows(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> Vec<String> {
         (0..height)
             .map(|y| {
                 (0..width)
@@ -3000,6 +3003,79 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn buffer_cells(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+    ) -> Vec<Vec<(String, Color, Color)>> {
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.symbol().to_string(), cell.fg, cell.bg)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Rendered overlay cells as (symbol, foreground, background).
+    fn rendered_cells(
+        state: &AppState,
+        width: u16,
+        height: u16,
+    ) -> Vec<Vec<(String, Color, Color)>> {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_switcher_overlay(state, &terminal_runtimes, frame);
+            })
+            .unwrap();
+        buffer_cells(terminal.backend().buffer(), width, height)
+    }
+
+    /// Rendered base mobile header cells as (symbol, foreground, background).
+    fn header_cells(state: &AppState, width: u16, height: u16) -> Vec<Vec<(String, Color, Color)>> {
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let header = state.view.mobile_header_rect;
+        terminal
+            .draw(|frame| {
+                crate::ui::mobile::render_mobile_header(state, &terminal_runtimes, frame, header);
+            })
+            .unwrap();
+        buffer_cells(terminal.backend().buffer(), width, height)
+    }
+
+    /// Foreground colors of the `k`, `h`, `[@]`, `l`, and `j` map slots.
+    fn zoom_map_colors(cells: &[Vec<(String, Color, Color)>]) -> [Color; 5] {
+        let row = &cells[1];
+        let text: String = row.iter().map(|(symbol, _, _)| symbol.as_str()).collect();
+        let start = text.find("[@]").expect("zoom map row") - 3;
+        [0, 2, 3, 6, 8].map(|offset| row[start + offset].1)
+    }
+
+    fn set_zoom_pane_state(
+        state: &mut AppState,
+        pane_id: crate::layout::PaneId,
+        pane_state: crate::detect::AgentState,
+        seen: bool,
+    ) {
+        let pane = state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane");
+        pane.seen = seen;
+        let terminal_id = pane.attached_terminal_id.clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .state = pane_state;
     }
 
     fn assert_no_preview_text(screen: &[String]) {
@@ -3085,23 +3161,92 @@ mod tests {
     }
 
     #[test]
-    fn mobile_top_bar_keeps_tab_status_without_zoom_indicator_while_zoomed() {
-        let mut state = app_with_workspaces(&["alpha", "beta"]);
-        state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        state.workspaces[0].zoomed = true;
+    fn mobile_top_bar_shares_zoomed_header_zoom_map() {
+        let (mut state, _) = zoomed_mobile_state();
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
         assert!(state.view.zoom_neighbors.is_some());
+
+        let header = header_cells(&state, 60, 20);
         state.open_workspace_switcher();
+        let overlay = rendered_cells(&state, 60, 20);
 
-        let screen = rendered_screen(&state, 60, 20);
+        // The overlay top bar shows the same status cells as the base header.
+        let status_width = state.workspace_switcher_close_rect().x as usize - 1;
+        for row in 0..2 {
+            assert_eq!(
+                overlay[row][..status_width],
+                header[row][..status_width],
+                "row {row}: switcher top bar must match the base header status",
+            );
+        }
 
-        // The overlay top bar preserves the shared header appearance: tab
-        // status on the right, no base-header zoom indicator.
-        let top_bar = &screen[0];
-        assert!(top_bar.contains("alpha"), "top bar: {top_bar}");
-        assert!(top_bar.contains("tab 1"), "top bar: {top_bar}");
-        assert!(!top_bar.contains("[@]"), "top bar: {top_bar}");
-        assert!(!top_bar.contains('Z'), "top bar: {top_bar}");
+        let row0: String = overlay[0]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        let row1: String = overlay[1]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        assert!(row0.contains('Z'), "top bar zoom marker: {row0}");
+        assert!(row1.contains("k h[@]l j"), "top bar map: {row1}");
+        let colors = zoom_map_colors(&overlay);
+        assert_eq!(colors[1], state.palette.red, "blocked left neighbor");
+        assert_eq!(colors[2], state.palette.teal, "unseen idle focused pane");
+    }
+
+    #[test]
+    fn mobile_switcher_selection_does_not_change_zoom_map() {
+        let (mut state, _) = zoomed_mobile_state();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        state.open_workspace_switcher();
+        let before = rendered_cells(&state, 60, 20);
+
+        state.workspace_switcher.selected = 1 - state.workspace_switcher.selected;
+        let after = rendered_cells(&state, 60, 20);
+
+        assert_ne!(before, after, "selection change must repaint the list");
+        assert_eq!(zoom_map_colors(&before), zoom_map_colors(&after));
+        assert_eq!(state.active, Some(0));
+    }
+
+    #[test]
+    fn mobile_switcher_zoom_map_tracks_pane_state_while_open() {
+        let (mut state, focused) = zoomed_mobile_state();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        state.open_workspace_switcher();
+        let before = zoom_map_colors(&rendered_cells(&state, 60, 20));
+        assert_eq!(before[2], state.palette.teal, "focused unseen idle");
+
+        set_zoom_pane_state(
+            &mut state,
+            focused,
+            crate::detect::AgentState::Blocked,
+            true,
+        );
+
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 60, 20));
+        assert!(state.workspace_switcher.active, "switcher stays open");
+        let after = zoom_map_colors(&rendered_cells(&state, 60, 20));
+
+        assert_eq!(after[2], state.palette.red, "focused blocked");
+    }
+
+    fn zoomed_mobile_state() -> (AppState, crate::layout::PaneId) {
+        let mut state = app_with_workspaces(&["alpha", "beta"]);
+        let ws = &mut state.workspaces[0];
+        let top = ws.tabs[0].root_pane;
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.tabs[0].layout.focus_pane(top);
+        let left = ws.test_split(ratatui::layout::Direction::Vertical);
+        let center = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(center);
+        ws.zoomed = true;
+        state.ensure_test_terminals();
+        set_zoom_pane_state(&mut state, left, crate::detect::AgentState::Blocked, true);
+        set_zoom_pane_state(&mut state, center, crate::detect::AgentState::Idle, false);
+        (state, center)
     }
 
     #[test]

@@ -11,9 +11,9 @@ use super::sidebar::{
     next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
     WorkspaceListEntry,
 };
-use super::status::{state_icon, state_icon_symbol};
+use super::status::{state_icon, state_icon_symbol, state_label_color};
 use super::text::{display_width_u16, truncate_end};
-use crate::app::state::{Palette, ToastKind, ToastNotification, ZoomNeighbors};
+use crate::app::state::{Palette, ToastKind, ToastNotification, ZoomMapSlot, ZoomNeighbors};
 use crate::app::AppState;
 use crate::config::StatusIndicatorStyle;
 use crate::detect::AgentState;
@@ -321,51 +321,13 @@ pub(crate) fn render_mobile_panel(
     render_mobile_switcher_content(app, terminal_runtimes, frame, areas.viewport);
 }
 
-pub(super) fn render_header_status(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let p = &app.palette;
-    let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) else {
-        frame.render_widget(Paragraph::new(" no workspace"), area);
-        return;
-    };
-
-    let tab_label = mobile_tab_status(ws);
-    let row1 = Rect::new(area.x, area.y, area.width, 1);
-    let tab_w = display_width_u16(&tab_label)
-        .saturating_add(1)
-        .min(area.width);
-    let name_w = area.width.saturating_sub(tab_w);
-
-    render_workspace_identity(app, terminal_runtimes, frame, row1, name_w);
-    frame.render_widget(
-        Paragraph::new(tab_label)
-            .style(Style::default().fg(p.overlay1).bg(p.panel_bg))
-            .alignment(Alignment::Right),
-        Rect::new(row1.x + name_w, row1.y, tab_w, 1),
-    );
-
-    if area.height > 1 {
-        frame.render_widget(
-            Paragraph::new(agent_summary_line(app, p, area.width)),
-            Rect::new(area.x, area.y + 1, area.width, 1),
-        );
-    }
-}
-
 /// Fixed Vim-direction slots around the focused pane: `k h[@]l j`.
 const ZOOM_MAP_WIDTH: u16 = 9;
 
 /// Base mobile header status: workspace identity, zoom state, and tab status on
-/// row one; agent summary and the zoom map on row two. The Workspace Switcher
-/// top bar (`render_header_status`) remains unchanged.
-fn render_base_header_status(
+/// row one; agent summary and the zoom map on row two. The mobile Workspace
+/// Switcher top bar renders the same status through this function.
+pub(super) fn render_base_header_status(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
@@ -439,21 +401,24 @@ fn zoom_marker_style(p: &Palette) -> Style {
 }
 
 fn zoom_map_line(neighbors: ZoomNeighbors, p: &Palette) -> Line<'static> {
-    let marker = zoom_marker_style(p);
-    let direction = Style::default().fg(p.overlay1).bg(p.panel_bg);
     let gap = Style::default().bg(p.panel_bg);
-    let slot = |available: bool, label: &'static str| {
-        if available {
-            Span::styled(label, direction)
-        } else {
-            Span::styled(" ", gap)
-        }
+    let state_style = |slot: ZoomMapSlot| {
+        Style::default()
+            .fg(state_label_color(slot.state, slot.seen, p))
+            .bg(p.panel_bg)
+    };
+    let slot = |slot: Option<ZoomMapSlot>, label: &'static str| match slot {
+        Some(slot) => Span::styled(label, state_style(slot)),
+        None => Span::styled(" ", gap),
     };
     Line::from(vec![
         slot(neighbors.up, "k"),
         Span::styled(" ", gap),
         slot(neighbors.left, "h"),
-        Span::styled("[@]", marker),
+        Span::styled(
+            "[@]",
+            state_style(neighbors.center).add_modifier(Modifier::BOLD),
+        ),
         slot(neighbors.right, "l"),
         Span::styled(" ", gap),
         slot(neighbors.down, "j"),
@@ -1670,7 +1635,11 @@ mod tests {
         assert_eq!(mobile_tab_status(&workspace), "tab 2 · 2/2");
     }
 
-    fn mobile_header_screen(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+    fn mobile_header_cells(
+        app: &mut AppState,
+        width: u16,
+        height: u16,
+    ) -> Vec<Vec<(String, ratatui::style::Color, ratatui::style::Color)>> {
         crate::ui::compute_view(app, Rect::new(0, 0, width, height));
         let header = app.view.mobile_header_rect;
         let backend = ratatui::backend::TestBackend::new(width, height);
@@ -1682,10 +1651,55 @@ mod tests {
         (header.y..header.y + header.height)
             .map(|y| {
                 (header.x..header.x + header.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.symbol().to_string(), cell.fg, cell.bg)
+                    })
+                    .collect()
             })
             .collect()
+    }
+
+    fn mobile_header_screen(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+        mobile_header_cells(app, width, height)
+            .into_iter()
+            .map(|row| row.into_iter().map(|(symbol, _, _)| symbol).collect())
+            .collect()
+    }
+
+    /// Foreground and background colors of the `k`, `h`, `[@]`, `l`, and `j`
+    /// slots in the map row.
+    fn zoom_map_colors(
+        cells: &[Vec<(String, ratatui::style::Color, ratatui::style::Color)>],
+    ) -> [(ratatui::style::Color, ratatui::style::Color); 5] {
+        let row = &cells[1];
+        let text: String = row.iter().map(|(symbol, _, _)| symbol.as_str()).collect();
+        let start = text.find("[@]").expect("zoom map row") - 3;
+        [0, 2, 3, 6, 8].map(|offset| (row[start + offset].1, row[start + offset].2))
+    }
+
+    /// Zoomed workspace whose focused pane is surrounded on all four sides.
+    fn plus_zoomed_workspace() -> (crate::workspace::Workspace, PaneId) {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        let p1 = ws.tabs[0].root_pane;
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.tabs[0].layout.focus_pane(p1);
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        let center = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(center);
+        ws.zoomed = true;
+        (ws, center)
+    }
+
+    fn set_pane_agent_state(app: &mut AppState, pane_id: PaneId, state: AgentState, seen: bool) {
+        let pane = app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane");
+        pane.seen = seen;
+        let terminal_id = pane.attached_terminal_id.clone();
+        app.terminals.get_mut(&terminal_id).expect("terminal").state = state;
     }
 
     fn mobile_app(ws: crate::workspace::Workspace) -> AppState {
@@ -1732,53 +1746,153 @@ mod tests {
 
     #[test]
     fn mobile_header_zoomed_shows_z_and_second_row_vim_map() {
-        let mut ws = crate::workspace::Workspace::test_new("alpha");
-        let p1 = ws.tabs[0].root_pane;
-        ws.test_split(ratatui::layout::Direction::Vertical);
-        ws.tabs[0].layout.focus_pane(p1);
-        ws.test_split(ratatui::layout::Direction::Vertical);
-        let center = ws.test_split(ratatui::layout::Direction::Horizontal);
-        ws.test_split(ratatui::layout::Direction::Horizontal);
-        ws.tabs[0].layout.focus_pane(center);
-        ws.zoomed = true;
+        let (ws, _) = plus_zoomed_workspace();
         let mut app = mobile_app(ws);
 
         let rows = mobile_header_screen(&mut app, 44, 20);
 
-        assert_eq!(
-            app.view.zoom_neighbors,
-            Some(ZoomNeighbors {
-                up: true,
-                left: true,
-                right: true,
-                down: true,
-            })
-        );
+        assert!(app.view.zoom_neighbors.is_some());
         assert!(rows[0].contains("Z tab 1"), "zoomed header state: {rows:?}");
         assert!(rows[1].contains("k h[@]l j"), "zoomed header map: {rows:?}");
     }
 
     #[test]
-    fn mobile_header_zoomed_keeps_fixed_slots_for_unavailable_directions() {
+    fn mobile_header_zoom_map_colors_center_and_neighbor_panes() {
+        let (ws, center) = plus_zoomed_workspace();
+        let mut app = mobile_app(ws);
+        let neighbors: Vec<PaneId> = app.workspaces[0].tabs[0]
+            .panes
+            .keys()
+            .copied()
+            .filter(|pane_id| *pane_id != center)
+            .collect();
+        let neighbor_states = [
+            (AgentState::Blocked, true),
+            (AgentState::Working, true),
+            (AgentState::Idle, false),
+            (AgentState::Unknown, true),
+        ];
+        for (pane_id, (state, seen)) in neighbors.iter().zip(neighbor_states) {
+            set_pane_agent_state(&mut app, *pane_id, state, seen);
+        }
+        set_pane_agent_state(&mut app, center, AgentState::Idle, true);
+
+        let cells = mobile_header_cells(&mut app, 44, 20);
+        let row0: String = cells[0]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        let row1: String = cells[1]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        let [(k_fg, _), (h_fg, _), (center_fg, _), (l_fg, _), (j_fg, _)] = zoom_map_colors(&cells);
+
+        assert!(row0.contains('Z'), "zoom state marker: {row0:?}");
+        assert!(row1.contains("k h[@]l j"), "map: {row1:?}");
+        assert_eq!(center_fg, app.palette.green, "focused seen idle pane");
+        let neighbor_colors = [k_fg, h_fg, l_fg, j_fg];
+        for expected in [
+            app.palette.red,
+            app.palette.yellow,
+            app.palette.teal,
+            app.palette.overlay0,
+        ] {
+            assert_eq!(
+                neighbor_colors
+                    .iter()
+                    .filter(|color| **color == expected)
+                    .count(),
+                1,
+                "one neighbor slot must use {expected:?}: {neighbor_colors:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_header_zoom_map_uses_canonical_state_colors() {
         let mut ws = crate::workspace::Workspace::test_new("alpha");
-        ws.test_split(ratatui::layout::Direction::Vertical);
+        let left = ws.tabs[0].root_pane;
+        let right = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(right);
         ws.zoomed = true;
         let mut app = mobile_app(ws);
+        set_pane_agent_state(&mut app, right, AgentState::Working, true);
 
-        let rows = mobile_header_screen(&mut app, 44, 20);
+        let cases = [
+            (AgentState::Blocked, true, app.palette.red),
+            (AgentState::Working, true, app.palette.yellow),
+            (AgentState::Idle, false, app.palette.teal),
+            (AgentState::Idle, true, app.palette.green),
+            (AgentState::Unknown, true, app.palette.overlay0),
+        ];
+        for (state, seen, expected) in cases {
+            set_pane_agent_state(&mut app, left, state, seen);
+
+            let colors = zoom_map_colors(&mobile_header_cells(&mut app, 44, 20));
+
+            assert_eq!(
+                colors[1].0, expected,
+                "left neighbor slot for {state:?}/seen={seen}",
+            );
+            assert_eq!(
+                colors[2].0, app.palette.yellow,
+                "focused pane slot for {state:?}/seen={seen}",
+            );
+        }
+    }
+
+    #[test]
+    fn mobile_header_zoom_map_no_neighbor_keeps_colored_center() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+        set_pane_agent_state(&mut app, pane_id, AgentState::Blocked, true);
+
+        let cells = mobile_header_cells(&mut app, 44, 20);
+        let row1: String = cells[1]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        let colors = zoom_map_colors(&cells);
+
+        assert!(row1.contains("[@]"), "no-neighbor center: {row1:?}");
+        assert_eq!(colors[2].0, app.palette.red);
+        for (index, (_, background)) in colors.iter().enumerate() {
+            if index != 2 {
+                assert_eq!(*background, app.palette.panel_bg, "empty slot {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_header_zoomed_keeps_fixed_slots_for_unavailable_directions() {
+        let mut ws = crate::workspace::Workspace::test_new("alpha");
+        let top = ws.tabs[0].root_pane;
+        let bottom = ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.zoomed = true;
+        let mut app = mobile_app(ws);
+        set_pane_agent_state(&mut app, top, AgentState::Blocked, true);
+        set_pane_agent_state(&mut app, bottom, AgentState::Idle, false);
+
+        let cells = mobile_header_cells(&mut app, 44, 20);
+        let row1: String = cells[1]
+            .iter()
+            .map(|(symbol, _, _)| symbol.as_str())
+            .collect();
+        let colors = zoom_map_colors(&cells);
 
         // Focus is the bottom pane: only Up resolves, and the L/R/D slots stay
         // reserved as spaces instead of collapsing the map.
-        assert_eq!(
-            app.view.zoom_neighbors,
-            Some(ZoomNeighbors {
-                up: true,
-                left: false,
-                right: false,
-                down: false,
-            })
-        );
-        assert!(rows[1].contains("k  [@]"), "fixed slots: {rows:?}");
+        assert!(row1.contains("k  [@]"), "fixed slots: {row1:?}");
+        assert_eq!(colors[0].0, app.palette.red, "up neighbor color");
+        assert_eq!(colors[2].0, app.palette.teal, "focused pane color");
+        for (index, (_, background)) in colors.iter().enumerate() {
+            if index != 0 && index != 2 {
+                assert_eq!(*background, app.palette.panel_bg, "empty slot {index}");
+            }
+        }
     }
 
     #[test]

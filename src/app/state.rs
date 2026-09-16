@@ -807,16 +807,33 @@ pub enum ViewLayout {
     Mobile,
 }
 
-/// Which cardinal directions have a pane reachable from the focused pane under
-/// the canonical directional-navigation rule. TUI presentation projection for
-/// the mobile header zoom indicator; populated only for the mobile layout
-/// while the active tab is zoomed.
+/// Agent-state facts for one slot of the mobile header zoom map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoomMapSlot {
+    pub state: AgentState,
+    pub seen: bool,
+}
+
+impl Default for ZoomMapSlot {
+    fn default() -> Self {
+        Self {
+            state: AgentState::Unknown,
+            seen: true,
+        }
+    }
+}
+
+/// The focused pane and the panes reachable from it under the canonical
+/// directional-navigation rule. TUI presentation projection for the mobile
+/// header zoom map; populated only for the mobile layout while the active tab
+/// is zoomed. `None` means no pane occupies that direction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ZoomNeighbors {
-    pub up: bool,
-    pub left: bool,
-    pub right: bool,
-    pub down: bool,
+    pub center: ZoomMapSlot,
+    pub up: Option<ZoomMapSlot>,
+    pub left: Option<ZoomMapSlot>,
+    pub right: Option<ZoomMapSlot>,
+    pub down: Option<ZoomMapSlot>,
 }
 
 pub struct ViewState {

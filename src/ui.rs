@@ -99,9 +99,10 @@ pub(crate) use self::{
     tabs::{compute_tab_bar_view, tab_bar_content_area},
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::{ViewLayout, ZoomNeighbors};
+use crate::app::state::{ViewLayout, ZoomMapSlot, ZoomNeighbors};
 use crate::app::{AppState, Mode};
-use crate::layout::{find_in_direction, NavDirection};
+use crate::detect::AgentState;
+use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
@@ -366,8 +367,8 @@ fn compute_view_internal(
     }
 }
 
-/// Directional pane-neighbor facts for the mobile header zoom indicator.
-/// `Some` only while the active tab is zoomed: zoom deliberately collapses
+/// Focused-pane and directional pane-neighbor facts for the mobile header zoom
+/// map. `Some` only while the active tab is zoomed: zoom deliberately collapses
 /// `view.pane_infos` to the focused pane, so this resolves all four directions
 /// once against the complete `TileLayout` for the current terminal area, using
 /// the same navigation rule pane movement uses.
@@ -378,11 +379,26 @@ fn compute_zoom_neighbors(app: &AppState, terminal_area: Rect) -> Option<ZoomNei
     }
     let panes = ws.layout.panes(terminal_area);
     let focused = panes.iter().find(|pane| pane.is_focused)?;
+    let tab = ws.active_tab()?;
+    let slot = |pane_id: PaneId| -> ZoomMapSlot {
+        let Some(pane) = tab.panes.get(&pane_id) else {
+            return ZoomMapSlot::default();
+        };
+        ZoomMapSlot {
+            state: app
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .map(|terminal| terminal.state)
+                .unwrap_or(AgentState::Unknown),
+            seen: pane.seen,
+        }
+    };
     Some(ZoomNeighbors {
-        up: find_in_direction(focused, NavDirection::Up, &panes).is_some(),
-        left: find_in_direction(focused, NavDirection::Left, &panes).is_some(),
-        right: find_in_direction(focused, NavDirection::Right, &panes).is_some(),
-        down: find_in_direction(focused, NavDirection::Down, &panes).is_some(),
+        center: slot(focused.id),
+        up: find_in_direction(focused, NavDirection::Up, &panes).map(slot),
+        left: find_in_direction(focused, NavDirection::Left, &panes).map(slot),
+        right: find_in_direction(focused, NavDirection::Right, &panes).map(slot),
+        down: find_in_direction(focused, NavDirection::Down, &panes).map(slot),
     })
 }
 
@@ -867,6 +883,78 @@ mod tests {
         assert_eq!(
             app.view.zoom_neighbors,
             Some(crate::app::state::ZoomNeighbors::default())
+        );
+    }
+
+    #[test]
+    fn zoom_neighbors_carry_canonical_directional_pane_facts() {
+        use crate::app::state::ZoomMapSlot;
+        use std::collections::HashMap;
+
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        let p1 = ws.tabs[0].root_pane;
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        ws.tabs[0].layout.focus_pane(p1);
+        ws.test_split(ratatui::layout::Direction::Vertical);
+        let center = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(center);
+        ws.zoomed = true;
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.ensure_test_terminals();
+
+        // Distinct facts per pane make every slot prove its own pane.
+        let facts = [
+            (AgentState::Blocked, true),
+            (AgentState::Working, true),
+            (AgentState::Idle, false),
+            (AgentState::Idle, true),
+            (AgentState::Unknown, true),
+        ];
+        let pane_ids: Vec<PaneId> = app.workspaces[0].tabs[0].panes.keys().copied().collect();
+        let mut expected = HashMap::new();
+        for (pane_id, (state, seen)) in pane_ids.iter().zip(facts) {
+            let pane = app.workspaces[0].tabs[0]
+                .panes
+                .get_mut(pane_id)
+                .expect("pane");
+            pane.seen = seen;
+            let terminal_id = pane.attached_terminal_id.clone();
+            app.terminals.get_mut(&terminal_id).expect("terminal").state = state;
+            expected.insert(*pane_id, ZoomMapSlot { state, seen });
+        }
+
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+
+        let panes = app.workspaces[0].layout.panes(app.view.terminal_area);
+        let focused = panes
+            .iter()
+            .find(|pane| pane.is_focused)
+            .expect("focused pane");
+        let projection = app.view.zoom_neighbors.expect("zoomed projection");
+        assert_eq!(projection.center, expected[&focused.id]);
+        for (direction, slot) in [
+            (NavDirection::Up, projection.up),
+            (NavDirection::Left, projection.left),
+            (NavDirection::Right, projection.right),
+            (NavDirection::Down, projection.down),
+        ] {
+            assert_eq!(
+                slot,
+                find_in_direction(focused, direction, &panes).map(|pane_id| expected[&pane_id]),
+                "direction {direction:?}",
+            );
+        }
+        assert!(
+            projection.up.is_some()
+                && projection.left.is_some()
+                && projection.right.is_some()
+                && projection.down.is_some(),
+            "plus layout must resolve every direction: {projection:?}",
         );
     }
 
