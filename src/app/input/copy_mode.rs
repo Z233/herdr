@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
+use super::navigate::{ActionContext, NavigateAction};
 use crate::{
     app::{
         state::{
@@ -19,6 +20,15 @@ impl App {
             return;
         }
         self.state.update_dismissed = true;
+        if let Some(NavigateAction::WorkspaceSwitcher) =
+            super::terminal_direct_non_indexed_navigation_action(&self.state, &key)
+        {
+            self.execute_tui_navigate_action(
+                NavigateAction::WorkspaceSwitcher,
+                ActionContext::Direct,
+            );
+            return;
+        }
         if self.state.is_prefix_key(&key) {
             self.state.mode = Mode::Prefix;
             return;
@@ -3112,5 +3122,108 @@ mod tests {
         assert_eq!(copy_mode_clipboard_text(&mut app), "alp");
         assert_eq!(app.state.mode, Mode::Terminal);
         assert!(app.state.copy_mode.is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_mode_workspace_switcher_shortcut_opens_switcher_and_is_consumed() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_screen(b"");
+        let pane_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("pane info")
+            .clone();
+        let (runtime, mut pane_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                pane_info.inner_rect.width,
+                pane_info.inner_rect.height,
+                16 * 1024,
+                &bytes,
+                8,
+            );
+        app.state.workspaces[0].tabs[0]
+            .runtimes
+            .insert(pane_id, runtime);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        app.handle_key(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('v'), KeyModifiers::empty()))
+            .await;
+        app.handle_key(TerminalKey::new(KeyCode::Char('l'), KeyModifiers::empty()))
+            .await;
+        let offset_before = copy_mode_offset_from_bottom(&app, pane_id);
+        let cursor_before = {
+            let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+            (copy_mode.cursor_row, copy_mode.cursor_col)
+        };
+        let selection_before = app
+            .state
+            .selection
+            .as_ref()
+            .expect("selection")
+            .ordered_cells();
+        assert!(offset_before > 0);
+
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::CONTROL))
+            .await;
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Copy);
+        let copy_mode = app.state.copy_mode.as_ref().expect("copy mode");
+        assert_eq!((copy_mode.cursor_row, copy_mode.cursor_col), cursor_before);
+        assert!(copy_mode.search.query.is_empty());
+        assert_eq!(
+            app.state
+                .selection
+                .as_ref()
+                .expect("selection")
+                .ordered_cells(),
+            selection_before
+        );
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), offset_before);
+        assert!(
+            pane_rx.try_recv().is_err(),
+            "switcher key must not be forwarded to the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_mode_workspace_switcher_uses_configured_direct_key() {
+        let config: crate::config::Config =
+            toml::from_str("[keys]\nworkspace_switcher = \"ctrl+u\"\n").expect("config");
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.keybinds = config.keybinds();
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        let offset_before = copy_mode_offset_from_bottom(&app, pane_id);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::CONTROL));
+        assert!(!app.state.workspace_switcher.active);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        assert!(app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), offset_before);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_ignores_unrelated_direct_navigation_binding() {
+        let config: crate::config::Config =
+            toml::from_str("[keys]\ntoggle_sidebar = \"ctrl+n\"\n").expect("config");
+        let (mut app, _) = app_with_copy_screen(b"alpha\n");
+        app.state.keybinds = config.keybinds();
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+
+        assert!(!app.state.sidebar_collapsed);
+        assert!(!app.state.workspace_switcher.active);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert!(app.state.copy_mode.is_some());
     }
 }
