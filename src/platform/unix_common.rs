@@ -461,7 +461,7 @@ pub(crate) fn open_client_terminal_writer(
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut path = vec![0_i8; libc::PATH_MAX as usize];
+    let mut path = vec![0 as libc::c_char; libc::PATH_MAX as usize];
     let result = unsafe { libc::ttyname_r(libc::STDOUT_FILENO, path.as_mut_ptr(), path.len()) };
     if result != 0 {
         return Err(std::io::Error::from_raw_os_error(result));

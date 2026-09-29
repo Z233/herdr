@@ -102,6 +102,7 @@ pub(crate) struct ClientState {
     desired: Vec<HostPlacement>,
     presentation_generation: u64,
     uploading: Option<PendingUpload>,
+    pending_image_id: Option<u32>,
     interrupt_upload: bool,
     trusted_direct: HashMap<SurfaceGraphicsAssetKey, u32>,
     #[cfg(unix)]
@@ -148,6 +149,7 @@ impl ClientState {
         #[cfg(unix)]
         self.direct_trust_during_output.clear();
         self.stale_images.clear();
+        self.pending_image_id = None;
         self.forced_delete_images.clear();
         self.reset_pending = true;
     }
@@ -211,6 +213,7 @@ impl ClientState {
             .collect::<Vec<_>>();
         self.stale_images.extend(unclaimed);
         self.trusted_direct.clear();
+        self.prune_stale_images();
         let placed = scene
             .placements
             .iter()
@@ -223,6 +226,19 @@ impl ClientState {
             }
         }
         self.scene = scene;
+    }
+
+    fn prune_stale_images(&mut self) {
+        self.stale_images.retain(|id| {
+            self.host.images.contains_key(id)
+                || self.pending_image_id == Some(*id)
+                || self
+                    .uploading
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.host_id == *id)
+        });
+        self.stale_images.sort_unstable();
+        self.stale_images.dedup();
     }
 
     /// Record what is visible without copying or encoding image bytes. The writer
@@ -268,18 +284,13 @@ impl ClientState {
         self.direct_trust_during_output.clear();
         if self.stale_images.first().is_some_and(|id| {
             !self.host.images.contains_key(id)
+                && self.pending_image_id != Some(*id)
                 && self
                     .uploading
                     .as_ref()
                     .is_none_or(|transfer| transfer.host_id != *id)
         }) {
-            self.stale_images.retain(|id| {
-                self.host.images.contains_key(id)
-                    || self
-                        .uploading
-                        .as_ref()
-                        .is_some_and(|transfer| transfer.host_id == *id)
-            });
+            self.prune_stale_images();
         }
         let mut host = self.host.clone();
         let mut bytes = Vec::new();
@@ -287,6 +298,7 @@ impl ClientState {
         let mut stale = None;
         let mut forced = None;
         let mut reset = false;
+        let mut pending_image_id = None;
 
         if let Some(transfer) = uploading.as_mut() {
             let still_visible = self.desired.iter().any(|placement| {
@@ -370,6 +382,7 @@ impl ClientState {
                         data,
                         offset: 0,
                     };
+                    pending_image_id = Some(id);
                     if !Self::upload_chunk(&mut transfer, &mut host, &mut bytes) {
                         uploading = Some(transfer);
                     }
@@ -377,7 +390,11 @@ impl ClientState {
                 }
             }
         }
-        self.unit(bytes, host, uploading, stale, forced, reset)
+        let unit = self.unit(bytes, host, uploading, stale, forced, reset);
+        if unit.is_some() {
+            self.pending_image_id = pending_image_id;
+        }
+        unit
     }
 
     fn upload_chunk(
@@ -443,6 +460,7 @@ impl ClientState {
 
     pub(crate) fn acknowledge(&mut self, unit: GraphicsUnit) {
         self.host = unit.host;
+        self.pending_image_id = None;
         #[cfg(unix)]
         self.host
             .images
@@ -471,13 +489,7 @@ impl ClientState {
                 self.forced_delete_images.remove(index);
             }
         }
-        self.stale_images.retain(|id| {
-            self.host.images.contains_key(id)
-                || self
-                    .uploading
-                    .as_ref()
-                    .is_some_and(|transfer| transfer.host_id == *id)
-        });
+        self.prune_stale_images();
         if self.reset_pending && self.host.images.is_empty() && self.uploading.is_none() {
             self.host.clear_bytes();
             self.reset_pending = false;
@@ -950,6 +962,41 @@ mod tests {
             },
             &Occlusion::default(),
         )
+    }
+
+    fn last_uploaded_payload(wire: &[u8]) -> Vec<u8> {
+        use base64::Engine as _;
+
+        let mut remaining = wire;
+        let mut payload = Vec::new();
+        let mut completed = Vec::new();
+        while let Some(start) = remaining.windows(3).position(|bytes| bytes == b"\x1b_G") {
+            remaining = &remaining[start + 3..];
+            let end = remaining
+                .windows(2)
+                .position(|bytes| bytes == b"\x1b\\")
+                .expect("complete Kitty command");
+            let command = &remaining[..end];
+            remaining = &remaining[end + 2..];
+            let Some(separator) = command.iter().position(|byte| *byte == b';') else {
+                continue;
+            };
+            let control = &command[..separator];
+            if control.starts_with(b"a=t,t=d,") {
+                payload.clear();
+            } else if !control.starts_with(b"m=") {
+                continue;
+            }
+            payload.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&command[separator + 1..])
+                    .expect("valid Kitty base64"),
+            );
+            if control.windows(3).any(|bytes| bytes == b"m=0") {
+                completed.clone_from(&payload);
+            }
+        }
+        completed
     }
 
     fn asset(
@@ -1655,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_stale_before_cached_stale_does_not_block_cleanup_or_upload() {
+    fn absent_stale_is_pruned_before_cached_stale_cleanup() {
         let mut state = ClientState::default();
         state.set_scope("stale-order");
         state.prepare(
@@ -1699,7 +1746,7 @@ mod tests {
             .images
             .insert(cached_id, image_signature_from_asset(&cached.key));
         state.set_scene(scene(next, 0, 0));
-        assert_eq!(state.stale_images, [a_id, cached_id]);
+        assert_eq!(state.stale_images, [cached_id]);
         state.prepare(
             Visibility::Main,
             (0, 0),
@@ -1770,5 +1817,115 @@ mod tests {
             state.host.images.get(&direct_id),
             Some(&image_signature_from_asset(&direct.key))
         );
+    }
+
+    #[test]
+    fn scene_churn_without_output_keeps_only_deliverable_cleanup() {
+        let mut state = ClientState::default();
+        state.set_scope("scene-churn-idle");
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let mut final_data = Vec::new();
+        for generation in 0..256_u16 {
+            final_data = vec![generation as u8; 8192];
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                u64::from(generation),
+                final_data.clone(),
+            );
+            image.key.image_width = 64;
+            image.key.image_height = 32;
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            assert!(
+                state.stale_images.is_empty(),
+                "undelivered generation {generation} left cleanup behind"
+            );
+        }
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        assert_eq!(last_uploaded_payload(&bytes), final_data);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scene_churn_with_first_chunk_unacknowledged_retains_only_its_cleanup() {
+        let mut state = ClientState::default();
+        state.set_scope("scene-churn-busy");
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let mut first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![42; 8192],
+        );
+        first.key.image_width = 64;
+        first.key.image_height = 32;
+        let first_id = host_image_id("scene-churn-busy", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let queued = state.next_unit().expect("first Kitty chunk queued");
+        assert!(queued.bytes.windows(3).any(|bytes| bytes == b"m=1"));
+        assert!(state.host.images.is_empty());
+        assert!(!state.upload_in_progress());
+
+        let mut final_data = Vec::new();
+        for generation in 0..256_u16 {
+            final_data = vec![generation as u8; 8192];
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                u64::from(generation) + 2,
+                final_data.clone(),
+            );
+            image.key.image_width = 64;
+            image.key.image_height = 32;
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            assert!(
+                state.stale_images.len() <= 1,
+                "unbounded cleanup after generation {generation}: {}",
+                state.stale_images.len()
+            );
+            assert!(state.stale_images.iter().all(|id| *id == first_id));
+        }
+        state.acknowledge(queued);
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("\x1b_Gm=0;\x1b\\"),
+            "in-flight upload must end before deletion"
+        );
+        assert!(
+            text.contains(&format!("a=d,d=I,i={first_id}")),
+            "in-flight image must be deleted"
+        );
+        assert_eq!(last_uploaded_payload(&bytes), final_data);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(!state.host.images.contains_key(&first_id));
+        assert!(state.next_unit().is_none());
     }
 }
