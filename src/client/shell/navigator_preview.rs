@@ -402,6 +402,9 @@ impl ClientShellState {
         let style = Style::default()
             .fg(self.config.palette.subtext0)
             .bg(self.config.palette.panel_bg);
+        let terminal_style = Style::default()
+            .fg(self.config.palette.text)
+            .bg(ratatui::style::Color::Reset);
         for y in area.y..area.bottom() {
             buffer[(area.x - 1, y)].set_symbol("│").set_style(style);
         }
@@ -437,12 +440,36 @@ impl ClientShellState {
             }
             return;
         }
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buffer[(x, y)].set_symbol(" ").set_style(terminal_style);
+            }
+        }
         let preview = &navigator.fork.preview;
-        if preview.scope.is_none() || preview.scope != self.navigator_preview_scope() {
+        let Some(scope) = self.navigator_preview_scope() else {
+            super::render::put_text(
+                buffer,
+                area.x,
+                area.y,
+                area.width,
+                "Preview unavailable",
+                terminal_style,
+            );
+            return;
+        };
+        if preview.scope.as_ref() != Some(&scope) {
+            super::render::put_text(
+                buffer,
+                area.x,
+                area.y,
+                area.width,
+                "Loading preview…",
+                terminal_style,
+            );
             return;
         }
         if let Some(error) = &preview.error {
-            super::render::put_text(buffer, area.x, area.y, area.width, error, style);
+            super::render::put_text(buffer, area.x, area.y, area.width, error, terminal_style);
         } else if let Some(local) = &preview.local {
             copy_cells(local, buffer, area);
         } else if let Some(ready) = &preview.ready {
@@ -491,24 +518,7 @@ impl ClientShellState {
                 if pane_area.height == 0 || pane_area.width == 0 {
                     continue;
                 }
-                super::render::put_text(
-                    buffer,
-                    pane_area.x,
-                    pane_area.y,
-                    pane_area.width,
-                    pane_id,
-                    style,
-                );
-                copy_cells(
-                    frame,
-                    buffer,
-                    Rect::new(
-                        pane_area.x,
-                        pane_area.y + 1,
-                        pane_area.width,
-                        pane_area.height - 1,
-                    ),
-                );
+                copy_cells(frame, buffer, pane_area);
             }
         } else {
             super::render::put_text(
@@ -517,7 +527,7 @@ impl ClientShellState {
                 area.y,
                 area.width,
                 "Loading preview…",
-                style,
+                terminal_style,
             );
         }
     }

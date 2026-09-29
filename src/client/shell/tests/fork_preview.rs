@@ -36,6 +36,19 @@ fn layout() -> ResponseResult {
     }
 }
 
+fn one_row_layout() -> ResponseResult {
+    ResponseResult::PaneLayout {
+        layout: serde_json::from_value(serde_json::json!({
+            "workspace_id": "ws_1", "tab_id": "tab_1", "area": {"x":0,"y":0,"width":80,"height":20},
+            "zoomed": false, "focused_pane_id": "pane_1", "splits": [], "panes": [
+                {"pane_id":"pane_1", "focused":true, "rect":{"x":0,"y":0,"width":40,"height":1}, "terminal_size":{"cols":40,"rows":1}},
+                {"pane_id":"pane_2", "focused":false, "rect":{"x":40,"y":1,"width":40,"height":1}, "terminal_size":{"cols":40,"rows":1}}
+            ]
+        }))
+        .unwrap(),
+    }
+}
+
 fn read_result(pane_id: &str, text: &str, revision: u64) -> ResponseResult {
     ResponseResult::PaneRead {
         read: PaneReadResult {
@@ -78,6 +91,19 @@ fn request_id(
             _ => None,
         })
         .expect("preview request uses explicit endpoint and pane")
+}
+
+fn preview_area(state: &ClientShellState, width: u16) -> Rect {
+    let popup = state.hits.navigator_popup;
+    let body = Rect::new(
+        popup.x + 1,
+        popup.y + 3,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(6),
+    );
+    super::super::navigator_preview::split_body(body, width)
+        .1
+        .expect("wide terminal preview")
 }
 
 #[test]
@@ -196,6 +222,156 @@ fn fork_merge_navigator_preview_reads_all_selected_tab_panes_without_focus_and_k
     let mut refresh = ClientShellInput::default();
     state.refresh_navigator_preview(Instant::now() + Duration::from_secs(2), &mut refresh);
     request_id(&refresh.actions, &remote, None);
+}
+
+#[test]
+fn fork_merge_navigator_local_preview_uses_default_and_program_backgrounds() {
+    let (mut state, _) = super::fork_navigator::two_endpoints();
+    let mut pane_surface = surface();
+    let mut terminal = Buffer::with_lines(["LIVE", "PANE"]);
+    terminal[(0, 0)].set_fg(Color::Green);
+    terminal[(1, 0)].set_bg(Color::Indexed(4));
+    pane_surface.frame = FrameData::from_ratatui_buffer(&terminal, None);
+    state.set_pane_surface(pane_surface);
+    state.config.palette.panel_bg = Color::Indexed(238);
+    let normal = state.compose(120, 36).unwrap();
+    state.open_navigator_overlay();
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+        panic!("navigator");
+    };
+    navigator.selected = Some(ClientNavigatorTarget::Pane {
+        endpoint_id: ClientEndpointId::Local,
+        pane_id: "pane_1".into(),
+    });
+    state.compose(120, 36).unwrap();
+    let mut poll = ClientShellInput::default();
+    state.refresh_navigator_preview(Instant::now(), &mut poll);
+    assert!(poll.actions.is_empty());
+    let frame = state.compose(120, 36).unwrap();
+    let area = preview_area(&state, 120);
+    let buffer = frame.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x, area.y)].fg, Color::Green);
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x + 1, area.y)].bg, Color::Indexed(4));
+    assert_eq!(buffer[(area.x + 8, area.y + 4)].bg, Color::Reset);
+
+    state.overlay = None;
+    let after_close = state.compose(120, 36).unwrap();
+    assert_eq!(after_close.cells, normal.cells);
+}
+
+#[test]
+fn fork_merge_navigator_remote_preview_uses_first_row_and_default_background() {
+    let (mut state, remote) = remote_preview();
+    state.config.palette.panel_bg = Color::Indexed(238);
+    let mut poll = ClientShellInput::default();
+    state.refresh_navigator_preview(Instant::now(), &mut poll);
+    let layout_request = request_id(&poll.actions, &remote, None);
+    let (_, reads) =
+        state.handle_endpoint_result("remote-boot", &layout_request, Ok(one_row_layout()));
+    let first = request_id(&reads, &remote, Some("pane_1"));
+    let (_, reads) = state.handle_endpoint_result(
+        "remote-boot",
+        &first,
+        Ok(read_result("pane_1", "\x1b[44mFIRSTROW\x1b[0m DEFAULT", 2)),
+    );
+    let second = request_id(&reads, &remote, Some("pane_2"));
+    let (_, actions) = state.handle_endpoint_result(
+        "remote-boot",
+        &second,
+        Ok(read_result("pane_2", "SECONDROW", 8)),
+    );
+    assert!(actions.is_empty());
+
+    let frame = state.compose(120, 36).unwrap();
+    let area = preview_area(&state, 120);
+    let buffer = frame.to_ratatui_buffer().unwrap();
+    let second_x = area.x + (40 * area.width / 80);
+    let second_y = area.y + (area.height / 20);
+    assert_eq!(buffer[(area.x, area.y)].symbol(), "F");
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(4));
+    assert_eq!(buffer[(area.x + 9, area.y)].symbol(), "D");
+    assert_eq!(buffer[(area.x + 9, area.y)].bg, Color::Reset);
+    assert_eq!(buffer[(second_x, second_y)].symbol(), "S");
+    assert_eq!(buffer[(second_x, second_y)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x + 8, area.y + 4)].bg, Color::Reset);
+    let preview_text = frame_rows(&frame)
+        .into_iter()
+        .skip(area.y as usize)
+        .take(area.height as usize)
+        .map(|row| {
+            row.chars()
+                .skip(area.x as usize)
+                .take(area.width as usize)
+                .collect::<String>()
+        })
+        .collect::<String>();
+    assert!(!preview_text.contains("pane_1"));
+    assert!(!preview_text.contains("pane_2"));
+}
+
+#[test]
+fn fork_merge_navigator_status_backgrounds_and_directory_style_are_distinct() {
+    let (mut state, remote) = remote_preview();
+    state.config.palette.panel_bg = Color::Indexed(238);
+    state.retire_endpoint(&remote);
+    let unavailable = state.compose(120, 36).unwrap();
+    let area = preview_area(&state, 120);
+    let buffer = unavailable.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x, area.y)].fg, state.config.palette.text);
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert!(frame_rows(&unavailable)
+        .join("\n")
+        .contains("Preview unavailable"));
+
+    let (mut state, remote) = remote_preview();
+    state.config.palette.panel_bg = Color::Indexed(238);
+    let mut poll = ClientShellInput::default();
+    state.refresh_navigator_preview(Instant::now(), &mut poll);
+    let loading = state.compose(120, 36).unwrap();
+    let area = preview_area(&state, 120);
+    let buffer = loading.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert!(frame_rows(&loading).join("\n").contains("Loading preview"));
+    let layout_request = request_id(&poll.actions, &remote, None);
+    let (_, reads) = state.handle_endpoint_result("remote-boot", &layout_request, Ok(layout()));
+    let first = request_id(&reads, &remote, Some("pane_1"));
+    state.handle_endpoint_result(
+        "remote-boot",
+        &first,
+        Err(ClientShellEndpointError {
+            code: Some("endpoint_timeout".into()),
+            message: "Preview timed out".into(),
+        }),
+    );
+    let failed = state.compose(120, 36).unwrap();
+    let buffer = failed.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert!(frame_rows(&failed).join("\n").contains("Preview timed out"));
+
+    let (mut state, remote) = remote_preview();
+    state.config.palette.panel_bg = Color::Indexed(238);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+        panic!("navigator");
+    };
+    navigator.selected = Some(ClientNavigatorTarget::Directory {
+        endpoint_id: remote,
+        shown_path: "/repo".into(),
+        canonical_path: "/repo".into(),
+    });
+    navigator.fork.directory.preview = Some(crate::api::schema::WorkspaceDirectoryPreview {
+        canonical_path: "/repo".into(),
+        entries: vec![crate::api::schema::WorkspaceDirectoryEntry {
+            name: "src".into(),
+            is_dir: true,
+        }],
+        truncated: false,
+    });
+    let directory = state.compose(120, 36).unwrap();
+    let area = preview_area(&state, 120);
+    let buffer = directory.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x, area.y)].symbol(), "/");
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(238));
 }
 
 #[test]
