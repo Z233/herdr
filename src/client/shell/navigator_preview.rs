@@ -404,7 +404,7 @@ impl ClientShellState {
             .bg(self.config.palette.panel_bg);
         let terminal_style = Style::default()
             .fg(self.config.palette.text)
-            .bg(ratatui::style::Color::Reset);
+            .bg(self.config.palette.panel_bg);
         for y in area.y..area.bottom() {
             buffer[(area.x - 1, y)].set_symbol("│").set_style(style);
         }
@@ -471,7 +471,7 @@ impl ClientShellState {
         if let Some(error) = &preview.error {
             super::render::put_text(buffer, area.x, area.y, area.width, error, terminal_style);
         } else if let Some(local) = &preview.local {
-            copy_cells(local, buffer, area);
+            copy_cells(local, buffer, area, self.config.palette.panel_bg);
         } else if let Some(ready) = &preview.ready {
             let layout = &ready.layout;
             for (pane_id, _, frame) in &ready.panes {
@@ -518,7 +518,7 @@ impl ClientShellState {
                 if pane_area.height == 0 || pane_area.width == 0 {
                     continue;
                 }
-                copy_cells(frame, buffer, pane_area);
+                copy_cells(frame, buffer, pane_area, self.config.palette.panel_bg);
             }
         } else {
             super::render::put_text(
@@ -533,14 +533,23 @@ impl ClientShellState {
     }
 }
 
-fn copy_cells(source: &Buffer, destination: &mut Buffer, area: Rect) {
+fn copy_cells(
+    source: &Buffer,
+    destination: &mut Buffer,
+    area: Rect,
+    default_background: ratatui::style::Color,
+) {
     let area = area.intersection(destination.area);
     let width = source.area.width.min(area.width);
     for y in 0..source.area.height.min(area.height) {
         for x in 0..width {
             let cell = &source[(source.area.x + x, source.area.y + y)];
             if cell.symbol().width() <= usize::from(width - x) {
-                destination[(area.x + x, area.y + y)] = cell.clone();
+                let mut cell = cell.clone();
+                if cell.bg == ratatui::style::Color::Reset {
+                    cell.bg = default_background;
+                }
+                destination[(area.x + x, area.y + y)] = cell;
             }
         }
     }

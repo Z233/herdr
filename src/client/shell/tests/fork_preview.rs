@@ -228,9 +228,12 @@ fn fork_merge_navigator_preview_reads_all_selected_tab_panes_without_focus_and_k
 fn fork_merge_navigator_local_preview_uses_default_and_program_backgrounds() {
     let (mut state, _) = super::fork_navigator::two_endpoints();
     let mut pane_surface = surface();
-    let mut terminal = Buffer::with_lines(["LIVE", "PANE"]);
+    let mut terminal = Buffer::with_lines(["LIVE  ", "PANE  ", "      ", "      "]);
     terminal[(0, 0)].set_fg(Color::Green);
+    terminal[(0, 0)].modifier = ratatui::style::Modifier::BOLD;
     terminal[(1, 0)].set_bg(Color::Indexed(4));
+    terminal[(4, 0)].set_bg(Color::Indexed(5));
+    terminal[(5, 0)].set_symbol("界");
     pane_surface.frame = FrameData::from_ratatui_buffer(&terminal, None);
     state.set_pane_surface(pane_surface);
     state.config.palette.panel_bg = Color::Indexed(238);
@@ -251,9 +254,23 @@ fn fork_merge_navigator_local_preview_uses_default_and_program_backgrounds() {
     let area = preview_area(&state, 120);
     let buffer = frame.to_ratatui_buffer().unwrap();
     assert_eq!(buffer[(area.x, area.y)].fg, Color::Green);
-    assert_eq!(buffer[(area.x, area.y)].bg, Color::Reset);
+    assert!(buffer[(area.x, area.y)]
+        .modifier
+        .contains(ratatui::style::Modifier::BOLD));
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(238));
     assert_eq!(buffer[(area.x + 1, area.y)].bg, Color::Indexed(4));
-    assert_eq!(buffer[(area.x + 8, area.y + 4)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x + 4, area.y)].symbol(), " ");
+    assert_eq!(buffer[(area.x + 4, area.y)].bg, Color::Indexed(5));
+    assert_eq!(buffer[(area.x + 5, area.y)].symbol(), " ");
+    assert_eq!(buffer[(area.x + 5, area.y)].bg, Color::Indexed(238));
+    assert_eq!(buffer[(area.x, area.y + 2)].symbol(), " ");
+    assert_eq!(buffer[(area.x, area.y + 2)].bg, Color::Indexed(238));
+    assert_eq!(
+        buffer[(area.x + area.width - 1, area.y + 3)].bg,
+        Color::Indexed(238)
+    );
+    let repeated = state.compose(120, 36).unwrap();
+    assert_eq!(repeated.cells, frame.cells);
 
     state.overlay = None;
     let after_close = state.compose(120, 36).unwrap();
@@ -261,7 +278,7 @@ fn fork_merge_navigator_local_preview_uses_default_and_program_backgrounds() {
 }
 
 #[test]
-fn fork_merge_navigator_remote_preview_uses_first_row_and_default_background() {
+fn fork_merge_navigator_remote_preview_uses_first_row_and_panel_background() {
     let (mut state, remote) = remote_preview();
     state.config.palette.panel_bg = Color::Indexed(238);
     let mut poll = ClientShellInput::default();
@@ -273,7 +290,11 @@ fn fork_merge_navigator_remote_preview_uses_first_row_and_default_background() {
     let (_, reads) = state.handle_endpoint_result(
         "remote-boot",
         &first,
-        Ok(read_result("pane_1", "\x1b[44mFIRSTROW\x1b[0m DEFAULT", 2)),
+        Ok(read_result(
+            "pane_1",
+            "\x1b[1;31;44mFIRSTROW\x1b[0m DEFAULT\x1b[42m \x1b[0m",
+            2,
+        )),
     );
     let second = request_id(&reads, &remote, Some("pane_2"));
     let (_, actions) = state.handle_endpoint_result(
@@ -290,11 +311,21 @@ fn fork_merge_navigator_remote_preview_uses_first_row_and_default_background() {
     let second_y = area.y + (area.height / 20);
     assert_eq!(buffer[(area.x, area.y)].symbol(), "F");
     assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(4));
+    assert_eq!(buffer[(area.x, area.y)].fg, Color::Indexed(1));
+    assert!(buffer[(area.x, area.y)]
+        .modifier
+        .contains(ratatui::style::Modifier::BOLD));
     assert_eq!(buffer[(area.x + 9, area.y)].symbol(), "D");
-    assert_eq!(buffer[(area.x + 9, area.y)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x + 9, area.y)].bg, Color::Indexed(238));
+    assert_eq!(buffer[(area.x + 16, area.y)].symbol(), " ");
+    assert_eq!(buffer[(area.x + 16, area.y)].bg, Color::Indexed(2));
     assert_eq!(buffer[(second_x, second_y)].symbol(), "S");
-    assert_eq!(buffer[(second_x, second_y)].bg, Color::Reset);
-    assert_eq!(buffer[(area.x + 8, area.y + 4)].bg, Color::Reset);
+    assert_eq!(buffer[(second_x, second_y)].bg, Color::Indexed(238));
+    assert_eq!(
+        buffer[(area.x + area.width - 1, area.y)].bg,
+        Color::Indexed(238)
+    );
+    assert_eq!(buffer[(area.x + 8, area.y + 4)].bg, Color::Indexed(238));
     let preview_text = frame_rows(&frame)
         .into_iter()
         .skip(area.y as usize)
@@ -308,6 +339,8 @@ fn fork_merge_navigator_remote_preview_uses_first_row_and_default_background() {
         .collect::<String>();
     assert!(!preview_text.contains("pane_1"));
     assert!(!preview_text.contains("pane_2"));
+    let repeated = state.compose(120, 36).unwrap();
+    assert_eq!(repeated.cells, frame.cells);
 }
 
 #[test]
@@ -318,8 +351,9 @@ fn fork_merge_navigator_status_backgrounds_and_directory_style_are_distinct() {
     let unavailable = state.compose(120, 36).unwrap();
     let area = preview_area(&state, 120);
     let buffer = unavailable.to_ratatui_buffer().unwrap();
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(238));
     assert_eq!(buffer[(area.x, area.y)].fg, state.config.palette.text);
-    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Indexed(238));
     assert!(frame_rows(&unavailable)
         .join("\n")
         .contains("Preview unavailable"));
@@ -331,7 +365,8 @@ fn fork_merge_navigator_status_backgrounds_and_directory_style_are_distinct() {
     let loading = state.compose(120, 36).unwrap();
     let area = preview_area(&state, 120);
     let buffer = loading.to_ratatui_buffer().unwrap();
-    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(238));
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Indexed(238));
     assert!(frame_rows(&loading).join("\n").contains("Loading preview"));
     let layout_request = request_id(&poll.actions, &remote, None);
     let (_, reads) = state.handle_endpoint_result("remote-boot", &layout_request, Ok(layout()));
@@ -346,7 +381,8 @@ fn fork_merge_navigator_status_backgrounds_and_directory_style_are_distinct() {
     );
     let failed = state.compose(120, 36).unwrap();
     let buffer = failed.to_ratatui_buffer().unwrap();
-    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Reset);
+    assert_eq!(buffer[(area.x, area.y)].bg, Color::Indexed(238));
+    assert_eq!(buffer[(area.x + 30, area.y + 5)].bg, Color::Indexed(238));
     assert!(frame_rows(&failed).join("\n").contains("Preview timed out"));
 
     let (mut state, remote) = remote_preview();
