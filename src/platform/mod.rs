@@ -50,6 +50,18 @@ impl ChildExitReason {
 #[cfg(unix)]
 pub(crate) use unix_common::classify_child_exit;
 
+#[cfg(unix)]
+pub(crate) use unix_common::open_client_terminal_writer;
+
+#[cfg(unix)]
+pub(crate) use unix_common::discard_stalled_client_terminal_output;
+
+#[cfg(windows)]
+pub(crate) use windows::open_client_terminal_writer;
+
+#[cfg(windows)]
+pub(crate) use windows::interrupt_client_terminal_writer;
+
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
     ChildExitReason::Exited

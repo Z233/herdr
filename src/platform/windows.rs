@@ -13,8 +13,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod client_terminal;
 mod clipboard_image;
 mod config_backup;
+
+pub(crate) use client_terminal::{interrupt_client_terminal_writer, open_client_terminal_writer};
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.

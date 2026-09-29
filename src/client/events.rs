@@ -12,6 +12,7 @@ pub(super) enum ClientLoopEvent {
     StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     Resize(u16, u16, u32, u32, bool),
     TerminalUnavailable(io::Error),
+    OutputReady,
     ServerMessage {
         endpoint_id: endpoint::ClientEndpointId,
         generation: u64,

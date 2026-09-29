@@ -177,19 +177,10 @@ pub(super) fn resize_poll_loop(
     }
 }
 
-#[cfg(not(windows))]
-pub(super) fn query_host_terminal_appearance() {
-    let _ = write_host_terminal_appearance_query(io::stdout());
-}
-
 #[cfg(any(not(windows), test))]
 pub(super) fn write_host_terminal_appearance_query(mut writer: impl io::Write) -> io::Result<()> {
     writer.write_all(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.as_bytes())?;
     writer.flush()
-}
-
-pub(super) fn query_host_terminal_theme() {
-    let _ = write_host_terminal_theme_query(io::stdout());
 }
 
 pub(super) fn should_query_host_terminal_theme() -> bool {
@@ -205,10 +196,6 @@ pub(super) fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io:
 }
 
 const HOST_CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
-
-pub(super) fn query_host_cell_size() {
-    let _ = write_host_cell_size_query(io::stdout());
-}
 
 pub(super) fn should_query_host_cell_size() -> bool {
     !cfg!(windows)

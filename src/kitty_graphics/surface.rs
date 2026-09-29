@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use ratatui::layout::Rect;
 
@@ -96,12 +97,36 @@ impl Occlusion {
 pub(crate) struct ClientState {
     scope: String,
     scene: SurfaceGraphicsScene,
-    assets: HashMap<SurfaceGraphicsAssetKey, Vec<u8>>,
+    assets: HashMap<SurfaceGraphicsAssetKey, Arc<[u8]>>,
     host: HostGraphicsCache,
+    desired: Vec<HostPlacement>,
+    presentation_generation: u64,
+    uploading: Option<PendingUpload>,
+    interrupt_upload: bool,
     trusted_direct: HashMap<SurfaceGraphicsAssetKey, u32>,
     reset_pending: bool,
     stale_images: Vec<u32>,
     forced_delete_images: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUpload {
+    key: SurfaceGraphicsAssetKey,
+    host_id: u32,
+    data: Arc<[u8]>,
+    offset: usize,
+}
+
+pub(crate) struct GraphicsUnit {
+    pub(crate) bytes: Vec<u8>,
+    host: HostGraphicsCache,
+    uploading: Option<PendingUpload>,
+    stale: Option<u32>,
+    forced: Option<u32>,
+    reset: bool,
+    interrupted: bool,
+    scope: String,
+    presentation_generation: u64,
 }
 
 impl ClientState {
@@ -115,6 +140,7 @@ impl ClientState {
         }
         self.scope = scope.to_owned();
         self.scene = SurfaceGraphicsScene::default();
+        self.desired.clear();
         self.assets.clear();
         self.trusted_direct.clear();
         self.stale_images.clear();
@@ -153,6 +179,7 @@ impl ClientState {
         self.forced_delete_images.push(image_id);
     }
 
+    #[cfg(test)]
     pub(crate) fn take_pending_cleanup(&mut self) -> Vec<u8> {
         let mut bytes = if self.reset_pending {
             self.reset_pending = false;
@@ -209,12 +236,13 @@ impl ClientState {
         self.assets.retain(|key, _| placed.contains(key));
         for asset in std::mem::take(&mut scene.assets) {
             if asset.data.len() as u64 == asset.key.data_len && placed.contains(&asset.key) {
-                self.assets.insert(asset.key, asset.data);
+                self.assets.insert(asset.key, Arc::from(asset.data));
             }
         }
         self.scene = scene;
     }
 
+    #[cfg(test)]
     pub(crate) fn encode(
         &mut self,
         visibility: Visibility,
@@ -249,7 +277,7 @@ impl ClientState {
                 client_host_placement(
                     &self.scope,
                     placement,
-                    self.assets.get(&placement.asset).map(Vec::as_slice),
+                    self.assets.get(&placement.asset).map(AsRef::as_ref),
                     visibility,
                     main_origin,
                     popup_origin,
@@ -271,6 +299,244 @@ impl ClientState {
             if !encoded.incomplete {
                 return bytes;
             }
+        }
+    }
+
+    /// Record what is visible without copying or encoding image bytes. The writer
+    /// acknowledges each bounded unit before the next one is produced.
+    pub(crate) fn prepare(
+        &mut self,
+        visibility: Visibility,
+        main_origin: (u16, u16),
+        popup_origin: Option<(u16, u16)>,
+        cell_size: HostCellSize,
+        occlusion: &Occlusion,
+    ) {
+        self.presentation_generation = self.presentation_generation.wrapping_add(1);
+        self.host.request_placement_replay();
+        if self.reset_pending && self.host.images.is_empty() {
+            self.host.clear_bytes();
+            self.reset_pending = false;
+        }
+        self.desired = if cell_size.is_known() && !self.scope.is_empty() {
+            self.scene
+                .placements
+                .iter()
+                .filter_map(|placement| {
+                    client_host_placement(
+                        &self.scope,
+                        placement,
+                        None,
+                        visibility,
+                        main_origin,
+                        popup_origin,
+                        cell_size,
+                        occlusion,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
+
+    pub(crate) fn next_unit(&self) -> Option<GraphicsUnit> {
+        let mut host = self.host.clone();
+        let mut bytes = Vec::new();
+        let mut uploading = self.uploading.clone();
+        let mut stale = None;
+        let mut forced = None;
+        let mut reset = false;
+
+        if let Some(transfer) = uploading.as_mut() {
+            let still_visible = self.desired.iter().any(|placement| {
+                placement.host_image_id == Some(transfer.host_id)
+                    && self
+                        .scene
+                        .placements
+                        .iter()
+                        .any(|item| item.asset == transfer.key)
+            });
+            if !still_visible || self.interrupt_upload {
+                bytes.extend_from_slice(b"\x1b_Gm=0;\x1b\\");
+                super::encode_delete_image(&mut bytes, transfer.host_id);
+                host.images.remove(&transfer.host_id);
+                stale = Some(transfer.host_id);
+                uploading = None;
+            } else if Self::upload_chunk(transfer, &mut host, &mut bytes) {
+                uploading = None;
+            }
+        } else if self.reset_pending {
+            if let Some(id) = host.images.keys().min().copied() {
+                super::encode_delete_image(&mut bytes, id);
+                host.images.remove(&id);
+                host.placements.retain(|(image, _), _| *image != id);
+                host.sources.retain(|_, image| *image != id);
+            } else {
+                host.clear_bytes();
+                reset = true;
+            }
+        } else if let Some(id) = self.forced_delete_images.first().copied() {
+            super::encode_delete_image(&mut bytes, id);
+            host.images.remove(&id);
+            host.placements.retain(|(image, _), _| *image != id);
+            host.sources.retain(|_, image| *image != id);
+            forced = Some(id);
+        } else if let Some(id) = self.stale_images.first().copied() {
+            if host.images.remove(&id).is_some() {
+                super::encode_delete_image(&mut bytes, id);
+            }
+            host.placements.retain(|(image, _), _| *image != id);
+            host.sources.retain(|_, image| *image != id);
+            stale = Some(id);
+        } else {
+            // Placement changes are small, and this encoder never receives the
+            // image data; an uncached image cannot trigger an eager upload.
+            let update = encode_graphics_update_incremental(
+                &mut host,
+                &self.desired,
+                &HashSet::new(),
+                None,
+                false,
+            );
+            debug_assert!(!update.incomplete || !update.bytes.is_empty());
+            bytes = update.bytes;
+            if bytes.is_empty() {
+                for placement in &self.desired {
+                    let id = placement.host_image_id?;
+                    let key = self
+                        .scene
+                        .placements
+                        .iter()
+                        .find(|item| host_image_id(&self.scope, &item.asset) == id)?
+                        .asset
+                        .clone();
+                    if host.images.get(&id) == Some(&image_signature_from_asset(&key)) {
+                        continue;
+                    }
+                    let data = self.assets.get(&key)?.clone();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if host.images.contains_key(&id) {
+                        super::encode_delete_image(&mut bytes, id);
+                        host.images.remove(&id);
+                        host.placements.retain(|(image, _), _| *image != id);
+                        break;
+                    }
+                    let mut transfer = PendingUpload {
+                        key,
+                        host_id: id,
+                        data,
+                        offset: 0,
+                    };
+                    if !Self::upload_chunk(&mut transfer, &mut host, &mut bytes) {
+                        uploading = Some(transfer);
+                    }
+                    break;
+                }
+            }
+        }
+        self.unit(bytes, host, uploading, stale, forced, reset)
+    }
+
+    fn upload_chunk(
+        transfer: &mut PendingUpload,
+        host: &mut HostGraphicsCache,
+        bytes: &mut Vec<u8>,
+    ) -> bool {
+        let end = (transfer.offset + super::KITTY_CHUNK_BYTES).min(transfer.data.len());
+        let control = (transfer.offset == 0).then(|| {
+            format!(
+                "a=t,t=d,f={},s={},v={},i={},q=2",
+                format_code(transfer.key.format),
+                transfer.key.image_width,
+                transfer.key.image_height,
+                transfer.host_id,
+            )
+        });
+        super::encode_kitty_chunk(
+            bytes,
+            control.as_deref(),
+            &transfer.data[transfer.offset..end],
+            end < transfer.data.len(),
+        );
+        transfer.offset = end;
+        if end == transfer.data.len() {
+            host.images
+                .insert(transfer.host_id, image_signature_from_asset(&transfer.key));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unit(
+        &self,
+        bytes: Vec<u8>,
+        host: HostGraphicsCache,
+        uploading: Option<PendingUpload>,
+        stale: Option<u32>,
+        forced: Option<u32>,
+        reset: bool,
+    ) -> Option<GraphicsUnit> {
+        (!bytes.is_empty()).then(|| GraphicsUnit {
+            bytes,
+            host,
+            uploading,
+            stale,
+            forced,
+            reset,
+            interrupted: self.interrupt_upload,
+            scope: self.scope.clone(),
+            presentation_generation: self.presentation_generation,
+        })
+    }
+
+    pub(crate) fn upload_in_progress(&self) -> bool {
+        self.uploading.is_some()
+    }
+
+    pub(crate) fn interrupt_upload(&mut self) {
+        self.interrupt_upload = true;
+    }
+
+    pub(crate) fn acknowledge(&mut self, unit: GraphicsUnit) {
+        self.host = unit.host;
+        if self.presentation_generation != unit.presentation_generation {
+            self.host.request_placement_replay();
+        }
+        self.uploading = unit.uploading;
+        if unit.interrupted {
+            self.interrupt_upload = false;
+        }
+        if self.scope == unit.scope && unit.reset {
+            self.reset_pending = false;
+        }
+        if let Some(id) = unit.stale {
+            if let Some(index) = self.stale_images.iter().position(|current| *current == id) {
+                self.stale_images.remove(index);
+            }
+        }
+        if let Some(id) = unit.forced {
+            if let Some(index) = self
+                .forced_delete_images
+                .iter()
+                .position(|current| *current == id)
+            {
+                self.forced_delete_images.remove(index);
+            }
+        }
+        self.stale_images.retain(|id| {
+            self.host.images.contains_key(id)
+                || self
+                    .uploading
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.host_id == *id)
+        });
+        if self.reset_pending && self.host.images.is_empty() && self.uploading.is_none() {
+            self.host.clear_bytes();
+            self.reset_pending = false;
         }
     }
 }

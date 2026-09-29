@@ -14,6 +14,8 @@ pub enum ClientError {
     ServerShutdown { reason: Option<String> },
     /// Lost connection to the server.
     ConnectionLost(io::Error),
+    /// Host terminal stopped accepting output.
+    TerminalOutput(io::Error),
     /// Protocol error (framing, deserialization).
     Protocol(protocol::FramingError),
 }
@@ -69,6 +71,7 @@ impl std::fmt::Display for ClientError {
                     write!(f, "lost connection to server: {err}")
                 }
             }
+            ClientError::TerminalOutput(err) => write!(f, "host terminal output failed: {err}"),
             ClientError::Protocol(err) => write!(f, "protocol error: {err}"),
         }
     }
@@ -79,6 +82,7 @@ impl std::error::Error for ClientError {
         match self {
             ClientError::ConnectionFailed(err) => Some(err),
             ClientError::ConnectionLost(err) => Some(err),
+            ClientError::TerminalOutput(err) => Some(err),
             ClientError::Protocol(err) => Some(err),
             _ => None,
         }

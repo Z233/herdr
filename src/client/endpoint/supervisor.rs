@@ -336,7 +336,9 @@ fn handshake_error(error: crate::client::ClientError) -> std::io::Error {
     use crate::client::ClientError;
     use crate::protocol::FramingError;
     match error {
-        ClientError::ConnectionFailed(error) | ClientError::ConnectionLost(error) => error,
+        ClientError::ConnectionFailed(error)
+        | ClientError::ConnectionLost(error)
+        | ClientError::TerminalOutput(error) => error,
         ClientError::HandshakeRejected { error, .. } => {
             std::io::Error::new(std::io::ErrorKind::Unsupported, error)
         }

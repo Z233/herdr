@@ -21,7 +21,8 @@ impl ClientShellState {
     }
 
     pub(crate) fn take_pending_graphics_cleanup(&mut self) -> Vec<u8> {
-        self.graphics.take_pending_cleanup()
+        // The output owner drains cleanup in bounded acknowledged transactions.
+        Vec::new()
     }
 
     pub(crate) fn set_graphics_cell_size(&mut self, width_px: u32, height_px: u32) {
@@ -33,7 +34,7 @@ impl ClientShellState {
 
     pub(super) fn compose_graphics(
         &mut self,
-        frame: &mut FrameData,
+        _frame: &mut FrameData,
         layout: ClientShellLayout,
         occlusion: &crate::kitty_graphics::surface::Occlusion,
     ) {
@@ -49,12 +50,33 @@ impl ClientShellState {
             .popup
             .as_ref()
             .map(|popup| (popup.inner_rect.x, popup.inner_rect.y));
-        frame.graphics = self.graphics.encode(
+        self.graphics.prepare(
             visibility,
             (layout.pane_surface.x, layout.pane_surface.y),
             popup_origin,
             self.graphics_cell_size,
             occlusion,
         );
+    }
+
+    pub(crate) fn next_graphics_unit(
+        &self,
+    ) -> Option<crate::kitty_graphics::surface::GraphicsUnit> {
+        self.graphics.next_unit()
+    }
+
+    pub(crate) fn graphics_upload_in_progress(&self) -> bool {
+        self.graphics.upload_in_progress()
+    }
+
+    pub(crate) fn interrupt_graphics_upload(&mut self) {
+        self.graphics.interrupt_upload();
+    }
+
+    pub(crate) fn acknowledge_graphics(
+        &mut self,
+        unit: crate::kitty_graphics::surface::GraphicsUnit,
+    ) {
+        self.graphics.acknowledge(unit);
     }
 }

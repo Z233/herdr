@@ -107,7 +107,10 @@ pub(super) fn sync_client_shell_keyboard_report_all(
     if desired == state.keyboard_report_all_active {
         return Ok(());
     }
-    crate::terminal_modes::set_host_kitty_keyboard_report_all(&mut io::stdout(), desired)
+    state
+        .queue_host_effect(|bytes| {
+            crate::terminal_modes::set_host_kitty_keyboard_report_all(bytes, desired)
+        })
         .map_err(ClientError::ConnectionFailed)?;
     state.keyboard_report_all_active = desired;
     Ok(())
@@ -129,7 +132,9 @@ pub(super) fn clear_endpoint_host_effects(
     if enabled != state.mouse_capture_active
         || sgr_pixels != host_sgr_pixels_active.load(std::sync::atomic::Ordering::Acquire)
     {
-        let _ = super::set_mouse_capture(enabled, sgr_pixels);
+        let _ = state.queue_host_effect(|bytes| {
+            terminal_setup::set_mouse_capture_to(bytes, enabled, sgr_pixels)
+        });
     }
     state.mouse_capture_active = enabled;
     host_mouse_capture_active.store(enabled, std::sync::atomic::Ordering::Release);
@@ -137,7 +142,8 @@ pub(super) fn clear_endpoint_host_effects(
 
     state.pane_keyboard_report_all = false;
     let _ = sync_client_shell_keyboard_report_all(state);
-    let _ = crate::terminal_effects::write_window_title(&mut std::io::stdout(), None);
+    let _ =
+        state.queue_host_effect(|bytes| crate::terminal_effects::write_window_title(bytes, None));
 }
 
 pub(super) fn apply_client_shell_input_source_changes(
@@ -722,10 +728,16 @@ pub(super) fn finish_client_shell_input(
     }
     #[cfg(not(windows))]
     if outcome.query_host_appearance {
-        query_host_terminal_appearance();
+        state
+            .queue_host_effect(|bytes| {
+                terminal_geometry::write_host_terminal_appearance_query(bytes)
+            })
+            .map_err(ClientError::ConnectionFailed)?;
     }
     if outcome.query_host_theme {
-        query_host_terminal_theme();
+        state
+            .queue_host_effect(|bytes| terminal_geometry::write_host_terminal_theme_query(bytes))
+            .map_err(ClientError::ConnectionFailed)?;
     }
     sync_client_shell_keyboard_report_all(state)?;
     let (replay, dispatch_repaint) = dispatch_client_shell_actions(

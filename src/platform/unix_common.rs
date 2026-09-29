@@ -453,6 +453,80 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+/// Use a new open-file description: changing nonblocking mode on a dup of stdout
+/// would also change the parent shell's terminal after Herdr exits.
+pub(crate) fn open_client_terminal_writer(
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut path = vec![0_i8; libc::PATH_MAX as usize];
+    let result = unsafe { libc::ttyname_r(libc::STDOUT_FILENO, path.as_mut_ptr(), path.len()) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result));
+    }
+    let tty_path = std::path::Path::new(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(path.as_ptr()) }.to_bytes(),
+    ));
+    let tty = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
+        .open(tty_path)?;
+    Ok(Box::new(ClientTerminalWriter { tty, stopped }))
+}
+
+pub(crate) fn discard_stalled_client_terminal_output() {
+    unsafe { libc::tcflush(libc::STDOUT_FILENO, libc::TCOFLUSH) };
+}
+
+struct ClientTerminalWriter {
+    tty: std::fs::File,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::io::Write for ClientTerminalWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        use std::sync::atomic::Ordering;
+        loop {
+            if self.stopped.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "client terminal output stopped",
+                ));
+            }
+            let written =
+                unsafe { libc::write(self.tty.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+            if written >= 0 {
+                return Ok(written as usize);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    let mut fd = libc::pollfd {
+                        fd: self.tty.as_raw_fd(),
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+                    if ready < 0
+                        && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                _ => return Err(error),
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
