@@ -424,6 +424,8 @@ async fn run_client_loop(
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
         #[cfg(unix)]
+        early_direct_response: None,
+        #[cfg(unix)]
         retired_direct_graphics: None,
         #[cfg(unix)]
         pending_surface_graphics: HashMap::new(),
@@ -777,6 +779,8 @@ async fn run_client_loop(
         #[cfg(unix)]
         let event = if let Some(event) = immediate_event {
             event
+        } else if let Some(response) = state.early_direct_response.take() {
+            ClientLoopEvent::DirectGraphicsResponse(response)
         } else {
             tokio::select! {
                 biased;

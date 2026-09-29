@@ -58,6 +58,8 @@ pub(super) struct ClientState {
     #[cfg(unix)]
     pub(super) direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
     #[cfg(unix)]
+    pub(super) early_direct_response: Option<direct_graphics::Response>,
+    #[cfg(unix)]
     pub(super) retired_direct_graphics: Option<(endpoint::ClientEndpointId, u64, u32)>,
     #[cfg(unix)]
     pub(super) pending_surface_graphics:
@@ -153,6 +155,8 @@ impl ClientState {
             pixel_geometry_exact: false,
             #[cfg(unix)]
             direct_graphics_response: Default::default(),
+            #[cfg(unix)]
+            early_direct_response: None,
             #[cfg(unix)]
             retired_direct_graphics: None,
             #[cfg(unix)]
@@ -454,6 +458,7 @@ impl ClientState {
                     }
                     if let Ok(mut matcher) = self.direct_graphics_response.lock() {
                         matcher.start(transfer_id);
+                        self.early_direct_response = matcher.take_ready();
                     }
                     self.direct_file_written = Some(DirectFileWritten {
                         owner,
@@ -465,6 +470,10 @@ impl ClientState {
             }
         }
         if output.is_busy() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        if self.early_direct_response.is_some() {
             return Ok(());
         }
         if let Some(frame) = self.pending_frame.take() {
@@ -522,7 +531,7 @@ impl ClientState {
         if !self.presentation_frozen && self.kitty_graphics_enabled {
             if let Some(unit) = self
                 .shell
-                .as_ref()
+                .as_mut()
                 .and_then(shell::ClientShellState::next_graphics_unit)
             {
                 let mut bytes = Vec::new();

@@ -24,6 +24,12 @@ impl io::Write for InterruptibleClientStdout {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "client terminal output stopped",
+            ));
+        }
         io::stdout().flush()
     }
 }
@@ -35,7 +41,7 @@ unsafe extern "system" {
 
 pub(crate) fn interrupt_client_terminal_writer(thread: &std::thread::JoinHandle<()>) {
     use std::os::windows::io::AsRawHandle;
-    unsafe {
+    crate::platform::wait_for_client_terminal_writer_with_cancel(thread, || unsafe {
         CancelSynchronousIo(thread.as_raw_handle().cast());
-    }
+    });
 }

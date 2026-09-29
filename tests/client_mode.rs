@@ -599,6 +599,40 @@ fn slow_kitty_upload_keeps_client_input_and_text_responsive() {
         }),
         "second image must finish"
     );
+    let recorded = output.lock().unwrap().clone();
+    let mut remaining = recorded.as_slice();
+    let mut reconstructed = Vec::new();
+    let mut complete_original = false;
+    while let Some(start) = remaining.windows(3).position(|part| part == b"\x1b_G") {
+        remaining = &remaining[start + 3..];
+        let Some(end) = remaining.windows(2).position(|part| part == b"\x1b\\") else {
+            break;
+        };
+        let command = &remaining[..end];
+        remaining = &remaining[end + 2..];
+        let Some(separator) = command.iter().position(|byte| *byte == b';') else {
+            continue;
+        };
+        let control = &command[..separator];
+        if control.starts_with(b"a=t,t=d,") {
+            reconstructed.clear();
+        } else if !control.starts_with(b"m=") {
+            continue;
+        }
+        reconstructed.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(&command[separator + 1..])
+                .expect("Kitty upload chunk is valid base64"),
+        );
+        if control.windows(3).any(|part| part == b"m=0") && reconstructed == image {
+            complete_original = true;
+            break;
+        }
+    }
+    assert!(
+        complete_original,
+        "completed Kitty upload must preserve every original PNG byte"
+    );
     let delivered = output
         .lock()
         .unwrap()

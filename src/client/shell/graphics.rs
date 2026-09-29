@@ -60,7 +60,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn next_graphics_unit(
-        &self,
+        &mut self,
     ) -> Option<crate::kitty_graphics::surface::GraphicsUnit> {
         self.graphics.next_unit()
     }

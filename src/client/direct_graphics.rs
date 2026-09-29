@@ -14,6 +14,7 @@ pub(super) struct Response {
 #[derive(Debug, Default)]
 pub(super) struct ResponseMatcher {
     expected: Option<(u64, u32, Option<std::time::Instant>)>,
+    early: Option<Response>,
     retired: Option<(u32, std::time::Instant)>,
     active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -39,6 +40,7 @@ impl ResponseMatcher {
             return false;
         }
         self.expected = Some((transfer_id, image_id, None));
+        self.early = None;
         self.refresh_active();
         true
     }
@@ -55,9 +57,23 @@ impl ResponseMatcher {
         }
     }
 
+    pub(super) fn take_ready(&mut self) -> Option<Response> {
+        if self
+            .expected
+            .is_none_or(|(_, _, deadline)| deadline.is_none())
+        {
+            return None;
+        }
+        let response = self.early.take()?;
+        self.expected = None;
+        self.refresh_active();
+        Some(response)
+    }
+
     pub(super) fn cancel(&mut self, transfer_id: u64) {
         if self.expected.is_some_and(|(id, _, _)| id == transfer_id) {
             self.expected = None;
+            self.early = None;
             self.refresh_active();
         }
     }
@@ -65,6 +81,7 @@ impl ResponseMatcher {
     pub(super) fn retire(&mut self, transfer_id: u64) {
         if self.expected.is_some_and(|(id, _, _)| id == transfer_id) {
             if let Some((_, image_id, _)) = self.expected.take() {
+                self.early = None;
                 self.retired = Some((image_id, std::time::Instant::now() + LATE_RESPONSE_DRAIN));
                 self.refresh_active();
             }
@@ -81,6 +98,7 @@ impl ResponseMatcher {
             .is_some_and(|(_, _, deadline)| deadline.is_some_and(|deadline| deadline <= now))
         {
             if let Some((_, image_id, _)) = self.expected.take() {
+                self.early = None;
                 self.retired = Some((image_id, now + LATE_RESPONSE_DRAIN));
             }
         }
@@ -107,9 +125,19 @@ impl ResponseMatcher {
                 return Some(None);
             }
         }
-        let (transfer_id, image_id, _) = self.expected?;
+        let (transfer_id, image_id, deadline) = self.expected?;
         if !matching_response_controls(&payload[..separator], image_id) {
             return None;
+        }
+        if deadline.is_none() {
+            if self.early.is_none() {
+                self.early = Some(Response {
+                    transfer_id,
+                    image_id,
+                    success: &payload[separator + 1..] == b"OK",
+                });
+            }
+            return Some(None);
         }
         self.expected = None;
         self.refresh_active();
@@ -311,10 +339,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_response_before_write_ack_waits_for_output_completion() {
+        let mut matcher = ResponseMatcher::default();
+        assert!(matcher.arm(42, 1234));
+        assert_eq!(matcher.consume(b"\x1b_Gi=1234;OK\x1b\\"), Some(None));
+        assert!(
+            matcher.interested(),
+            "output completion still owns this response"
+        );
+        matcher.start(42);
+        assert_eq!(
+            matcher.take_ready(),
+            Some(Response {
+                transfer_id: 42,
+                image_id: 1234,
+                success: true
+            })
+        );
+        assert!(!matcher.interested());
+    }
+
+    #[test]
     fn matches_only_the_armed_image_and_preserves_unrelated_input() {
         let mut matcher = ResponseMatcher::default();
         let active = matcher.active_handle();
         assert!(matcher.arm(7, 42));
+        matcher.start(7);
         assert!(active.load(std::sync::atomic::Ordering::Acquire));
         assert!(!matcher.arm(8, 43));
         assert_eq!(matcher.consume(b"typed"), None);
@@ -334,6 +384,7 @@ mod tests {
     fn explicit_error_is_reported_and_malformed_responses_are_ignored() {
         let mut matcher = ResponseMatcher::default();
         matcher.arm(9, 44);
+        matcher.start(9);
         assert_eq!(
             matcher.consume(b"\x1b_Gi=44;ENOENT\x1b\\"),
             Some(Some(Response {
@@ -377,6 +428,7 @@ mod tests {
         let mut matcher = ResponseMatcher::default();
         let mut filter = InputFilter::default();
         matcher.arm(19, 49);
+        matcher.start(19);
         for foreign in [
             b"\x1b_Ga=p,i=49;OK\x1b\\".as_slice(),
             b"\x1b_Gi=49oops;OK\x1b\\",
@@ -423,6 +475,7 @@ mod tests {
         assert!(!matcher.arm(13, 48));
         matcher.expire_at(started + RESPONSE_TIMEOUT);
         assert!(matcher.arm(13, 48));
+        matcher.start(13);
         assert_eq!(matcher.consume(b"typed"), None);
         assert_eq!(matcher.consume(b"\x1b_Gi=47;OK\x1b\\"), Some(None));
         assert_eq!(
