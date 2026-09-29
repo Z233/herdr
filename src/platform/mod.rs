@@ -50,6 +50,31 @@ impl ChildExitReason {
 #[cfg(unix)]
 pub(crate) use unix_common::classify_child_exit;
 
+#[cfg(unix)]
+pub(crate) use unix_common::open_client_terminal_writer;
+
+#[cfg(unix)]
+pub(crate) use unix_common::discard_stalled_client_terminal_output;
+
+#[cfg(windows)]
+pub(crate) use windows::open_client_terminal_writer;
+
+#[cfg(windows)]
+pub(crate) use windows::interrupt_client_terminal_writer;
+
+/// Wait until cancellation has reached every synchronous write that might start
+/// after an earlier cancellation attempt. Callers join only after this returns.
+#[cfg(any(windows, test))]
+pub(crate) fn wait_for_client_terminal_writer_with_cancel(
+    worker: &std::thread::JoinHandle<()>,
+    mut cancel: impl FnMut(),
+) {
+    while !worker.is_finished() {
+        cancel();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
     ChildExitReason::Exited
@@ -527,6 +552,36 @@ fn child_exit_classification_only_checkpoints_interruptions() {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_retries_when_write_starts_after_first_attempt() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let started = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let (begin, go) = mpsc::sync_channel::<()>(1);
+        let write_started = started.clone();
+        let write_released = released.clone();
+        let worker = std::thread::spawn(move || {
+            go.recv().unwrap();
+            write_started.store(true, Ordering::Release);
+            while !write_released.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let mut attempts = 0;
+        wait_for_client_terminal_writer_with_cancel(&worker, || {
+            attempts += 1;
+            if attempts == 1 {
+                begin.send(()).unwrap();
+            } else if started.load(Ordering::Acquire) {
+                released.store(true, Ordering::Release);
+            }
+        });
+        worker.join().unwrap();
+        assert!(attempts >= 2);
+    }
 
     #[test]
     fn terminal_resize_signal_is_recorded_once_per_delivery() {

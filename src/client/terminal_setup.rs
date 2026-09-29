@@ -11,7 +11,7 @@ use crossterm::event::{
 #[cfg(not(windows))]
 use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
-use crossterm::terminal::{DisableLineWrap, EnableLineWrap};
+use crossterm::terminal::{DisableLineWrap, EnableLineWrap, LeaveAlternateScreen};
 
 use super::frame_output::clear_received_kitty_graphics;
 use super::terminal_geometry::should_query_host_terminal_theme;
@@ -281,21 +281,25 @@ fn set_windows_native_mouse_capture<W: io::Write>(
 }
 
 pub(super) fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
+    set_mouse_capture_to(&mut io::stdout(), enabled, sgr_pixels)
+}
+
+pub(super) fn set_mouse_capture_to<W: io::Write>(
+    writer: &mut W,
+    enabled: bool,
+    sgr_pixels: bool,
+) -> io::Result<()> {
     #[cfg(windows)]
     if is_ssh_session() && windows_vti_input_backend_enabled() {
-        crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
-        return crate::terminal_modes::set_windows_mouse_reporting(
-            &mut io::stdout(),
-            enabled,
-            sgr_pixels,
-        );
+        crate::terminal_modes::clear_host_mouse_reporting(writer)?;
+        return crate::terminal_modes::set_windows_mouse_reporting(writer, enabled, sgr_pixels);
     }
     #[cfg(windows)]
-    return set_windows_native_mouse_capture(&mut io::stdout(), enabled, sgr_pixels, |enabled| {
+    return set_windows_native_mouse_capture(writer, enabled, sgr_pixels, |enabled| {
         if enabled {
-            execute!(io::stdout(), EnableMouseCapture)
+            execute!(io::sink(), EnableMouseCapture)
         } else {
-            match execute!(io::stdout(), DisableMouseCapture) {
+            match execute!(io::sink(), DisableMouseCapture) {
                 Ok(()) => Ok(()),
                 Err(err) if err.to_string() == "Initial console modes not set" => Ok(()),
                 Err(err) => Err(err),
@@ -303,17 +307,17 @@ pub(super) fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<(
         }
     });
     #[cfg(not(windows))]
-    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
+    crate::terminal_modes::clear_host_mouse_reporting(writer)?;
     #[cfg(not(windows))]
     if enabled {
-        execute!(io::stdout(), EnableMouseCapture)?;
+        execute!(writer, EnableMouseCapture)?;
         if sgr_pixels {
-            io::stdout().write_all(b"\x1b[?1016h")?;
-            io::stdout().flush()?;
+            writer.write_all(b"\x1b[?1016h")?;
+            writer.flush()?;
         }
         Ok(())
     } else {
-        match execute!(io::stdout(), DisableMouseCapture) {
+        match execute!(writer, DisableMouseCapture) {
             Ok(()) => Ok(()),
             Err(err) => Err(err),
         }
@@ -345,40 +349,61 @@ fn restore_terminal_state(
     reset_host_color_scheme_reports: bool,
     #[cfg(windows)] restore_windows_input_mode: Option<u32>,
 ) -> io::Result<()> {
-    let _ = clear_received_kitty_graphics(&mut io::stdout());
-
-    // Reset modifyOtherKeys if we enabled it.
-    if reset_modify_other_keys {
-        let _ = io::stdout().write_all(b"\x1b[>4;0m");
-        let _ = io::stdout().flush();
-    }
-
-    if reset_keyboard_enhancements {
-        let _ = pop_keyboard_enhancement_flags();
-    }
-
-    let _ = execute!(
-        io::stdout(),
-        EnableLineWrap,
-        DisableFocusChange,
-        DisableBracketedPaste
-    );
-    let _ = set_mouse_capture(false, false);
+    let raw_result = crossterm::terminal::disable_raw_mode();
     #[cfg(windows)]
     if let Some(mode) = restore_windows_input_mode {
         restore_windows_input_mode_value(mode);
     }
-
-    let restore_result = ratatui::try_restore();
-    let postlude_result =
-        write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
-
-    #[cfg(windows)]
-    if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
-        let _ = disable_windows_win32_input_mode(&mut io::stdout());
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stopped = stopped.clone();
+    let (finished, result) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("herdr-terminal-restore".into())
+        .spawn(move || {
+            let restored = (|| {
+                let mut writer = crate::platform::open_client_terminal_writer(worker_stopped)?;
+                let _ = clear_received_kitty_graphics(&mut writer);
+                if reset_modify_other_keys {
+                    let _ = writer.write_all(b"\x1b[>4;0m");
+                }
+                if reset_keyboard_enhancements {
+                    let _ = pop_keyboard_enhancement_flags(&mut writer);
+                }
+                let _ = execute!(
+                    writer,
+                    EnableLineWrap,
+                    DisableFocusChange,
+                    DisableBracketedPaste
+                );
+                let _ = set_mouse_capture_to(&mut writer, false, false);
+                execute!(writer, LeaveAlternateScreen)?;
+                let postlude =
+                    write_terminal_restore_postlude(&mut writer, reset_host_color_scheme_reports);
+                #[cfg(windows)]
+                if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
+                    let _ = disable_windows_win32_input_mode(&mut writer);
+                }
+                postlude
+            })();
+            let _ = finished.send(restored);
+        })?;
+    let result = result.recv_timeout(std::time::Duration::from_millis(500));
+    if result.is_err() {
+        stopped.store(true, Ordering::Release);
+        #[cfg(windows)]
+        crate::platform::interrupt_client_terminal_writer(&worker);
     }
-
-    restore_result.and(postlude_result)
+    let _ = worker.join();
+    #[cfg(unix)]
+    if result.is_err() {
+        crate::platform::discard_stalled_client_terminal_output();
+    }
+    raw_result.and(result.unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "terminal restore timed out",
+        ))
+    }))
 }
 
 #[cfg(not(windows))]
@@ -395,12 +420,12 @@ fn push_keyboard_enhancement_flags() -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn pop_keyboard_enhancement_flags() -> io::Result<()> {
-    execute!(io::stdout(), PopKeyboardEnhancementFlags)
+fn pop_keyboard_enhancement_flags(writer: &mut impl io::Write) -> io::Result<()> {
+    execute!(writer, PopKeyboardEnhancementFlags)
 }
 
 #[cfg(windows)]
-fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+fn pop_keyboard_enhancement_flags(_writer: &mut impl io::Write) -> io::Result<()> {
     Ok(())
 }
 

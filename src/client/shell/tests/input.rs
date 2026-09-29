@@ -215,19 +215,22 @@ fn client_shell_graphics_follow_final_shell_origin_and_local_overlay_visibility(
     };
     state.set_pane_surface(pane_surface);
 
-    let visible = state.compose(106, 20).expect("visible graphics frame");
-    let visible = String::from_utf8_lossy(&visible.graphics);
+    state.compose(106, 20).expect("visible graphics frame");
+    let visible = super::graphics::accepted_graphics(&mut state);
+    let visible = String::from_utf8_lossy(&visible);
     assert!(visible.contains("a=t,t=d"));
     assert!(visible.contains("\u{1b}[2;27H"));
 
     state.overlay = Some(ClientShellOverlay::Onboarding);
-    let uncovered = state.compose(106, 20).expect("overlay frame");
-    assert!(!String::from_utf8_lossy(&uncovered.graphics).contains("a=d"));
-    assert!(String::from_utf8_lossy(&uncovered.graphics).contains("a=p"));
+    state.compose(106, 20).expect("overlay frame");
+    let uncovered = super::graphics::accepted_graphics(&mut state);
+    assert!(!String::from_utf8_lossy(&uncovered).contains("a=d"));
+    assert!(String::from_utf8_lossy(&uncovered).contains("a=p"));
 
     state.overlay = None;
-    let restored = state.compose(106, 20).expect("restored graphics frame");
-    let restored = String::from_utf8_lossy(&restored.graphics);
+    state.compose(106, 20).expect("restored graphics frame");
+    let restored = super::graphics::accepted_graphics(&mut state);
+    let restored = String::from_utf8_lossy(&restored);
     assert!(restored.contains("a=p"));
     assert!(!restored.contains("a=t,t=d"));
 }

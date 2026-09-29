@@ -67,6 +67,18 @@ fn is_placed(bytes: &[u8], point: (u16, u16)) -> bool {
     String::from_utf8_lossy(bytes).contains(&format!("\x1b[{};{}H", point.1 + 1, point.0 + 1))
 }
 
+pub(super) fn accepted_graphics(state: &mut ClientShellState) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for _ in 0..128 {
+        let Some(unit) = state.next_graphics_unit() else {
+            return bytes;
+        };
+        bytes.extend_from_slice(&unit.bytes);
+        state.acknowledge_graphics(unit);
+    }
+    panic!("graphics did not settle after 128 acknowledged commands");
+}
+
 fn assert_graphics_cover(state: &mut ClientShellState, covered: Rect, cols: u16, rows: u16) {
     let layout = state.layout(cols, rows);
     let covered = covered.intersection(layout.pane_surface);
@@ -83,13 +95,14 @@ fn assert_graphics_cover(state: &mut ClientShellState, covered: Rect, cols: u16,
     add_main_image(&mut surface, layout, outside, 1);
     add_main_image(&mut surface, layout, inside, 2);
     state.set_pane_surface(surface);
-    let frame = state.compose(cols, rows).unwrap();
+    state.compose(cols, rows).unwrap();
+    let graphics = accepted_graphics(state);
     assert!(
-        is_placed(&frame.graphics, outside),
+        is_placed(&graphics, outside),
         "outside={outside:?} cover={covered:?}"
     );
     assert!(
-        !is_placed(&frame.graphics, inside),
+        !is_placed(&graphics, inside),
         "inside={inside:?} cover={covered:?}"
     );
 }
@@ -326,20 +339,23 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
         }
         state.set_pane_surface(surface);
         state.compose(106, 40).unwrap();
+        accepted_graphics(&mut state);
         state.overlay = Some(overlay);
-        let frame = state.compose(106, 40).unwrap();
-        assert!(is_placed(&frame.graphics, outside), "{:?}", state.overlay);
+        state.compose(106, 40).unwrap();
+        let graphics = accepted_graphics(&mut state);
+        assert!(is_placed(&graphics, outside), "{:?}", state.overlay);
         if let Some(border) = border {
-            assert!(!is_placed(&frame.graphics, border), "{:?}", state.overlay);
-            assert!(String::from_utf8_lossy(&frame.graphics).contains("a=d,d=i"));
+            assert!(!is_placed(&graphics, border), "{:?}", state.overlay);
+            assert!(String::from_utf8_lossy(&graphics).contains("a=d,d=i"));
         }
         state.overlay = None;
-        let restored = state.compose(106, 40).unwrap();
-        assert!(is_placed(&restored.graphics, outside));
+        state.compose(106, 40).unwrap();
+        let restored = accepted_graphics(&mut state);
+        assert!(is_placed(&restored, outside));
         if let Some(border) = border {
-            assert!(is_placed(&restored.graphics, border));
+            assert!(is_placed(&restored, border));
         }
-        assert!(!String::from_utf8_lossy(&restored.graphics).contains("a=t"));
+        assert!(!String::from_utf8_lossy(&restored).contains("a=t"));
     }
 }
 
@@ -361,6 +377,7 @@ fn selection_copy_cursor_and_search_hide_only_the_highlighted_images() {
     }
     state.set_pane_surface(surface);
     state.compose(106, 20).unwrap();
+    accepted_graphics(&mut state);
     assert!(state.enter_copy_mode(&mut ClientShellInput::default()));
     state.selection = Some(crate::selection::Selection::absolute_range(
         "pane_1".into(),
@@ -376,19 +393,21 @@ fn selection_copy_cursor_and_search_hide_only_the_highlighted_images() {
             start: crate::api::schema::PaneTextPoint { row: 0, col: 2 },
             end: crate::api::schema::PaneTextPoint { row: 0, col: 2 },
         });
-    let frame = state.compose(106, 20).unwrap();
+    state.compose(106, 20).unwrap();
+    let graphics = accepted_graphics(&mut state);
     for point in &points[..3] {
-        assert!(!is_placed(&frame.graphics, *point), "{point:?}");
+        assert!(!is_placed(&graphics, *point), "{point:?}");
     }
-    assert!(is_placed(&frame.graphics, points[3]));
+    assert!(is_placed(&graphics, points[3]));
     state.mode = ClientShellMode::Terminal;
     state.copy_mode = None;
     state.selection = None;
-    let frame = state.compose(106, 20).unwrap();
+    state.compose(106, 20).unwrap();
+    let graphics = accepted_graphics(&mut state);
     for point in points {
-        assert!(is_placed(&frame.graphics, point));
+        assert!(is_placed(&graphics, point));
     }
-    assert!(!String::from_utf8_lossy(&frame.graphics).contains("a=t"));
+    assert!(!String::from_utf8_lossy(&graphics).contains("a=t"));
 }
 
 #[test]
@@ -400,16 +419,18 @@ fn mobile_switcher_still_hides_the_entire_underlying_surface() {
     let mut surface = surface();
     add_main_image(&mut surface, layout, point, 1);
     state.set_pane_surface(surface);
-    let frame = state.compose(40, 24).unwrap();
-    assert!(is_placed(&frame.graphics, point));
+    state.compose(40, 24).unwrap();
+    assert!(is_placed(&accepted_graphics(&mut state), point));
     state.mode = ClientShellMode::Navigate;
-    let frame = state.compose(40, 24).unwrap();
-    assert!(!is_placed(&frame.graphics, point));
-    assert!(String::from_utf8_lossy(&frame.graphics).contains("a=d,d=i"));
+    state.compose(40, 24).unwrap();
+    let graphics = accepted_graphics(&mut state);
+    assert!(!is_placed(&graphics, point));
+    assert!(String::from_utf8_lossy(&graphics).contains("a=d,d=i"));
     state.mode = ClientShellMode::Terminal;
-    let frame = state.compose(40, 24).unwrap();
-    assert!(is_placed(&frame.graphics, point));
-    assert!(!String::from_utf8_lossy(&frame.graphics).contains("a=t"));
+    state.compose(40, 24).unwrap();
+    let graphics = accepted_graphics(&mut state);
+    assert!(is_placed(&graphics, point));
+    assert!(!String::from_utf8_lossy(&graphics).contains("a=t"));
 }
 
 #[test]
@@ -437,16 +458,19 @@ fn popup_terminal_keeps_own_graphics_and_hides_only_background_overlap() {
     surface.graphics.assets.push(asset);
     surface.graphics.placements.push(placement);
     state.set_pane_surface(surface);
-    let frame = state.compose(106, 20).unwrap();
-    assert!(is_placed(&frame.graphics, outside));
-    assert!(!is_placed(&frame.graphics, border));
-    assert!(is_placed(&frame.graphics, inside));
+    state.compose(106, 20).unwrap();
+    let graphics = accepted_graphics(&mut state);
+    assert!(is_placed(&graphics, outside));
+    assert!(!is_placed(&graphics, border));
+    assert!(is_placed(&graphics, inside));
     state.overlay = Some(ClientShellOverlay::Onboarding);
-    let frame = state.compose(106, 20).unwrap();
-    assert!(is_placed(&frame.graphics, outside));
-    assert!(!is_placed(&frame.graphics, inside));
+    state.compose(106, 20).unwrap();
+    let graphics = accepted_graphics(&mut state);
+    assert!(is_placed(&graphics, outside));
+    assert!(!is_placed(&graphics, inside));
     state.overlay = None;
-    let frame = state.compose(106, 20).unwrap();
-    assert!(is_placed(&frame.graphics, inside));
-    assert!(!String::from_utf8_lossy(&frame.graphics).contains("a=t"));
+    state.compose(106, 20).unwrap();
+    let graphics = accepted_graphics(&mut state);
+    assert!(is_placed(&graphics, inside));
+    assert!(!String::from_utf8_lossy(&graphics).contains("a=t"));
 }

@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -258,6 +259,523 @@ fn first_pane_id_in_workspace(socket_path: &PathBuf, workspace_id: &str) -> Stri
         thread::sleep(Duration::from_millis(25));
     }
     panic!("pane.list did not return a pane for workspace {workspace_id} before timeout");
+}
+
+fn random_png() -> Vec<u8> {
+    let mut pixels = vec![0_u8; 256 * 256 * 3];
+    let mut random = 314159_u32;
+    for byte in &mut pixels {
+        random = random.wrapping_mul(1103515245).wrapping_add(12345);
+        *byte = (random >> 16) as u8;
+    }
+    let mut image = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut image, 256, 256);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+    }
+    image
+}
+
+#[test]
+fn slow_kitty_upload_keeps_client_input_and_text_responsive() {
+    use base64::Engine as _;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n[terminal]\nkitty_graphics = true\n[keys]\nswitch_workspace = \"prefix+shift+1..9\"\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    let remote_config = base.join("remote-config");
+    let remote_runtime = base.join("remote-runtime");
+    let remote_api = remote_runtime.join("herdr.sock");
+    let remote_client = remote_runtime.join("herdr-client.sock");
+    let remote_server = spawn_server_with_config(
+        &remote_config,
+        &remote_runtime,
+        &remote_api,
+        &remote_client,
+        "onboarding = false\n[terminal]\nkitty_graphics = true\n",
+    );
+    wait_for_socket(&remote_api, Duration::from_secs(10));
+    let remote_workspace = send_json_request(
+        &remote_api,
+        &serde_json::json!({
+            "id": "remote-workspace", "method": "workspace.create",
+            "params": {"cwd": base, "focus": true, "label": "REMOTE_READY"}
+        })
+        .to_string(),
+    );
+    let remote_pane = remote_workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("remote pane");
+    send_pane_shell_command(&remote_api, remote_pane, "printf REMOTE_SCENE_MARK");
+    let catalog_dir = runtime_dir
+        .join("state")
+        .join(app_dir_name())
+        .join("client");
+    fs::create_dir_all(&catalog_dir).unwrap();
+    fs::write(catalog_dir.join("endpoints.json"), serde_json::json!({
+        "version": 1, "selected_profile": null,
+        "ssh": [{"id": "0123456789abcdef0123456789abcdef", "label": "Test remote", "target": "test-only", "session": "default", "enabled": true}],
+    }).to_string()).unwrap();
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(base.join("home")).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_herdr"), bin.join("herdr")).unwrap();
+    let quote =
+        |path: &std::path::Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    fs::write(bin.join("ssh"), format!(
+        "#!/bin/sh\nexport HOME={} XDG_CONFIG_HOME={} XDG_RUNTIME_DIR={} HERDR_SOCKET_PATH={}\nunset HERDR_CLIENT_SOCKET_PATH HERDR_SESSION\nfor arg do last=\"$arg\"; done\nexec /bin/sh -c \"$last\"\n",
+        quote(&base.join("home")), quote(&remote_config), quote(&remote_runtime), quote(&remote_api),
+    )).unwrap();
+    fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut client = spawn_client_process_with_args_and_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &["client"],
+        &[("PATH", &path)],
+    );
+    let master = client._master.as_ref().expect("client PTY");
+    let mut reader = master.try_clone_reader().expect("client PTY reader");
+    let mut writer = master.take_writer().expect("client PTY writer");
+    let output = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let fast = std::sync::Arc::new(AtomicBool::new(false));
+    let capture = output.clone();
+    let stop_reader = stop.clone();
+    let fast_reader = fast.clone();
+    let drain = thread::spawn(move || {
+        let mut bytes = [0_u8; 1024];
+        while !stop_reader.load(Ordering::Acquire) {
+            match reader.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => capture.lock().unwrap().extend_from_slice(&bytes[..n]),
+            }
+            if !fast_reader.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(62));
+            }
+        }
+    });
+    assert!(wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        || {
+            output
+                .lock()
+                .unwrap()
+                .windows(9)
+                .any(|bytes| bytes == b"workspace")
+                || !send_json_request(
+                    &api_socket,
+                    r#"{"id":"workspaces","method":"workspace.list","params":{}}"#,
+                )["result"]["workspaces"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+        }
+    ));
+    let pane_id = first_pane_id_in_workspace(&api_socket, "w1");
+    let renamed = send_json_request(
+        &api_socket,
+        r#"{"id":"rename","method":"workspace.rename","params":{"workspace_id":"w1","label":"LOCAL_IMAGE"}}"#,
+    );
+    assert_eq!(
+        renamed["result"]["workspace"]["label"], "LOCAL_IMAGE",
+        "{renamed}"
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(30), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(12)
+                .any(|bytes| bytes == b"REMOTE_READY")
+        }),
+        "remote endpoint must be available before the upload switch"
+    );
+    let image = random_png();
+    let response = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "upload", "method": "pane.graphics.set",
+            "params": {
+                "pane_id": pane_id, "format": "png", "image_width": 256,
+                "image_height": 256,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&image),
+                "placement": {"grid_cols": 45, "grid_rows": 18}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(response["result"]["type"], "ok", "{response}");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(3)
+                .any(|bytes| bytes == b"\x1b_G")
+        }),
+        "client must begin the image upload"
+    );
+    let sent_at = Instant::now();
+    writer.write_all(b"printf RESPONSIVE_PROBE\\n\r").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(30), || {
+            let read = send_json_request(
+            &api_socket,
+            &serde_json::json!({"id":"read", "method":"pane.read", "params":{"pane_id":pane_id,"source":"visible","lines":24}}).to_string(),
+        );
+            read["result"]["read"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("RESPONSIVE_PROBE"))
+        }),
+        "client input stalled for {:?} during initial Kitty upload",
+        sent_at.elapsed()
+    );
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(25), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(16)
+                .any(|bytes| bytes == b"RESPONSIVE_PROBE")
+        }),
+        "host text stalled behind the image upload"
+    );
+    let seen = output.lock().unwrap();
+    let text = seen
+        .windows(16)
+        .position(|bytes| bytes == b"RESPONSIVE_PROBE")
+        .unwrap();
+    assert!(
+        seen[..text].windows(7).all(|bytes| bytes != b"\x1b_Gm=0;"),
+        "final Kitty chunk arrived before host text"
+    );
+    drop(seen);
+    let created = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "create-second", "method": "workspace.create",
+            "params": {"cwd": base, "focus": false, "label": "SECOND"}
+        })
+        .to_string(),
+    );
+    assert_eq!(created["result"]["type"], "workspace_created", "{created}");
+    let second = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(25), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(6)
+                .any(|bytes| bytes == b"SECOND")
+        }),
+        "new workspace did not reach client display"
+    );
+    let screen = terminal_screen::text(&output.lock().unwrap(), 80, 24);
+    writer
+        .write_all(&sidebar_row_click(&screen, "SECOND"))
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(2), Duration::from_millis(25), || {
+            let workspaces = send_json_request(
+                &api_socket,
+                r#"{"id":"focused","method":"workspace.list","params":{}}"#,
+            );
+            workspaces["result"]["workspaces"]
+                .as_array()
+                .is_some_and(|list| {
+                    list.iter().any(|workspace| {
+                        workspace["workspace_id"] == second && workspace["focused"] == true
+                    })
+                })
+        }),
+        "workspace switching stalled behind the image upload: {} (captured {} bytes)",
+        send_json_request(
+            &api_socket,
+            r#"{"id":"focused","method":"workspace.list","params":{}}"#
+        ),
+        output.lock().unwrap().len()
+    );
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(25), || {
+            let bytes = output.lock().unwrap();
+            bytes.windows(7).any(|window| window == b"\x1b_Gm=0;")
+                && bytes.windows(6).any(|window| window == b"\x1b_Ga=d")
+        }),
+        "switch must terminate and delete the obsolete incomplete upload"
+    );
+    let uploads_before_return = output
+        .lock()
+        .unwrap()
+        .windows(6)
+        .filter(|window| *window == b"\x1b_Ga=t")
+        .count();
+    let focused = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "return", "method": "workspace.focus", "params": {"workspace_id":"w1"}
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        focused["result"]["workspace"]["workspace_id"], "w1",
+        "{focused}"
+    );
+    assert!(wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+        output.lock().unwrap().windows(6).filter(|window| *window == b"\x1b_Ga=t").count() > uploads_before_return
+    }), "return to an interrupted scene must reupload its original pixels: {} bytes, {} uploads, focused {}",
+        output.lock().unwrap().len(), uploads_before_return,
+        send_json_request(&api_socket, r#"{"id":"focused","method":"workspace.list","params":{}}"#));
+    fast.store(true, Ordering::Release);
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(7)
+                .filter(|window| *window == b"\x1b_Gm=0;")
+                .count()
+                >= 2
+        }),
+        "returned image must complete after cancellation"
+    );
+    let second_image = send_json_request(&api_socket, &serde_json::json!({
+        "id": "second-image", "method": "pane.graphics.set",
+        "params": {
+            "pane_id": pane_id, "layer_id": "second", "z_index": 1,
+            "format": "png", "image_width": 256, "image_height": 256,
+            "data_base64": base64::engine::general_purpose::STANDARD.encode(&image),
+            "placement": {"viewport_col": 22, "viewport_row": 9, "grid_cols": 20, "grid_rows": 8}
+        }
+    }).to_string());
+    assert_eq!(second_image["result"]["type"], "ok", "{second_image}");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(6)
+                .filter(|window| *window == b"\x1b_Ga=t")
+                .count()
+                >= 3
+        }),
+        "second visible image must start its own upload"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(7)
+                .filter(|window| *window == b"\x1b_Gm=0;")
+                .count()
+                >= 3
+        }),
+        "second image must finish"
+    );
+    let recorded = output.lock().unwrap().clone();
+    let mut remaining = recorded.as_slice();
+    let mut reconstructed = Vec::new();
+    let mut complete_original = false;
+    while let Some(start) = remaining.windows(3).position(|part| part == b"\x1b_G") {
+        remaining = &remaining[start + 3..];
+        let Some(end) = remaining.windows(2).position(|part| part == b"\x1b\\") else {
+            break;
+        };
+        let command = &remaining[..end];
+        remaining = &remaining[end + 2..];
+        let Some(separator) = command.iter().position(|byte| *byte == b';') else {
+            continue;
+        };
+        let control = &command[..separator];
+        if control.starts_with(b"a=t,t=d,") {
+            reconstructed.clear();
+        } else if !control.starts_with(b"m=") {
+            continue;
+        }
+        reconstructed.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(&command[separator + 1..])
+                .expect("Kitty upload chunk is valid base64"),
+        );
+        if control.windows(3).any(|part| part == b"m=0") && reconstructed == image {
+            complete_original = true;
+            break;
+        }
+    }
+    assert!(
+        complete_original,
+        "completed Kitty upload must preserve every original PNG byte"
+    );
+    let delivered = output
+        .lock()
+        .unwrap()
+        .windows(6)
+        .filter(|window| *window == b"\x1b_Ga=t")
+        .count();
+    send_pane_shell_command(&api_socket, &pane_id, "printf SCENE_RECOMPOSE");
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(15)
+                .any(|window| window == b"SCENE_RECOMPOSE")
+        }),
+        "unchanged scene must still repaint text"
+    );
+    assert_eq!(
+        output
+            .lock()
+            .unwrap()
+            .windows(6)
+            .filter(|window| *window == b"\x1b_Ga=t")
+            .count(),
+        delivered,
+        "unchanged images must not be retransmitted"
+    );
+    fast.store(false, Ordering::Release);
+    let third_start = output.lock().unwrap().len();
+    let third_image = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "third-image", "method": "pane.graphics.set",
+            "params": {
+                "pane_id": pane_id, "layer_id": "third", "z_index": 2,
+                "format": "png", "image_width": 256, "image_height": 256,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(&image),
+                "placement": {"viewport_col": 3, "viewport_row": 3, "grid_cols": 20, "grid_rows": 8}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(third_image["result"]["type"], "ok", "{third_image}");
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(6)
+                .filter(|window| *window == b"\x1b_Ga=t")
+                .count()
+                > delivered
+        }),
+        "third image upload did not start"
+    );
+    let remote_screen = terminal_screen::text(&output.lock().unwrap(), 80, 24);
+    writer
+        .write_all(&sidebar_row_click(&remote_screen, "REMOTE_READY"))
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(3), Duration::from_millis(20), || {
+            let bytes = output.lock().unwrap();
+            bytes[third_start..]
+                .windows(7)
+                .any(|part| part == b"\x1b_Gm=0;")
+                && bytes[third_start..]
+                    .windows(6)
+                    .any(|part| part == b"\x1b_Ga=d")
+                && bytes[third_start..]
+                    .windows(17)
+                    .any(|part| part == b"REMOTE_SCENE_MARK")
+        }),
+        "endpoint switch must terminate the old image and show remote text"
+    );
+    let uploads_before_return = output
+        .lock()
+        .unwrap()
+        .windows(6)
+        .filter(|part| *part == b"\x1b_Ga=t")
+        .count();
+    let local_screen = terminal_screen::text(&output.lock().unwrap(), 80, 24);
+    writer
+        .write_all(&sidebar_row_click(&local_screen, "LOCAL_IMAGE"))
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(4), Duration::from_millis(20), || {
+            output
+                .lock()
+                .unwrap()
+                .windows(6)
+                .filter(|part| *part == b"\x1b_Ga=t")
+                .count()
+                > uploads_before_return
+        }),
+        "returning from another endpoint must restart the unfinished image"
+    );
+    let client_pid = client.child.process_id().expect("client pid") as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(client_pid, libc::SIGHUP) }, 0);
+    fast.store(true, Ordering::Release);
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            client.child.try_wait().expect("poll client").is_some()
+        }),
+        "client did not shut down during image upload"
+    );
+    let captured = output.lock().unwrap();
+    let largest_kitty_command = captured
+        .windows(3)
+        .enumerate()
+        .filter(|(_, bytes)| *bytes == b"\x1b_G")
+        .map(|(start, _)| {
+            captured[start + 3..]
+                .windows(2)
+                .position(|bytes| bytes == b"\x1b\\")
+                .expect("complete Kitty command")
+                + 5
+        })
+        .max()
+        .expect("Kitty commands reached the host");
+    assert!(
+        largest_kitty_command < 8192,
+        "upload unit is not bounded: {largest_kitty_command}"
+    );
+    let upload_start = captured
+        .windows(6)
+        .rposition(|bytes| bytes == b"\x1b_Ga=t")
+        .unwrap();
+    let restore = captured
+        .windows(8)
+        .rposition(|bytes| bytes == b"\x1b[?1049l")
+        .expect("terminal restored");
+    assert!(
+        captured[upload_start..restore]
+            .windows(7)
+            .any(|bytes| bytes == b"\x1b_Gm=0;"),
+        "shutdown must finish/terminate the active Kitty upload before terminal restoration"
+    );
+    drop(captured);
+    stop.store(true, Ordering::Release);
+    drop(client);
+    let _ = drain.join();
+    drop(remote_server);
+    cleanup_spawned_herdr(server, base);
 }
 
 fn app_dir_name() -> &'static str {
@@ -1738,6 +2256,53 @@ fn client_exits_cleanly_when_terminal_hangs_up() {
         server_response.contains("pong"),
         "server should survive client PTY hangup: {server_response}"
     );
+}
+
+#[test]
+fn client_exits_when_upload_output_reader_stops() {
+    use base64::Engine as _;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let server = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n[terminal]\nkitty_graphics = true\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&client_socket, Duration::from_secs(10));
+    let mut client = spawn_client_process(&config_home, &runtime_dir, &api_socket);
+    read_until_client_attaches(&client);
+    let pane_id = first_pane_id_in_workspace(&api_socket, "w1");
+    let response = send_json_request(
+        &api_socket,
+        &serde_json::json!({
+            "id": "upload", "method": "pane.graphics.set",
+            "params": {
+                "pane_id": pane_id, "format": "png", "image_width": 256,
+                "image_height": 256,
+                "data_base64": base64::engine::general_purpose::STANDARD.encode(random_png()),
+                "placement": {"grid_cols": 45, "grid_rows": 18}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(response["result"]["type"], "ok", "{response}");
+    thread::sleep(Duration::from_millis(400));
+    let client_pid = client.child.process_id().expect("client pid") as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(client_pid, libc::SIGHUP) }, 0);
+    let exited = wait_until(Duration::from_secs(3), Duration::from_millis(20), || {
+        client.child.try_wait().expect("poll client").is_some()
+    });
+    drop(server);
+    cleanup_spawned_herdr(client, base);
+    assert!(exited, "client must not wait for a stalled terminal reader");
 }
 
 #[test]

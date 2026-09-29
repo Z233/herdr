@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use ratatui::layout::Rect;
 
@@ -96,12 +97,39 @@ impl Occlusion {
 pub(crate) struct ClientState {
     scope: String,
     scene: SurfaceGraphicsScene,
-    assets: HashMap<SurfaceGraphicsAssetKey, Vec<u8>>,
+    assets: HashMap<SurfaceGraphicsAssetKey, Arc<[u8]>>,
     host: HostGraphicsCache,
+    desired: Vec<HostPlacement>,
+    presentation_generation: u64,
+    uploading: Option<PendingUpload>,
+    pending_image_id: Option<u32>,
+    interrupt_upload: bool,
     trusted_direct: HashMap<SurfaceGraphicsAssetKey, u32>,
+    #[cfg(unix)]
+    direct_trust_during_output: HashMap<u32, ImageSignature>,
     reset_pending: bool,
     stale_images: Vec<u32>,
     forced_delete_images: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUpload {
+    key: SurfaceGraphicsAssetKey,
+    host_id: u32,
+    data: Arc<[u8]>,
+    offset: usize,
+}
+
+pub(crate) struct GraphicsUnit {
+    pub(crate) bytes: Vec<u8>,
+    host: HostGraphicsCache,
+    uploading: Option<PendingUpload>,
+    stale: Option<u32>,
+    forced: Option<u32>,
+    reset: bool,
+    interrupted: bool,
+    scope: String,
+    presentation_generation: u64,
 }
 
 impl ClientState {
@@ -115,8 +143,11 @@ impl ClientState {
         }
         self.scope = scope.to_owned();
         self.scene = SurfaceGraphicsScene::default();
+        self.desired.clear();
         self.assets.clear();
         self.trusted_direct.clear();
+        #[cfg(unix)]
+        self.direct_trust_during_output.clear();
         self.stale_images.clear();
         self.forced_delete_images.clear();
         self.reset_pending = true;
@@ -133,6 +164,8 @@ impl ClientState {
         }
         self.host
             .images
+            .insert(image_id, image_signature_from_asset(key));
+        self.direct_trust_during_output
             .insert(image_id, image_signature_from_asset(key));
         if self
             .scene
@@ -151,28 +184,6 @@ impl ClientState {
         self.trusted_direct
             .retain(|_, trusted| *trusted != image_id);
         self.forced_delete_images.push(image_id);
-    }
-
-    pub(crate) fn take_pending_cleanup(&mut self) -> Vec<u8> {
-        let mut bytes = if self.reset_pending {
-            self.reset_pending = false;
-            self.stale_images.clear();
-            self.host.clear_bytes()
-        } else {
-            Vec::new()
-        };
-        self.forced_delete_images.sort_unstable();
-        self.forced_delete_images.dedup();
-        for image_id in self.forced_delete_images.drain(..) {
-            self.host.images.remove(&image_id);
-            self.host.placements.retain(|(id, _), _| *id != image_id);
-            self.host.sources.retain(|_, id| *id != image_id);
-            self.host
-                .replayed_placements
-                .retain(|(id, _)| *id != image_id);
-            super::encode_delete_image(&mut bytes, image_id);
-        }
-        bytes
     }
 
     pub(crate) fn set_scene(&mut self, mut scene: SurfaceGraphicsScene) {
@@ -201,6 +212,7 @@ impl ClientState {
             .collect::<Vec<_>>();
         self.stale_images.extend(unclaimed);
         self.trusted_direct.clear();
+        self.prune_stale_images();
         let placed = scene
             .placements
             .iter()
@@ -209,68 +221,281 @@ impl ClientState {
         self.assets.retain(|key, _| placed.contains(key));
         for asset in std::mem::take(&mut scene.assets) {
             if asset.data.len() as u64 == asset.key.data_len && placed.contains(&asset.key) {
-                self.assets.insert(asset.key, asset.data);
+                self.assets.insert(asset.key, Arc::from(asset.data));
             }
         }
         self.scene = scene;
     }
 
-    pub(crate) fn encode(
+    fn prune_stale_images(&mut self) {
+        self.stale_images.retain(|id| {
+            self.host.images.contains_key(id)
+                || self.pending_image_id == Some(*id)
+                || self
+                    .uploading
+                    .as_ref()
+                    .is_some_and(|transfer| transfer.host_id == *id)
+        });
+        self.stale_images.sort_unstable();
+        self.stale_images.dedup();
+    }
+
+    /// Record what is visible without copying or encoding image bytes. The writer
+    /// acknowledges each bounded unit before the next one is produced.
+    pub(crate) fn prepare(
         &mut self,
         visibility: Visibility,
         main_origin: (u16, u16),
         popup_origin: Option<(u16, u16)>,
         cell_size: HostCellSize,
         occlusion: &Occlusion,
-    ) -> Vec<u8> {
-        let mut bytes = self.take_pending_cleanup();
-        self.stale_images.sort_unstable();
-        self.stale_images.dedup();
-        for image_id in self.stale_images.drain(..) {
-            if self.host.images.remove(&image_id).is_some() {
-                super::encode_delete_image(&mut bytes, image_id);
-            }
-            self.host.placements.retain(|(id, _), _| *id != image_id);
-            self.host.sources.retain(|_, id| *id != image_id);
-            self.host
-                .replayed_placements
-                .retain(|(id, _)| *id != image_id);
-        }
-        if !cell_size.is_known() || self.scope.is_empty() {
-            bytes.extend(self.host.clear_bytes());
-            return bytes;
-        }
-
-        let placements = self
-            .scene
-            .placements
-            .iter()
-            .filter_map(|placement| {
-                client_host_placement(
-                    &self.scope,
-                    placement,
-                    self.assets.get(&placement.asset).map(Vec::as_slice),
-                    visibility,
-                    main_origin,
-                    popup_origin,
-                    cell_size,
-                    occlusion,
-                )
-            })
-            .collect::<Vec<_>>();
+    ) {
+        self.presentation_generation = self.presentation_generation.wrapping_add(1);
         self.host.request_placement_replay();
-        loop {
-            let encoded = encode_graphics_update_incremental(
-                &mut self.host,
-                &placements,
+        if self.reset_pending
+            && self.host.images.is_empty()
+            && self.uploading.is_none()
+            && self.pending_image_id.is_none()
+        {
+            self.host.clear_bytes();
+            self.reset_pending = false;
+        }
+        self.desired = if cell_size.is_known() && !self.scope.is_empty() {
+            self.scene
+                .placements
+                .iter()
+                .filter_map(|placement| {
+                    client_host_placement(
+                        &self.scope,
+                        placement,
+                        None,
+                        visibility,
+                        main_origin,
+                        popup_origin,
+                        cell_size,
+                        occlusion,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
+
+    pub(crate) fn next_unit(&mut self) -> Option<GraphicsUnit> {
+        #[cfg(unix)]
+        self.direct_trust_during_output.clear();
+        if self.stale_images.first().is_some_and(|id| {
+            !self.host.images.contains_key(id)
+                && self.pending_image_id != Some(*id)
+                && self
+                    .uploading
+                    .as_ref()
+                    .is_none_or(|transfer| transfer.host_id != *id)
+        }) {
+            self.prune_stale_images();
+        }
+        let mut host = self.host.clone();
+        let mut bytes = Vec::new();
+        let mut uploading = self.uploading.clone();
+        let mut stale = None;
+        let mut forced = None;
+        let mut reset = false;
+        let mut pending_image_id = None;
+
+        if let Some(transfer) = uploading.as_mut() {
+            let still_visible = self.desired.iter().any(|placement| {
+                placement.host_image_id == Some(transfer.host_id)
+                    && self
+                        .scene
+                        .placements
+                        .iter()
+                        .any(|item| item.asset == transfer.key)
+            });
+            if !still_visible || self.interrupt_upload {
+                bytes.extend_from_slice(b"\x1b_Gm=0;\x1b\\");
+                super::encode_delete_image(&mut bytes, transfer.host_id);
+                host.images.remove(&transfer.host_id);
+                stale = Some(transfer.host_id);
+                uploading = None;
+            } else if Self::upload_chunk(transfer, &mut host, &mut bytes) {
+                uploading = None;
+            }
+        } else if self.reset_pending {
+            if let Some(id) = host.images.keys().min().copied() {
+                super::encode_delete_image(&mut bytes, id);
+                host.images.remove(&id);
+                host.placements.retain(|(image, _), _| *image != id);
+                host.sources.retain(|_, image| *image != id);
+            } else {
+                host.clear_bytes();
+                reset = true;
+            }
+        } else if let Some(id) = self.forced_delete_images.first().copied() {
+            super::encode_delete_image(&mut bytes, id);
+            host.images.remove(&id);
+            host.placements.retain(|(image, _), _| *image != id);
+            host.sources.retain(|_, image| *image != id);
+            forced = Some(id);
+        } else if let Some(id) = self.stale_images.first().copied() {
+            if host.images.remove(&id).is_some() {
+                super::encode_delete_image(&mut bytes, id);
+            }
+            host.placements.retain(|(image, _), _| *image != id);
+            host.sources.retain(|_, image| *image != id);
+            stale = Some(id);
+        } else {
+            // Placement changes are small, and this encoder never receives the
+            // image data; an uncached image cannot trigger an eager upload.
+            let update = encode_graphics_update_incremental(
+                &mut host,
+                &self.desired,
                 &HashSet::new(),
                 None,
                 false,
             );
-            bytes.extend(encoded.bytes);
-            if !encoded.incomplete {
-                return bytes;
+            debug_assert!(!update.incomplete || !update.bytes.is_empty());
+            bytes = update.bytes;
+            if bytes.is_empty() {
+                for placement in &self.desired {
+                    let id = placement.host_image_id?;
+                    let key = self
+                        .scene
+                        .placements
+                        .iter()
+                        .find(|item| host_image_id(&self.scope, &item.asset) == id)?
+                        .asset
+                        .clone();
+                    if host.images.get(&id) == Some(&image_signature_from_asset(&key)) {
+                        continue;
+                    }
+                    let data = self.assets.get(&key)?.clone();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if host.images.contains_key(&id) {
+                        super::encode_delete_image(&mut bytes, id);
+                        host.images.remove(&id);
+                        host.placements.retain(|(image, _), _| *image != id);
+                        break;
+                    }
+                    let mut transfer = PendingUpload {
+                        key,
+                        host_id: id,
+                        data,
+                        offset: 0,
+                    };
+                    pending_image_id = Some(id);
+                    if !Self::upload_chunk(&mut transfer, &mut host, &mut bytes) {
+                        uploading = Some(transfer);
+                    }
+                    break;
+                }
             }
+        }
+        let unit = self.unit(bytes, host, uploading, stale, forced, reset);
+        if unit.is_some() {
+            self.pending_image_id = pending_image_id;
+        }
+        unit
+    }
+
+    fn upload_chunk(
+        transfer: &mut PendingUpload,
+        host: &mut HostGraphicsCache,
+        bytes: &mut Vec<u8>,
+    ) -> bool {
+        let end = (transfer.offset + super::KITTY_CHUNK_BYTES).min(transfer.data.len());
+        let control = (transfer.offset == 0).then(|| {
+            format!(
+                "a=t,t=d,f={},s={},v={},i={},q=2",
+                format_code(transfer.key.format),
+                transfer.key.image_width,
+                transfer.key.image_height,
+                transfer.host_id,
+            )
+        });
+        super::encode_kitty_chunk(
+            bytes,
+            control.as_deref(),
+            &transfer.data[transfer.offset..end],
+            end < transfer.data.len(),
+        );
+        transfer.offset = end;
+        if end == transfer.data.len() {
+            host.images
+                .insert(transfer.host_id, image_signature_from_asset(&transfer.key));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unit(
+        &self,
+        bytes: Vec<u8>,
+        host: HostGraphicsCache,
+        uploading: Option<PendingUpload>,
+        stale: Option<u32>,
+        forced: Option<u32>,
+        reset: bool,
+    ) -> Option<GraphicsUnit> {
+        (!bytes.is_empty()).then(|| GraphicsUnit {
+            bytes,
+            host,
+            uploading,
+            stale,
+            forced,
+            reset,
+            interrupted: self.interrupt_upload,
+            scope: self.scope.clone(),
+            presentation_generation: self.presentation_generation,
+        })
+    }
+
+    pub(crate) fn upload_in_progress(&self) -> bool {
+        self.uploading.is_some()
+    }
+
+    pub(crate) fn interrupt_upload(&mut self) {
+        self.interrupt_upload = true;
+    }
+
+    pub(crate) fn acknowledge(&mut self, unit: GraphicsUnit) {
+        self.host = unit.host;
+        self.pending_image_id = None;
+        #[cfg(unix)]
+        self.host
+            .images
+            .extend(self.direct_trust_during_output.drain());
+        if self.presentation_generation != unit.presentation_generation {
+            self.host.request_placement_replay();
+        }
+        self.uploading = unit.uploading;
+        if unit.interrupted {
+            self.interrupt_upload = false;
+        }
+        if self.scope == unit.scope && unit.reset {
+            self.reset_pending = false;
+        }
+        if let Some(id) = unit.stale {
+            if let Some(index) = self.stale_images.iter().position(|current| *current == id) {
+                self.stale_images.remove(index);
+            }
+        }
+        if let Some(id) = unit.forced {
+            if let Some(index) = self
+                .forced_delete_images
+                .iter()
+                .position(|current| *current == id)
+            {
+                self.forced_delete_images.remove(index);
+            }
+        }
+        self.prune_stale_images();
+        if self.reset_pending && self.host.images.is_empty() && self.uploading.is_none() {
+            self.host.clear_bytes();
+            self.reset_pending = false;
         }
     }
 }
@@ -708,6 +933,75 @@ fn format_code(format: SurfaceGraphicsFormat) -> u32 {
 mod tests {
     use super::*;
 
+    fn drain_units(
+        state: &mut ClientState,
+        visibility: Visibility,
+        main_origin: (u16, u16),
+        popup_origin: Option<(u16, u16)>,
+        cell_size: HostCellSize,
+        occlusion: &Occlusion,
+    ) -> Vec<u8> {
+        state.prepare(visibility, main_origin, popup_origin, cell_size, occlusion);
+        let mut bytes = Vec::new();
+        for _ in 0..4096 {
+            let Some(unit) = state.next_unit() else {
+                return bytes;
+            };
+            bytes.extend_from_slice(&unit.bytes);
+            state.acknowledge(unit);
+        }
+        panic!("graphics did not reach a stable state");
+    }
+
+    fn drain_cleanup(state: &mut ClientState) -> Vec<u8> {
+        drain_units(
+            state,
+            Visibility::Hidden,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &Occlusion::default(),
+        )
+    }
+
+    fn last_uploaded_payload(wire: &[u8]) -> Vec<u8> {
+        use base64::Engine as _;
+
+        let mut remaining = wire;
+        let mut payload = Vec::new();
+        let mut completed = Vec::new();
+        while let Some(start) = remaining.windows(3).position(|bytes| bytes == b"\x1b_G") {
+            remaining = &remaining[start + 3..];
+            let end = remaining
+                .windows(2)
+                .position(|bytes| bytes == b"\x1b\\")
+                .expect("complete Kitty command");
+            let command = &remaining[..end];
+            remaining = &remaining[end + 2..];
+            let Some(separator) = command.iter().position(|byte| *byte == b';') else {
+                continue;
+            };
+            let control = &command[..separator];
+            if control.starts_with(b"a=t,t=d,") {
+                payload.clear();
+            } else if !control.starts_with(b"m=") {
+                continue;
+            }
+            payload.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&command[separator + 1..])
+                    .expect("valid Kitty base64"),
+            );
+            if control.windows(3).any(|bytes| bytes == b"m=0") {
+                completed.clone_from(&payload);
+            }
+        }
+        completed
+    }
+
     fn asset(
         target: SurfaceGraphicsTarget,
         fingerprint: u64,
@@ -789,7 +1083,7 @@ mod tests {
         for direct in [false, true] {
             let mut state = ClientState::default();
             state.set_scope("occlusion");
-            let _ = state.take_pending_cleanup();
+            let _ = drain_cleanup(&mut state);
             let image = asset(
                 SurfaceGraphicsTarget::Pane {
                     pane_id: "pane".into(),
@@ -822,22 +1116,35 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             };
-            let _ = state.encode(Visibility::Main, (10, 5), None, cell, &Occlusion::default());
+            let _ = drain_units(
+                &mut state,
+                Visibility::Main,
+                (10, 5),
+                None,
+                cell,
+                &Occlusion::default(),
+            );
             assert_eq!(state.host.placements.len(), 2);
             let mut cover = Occlusion::default();
             cover.cover(Rect::new(10, 5, 1, 1));
-            let hidden = state.encode(Visibility::Main, (10, 5), None, cell, &cover);
+            let hidden = drain_units(&mut state, Visibility::Main, (10, 5), None, cell, &cover);
             let hidden = String::from_utf8_lossy(&hidden);
             assert!(hidden.contains("a=d,d=i"), "{hidden}");
             assert!(!hidden.contains("a=d,d=I"), "{hidden}");
             assert!(hidden.contains("\u{1b}[6;16H"), "{hidden}");
             assert_eq!(state.host.placements.len(), 1);
             cover.cover(Rect::new(15, 5, 1, 1));
-            let _ = state.encode(Visibility::Main, (10, 5), None, cell, &cover);
+            let _ = drain_units(&mut state, Visibility::Main, (10, 5), None, cell, &cover);
             assert!(state.host.placements.is_empty());
             assert!(state.host.images.contains_key(&id));
-            let restored =
-                state.encode(Visibility::Main, (10, 5), None, cell, &Occlusion::default());
+            let restored = drain_units(
+                &mut state,
+                Visibility::Main,
+                (10, 5),
+                None,
+                cell,
+                &Occlusion::default(),
+            );
             let restored = String::from_utf8_lossy(&restored);
             assert!(restored.contains("a=p"), "{restored}");
             assert!(!restored.contains("a=t"), "{restored}");
@@ -907,12 +1214,13 @@ mod tests {
                     cover.cover(Rect::new(0, 10, 80, 3));
                     cover.cover(Rect::new(60, 0, 20, 5));
                 }
-                let _ = state.encode(Visibility::Main, (0, 0), None, cell, &cover);
+                let _ = drain_units(&mut state, Visibility::Main, (0, 0), None, cell, &cover);
                 let mut samples = Vec::new();
                 for _ in 0..101 {
                     let start = std::time::Instant::now();
                     for _ in 0..20 {
-                        std::hint::black_box(state.encode(
+                        std::hint::black_box(drain_units(
+                            &mut state,
                             Visibility::Main,
                             (0, 0),
                             None,
@@ -941,7 +1249,8 @@ mod tests {
         );
         state.set_scene(scene(image, 1, 2));
 
-        let first = state.encode(
+        let first = drain_units(
+            &mut state,
             Visibility::Main,
             (10, 5),
             None,
@@ -954,7 +1263,8 @@ mod tests {
         assert!(String::from_utf8_lossy(&first).contains("a=t,t=d"));
         assert!(String::from_utf8_lossy(&first).contains("\u{1b}[8;12H"));
 
-        let second = state.encode(
+        let second = drain_units(
+            &mut state,
             Visibility::Main,
             (10, 5),
             None,
@@ -986,9 +1296,17 @@ mod tests {
             width_px: 8,
             height_px: 16,
         };
-        let _ = state.encode(Visibility::Main, (4, 2), None, cell, &Occlusion::default());
+        let _ = drain_units(
+            &mut state,
+            Visibility::Main,
+            (4, 2),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
 
-        let hidden = state.encode(
+        let hidden = drain_units(
+            &mut state,
             Visibility::Hidden,
             (4, 2),
             None,
@@ -997,7 +1315,14 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&hidden).contains("a=d,d=i"));
 
-        let restored = state.encode(Visibility::Main, (4, 2), None, cell, &Occlusion::default());
+        let restored = drain_units(
+            &mut state,
+            Visibility::Main,
+            (4, 2),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
         let restored = String::from_utf8_lossy(&restored);
         assert!(restored.contains("a=p"));
         assert!(!restored.contains("a=t,t=d"));
@@ -1016,7 +1341,8 @@ mod tests {
         );
         state.set_scene(scene(image, 2, 1));
 
-        let bytes = state.encode(
+        let bytes = drain_units(
+            &mut state,
             Visibility::Popup,
             (20, 4),
             Some((30, 10)),
@@ -1034,7 +1360,8 @@ mod tests {
     fn trusted_direct_asset_is_placed_without_inline_reupload() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
-        let _ = state.encode(
+        let _ = drain_units(
+            &mut state,
             Visibility::Hidden,
             (0, 0),
             None,
@@ -1057,7 +1384,8 @@ mod tests {
         direct_scene.assets.clear();
         state.set_scene(direct_scene);
 
-        let bytes = state.encode(
+        let bytes = drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1077,7 +1405,7 @@ mod tests {
     fn direct_asset_trusted_after_scene_arrival_is_immediately_placeable() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
-        let _ = state.take_pending_cleanup();
+        let _ = drain_cleanup(&mut state);
         let image = asset(
             SurfaceGraphicsTarget::Pane {
                 pane_id: "w1:p1".into(),
@@ -1091,7 +1419,8 @@ mod tests {
         state.set_scene(direct_scene);
         assert!(state.trust_direct_asset(&image.key, image_id));
 
-        let bytes = state.encode(
+        let bytes = drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1111,7 +1440,7 @@ mod tests {
     fn retained_direct_asset_survives_hidden_scene_and_replays_without_upload() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
-        let _ = state.take_pending_cleanup();
+        let _ = drain_cleanup(&mut state);
         let image = asset(
             SurfaceGraphicsTarget::Pane {
                 pane_id: "w1:p1".into(),
@@ -1124,7 +1453,8 @@ mod tests {
         active.assets.clear();
         state.set_scene(active.clone());
         assert!(state.trust_direct_asset(&image.key, image_id));
-        let _ = state.encode(
+        let _ = drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1139,7 +1469,8 @@ mod tests {
             retained_assets: vec![image.key.clone()],
             ..SurfaceGraphicsScene::default()
         });
-        let hidden = String::from_utf8(state.encode(
+        let hidden = String::from_utf8(drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1154,7 +1485,8 @@ mod tests {
 
         active.retained_assets.push(image.key.clone());
         state.set_scene(active);
-        let restored = String::from_utf8(state.encode(
+        let restored = String::from_utf8(drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1169,7 +1501,8 @@ mod tests {
         assert!(!restored.contains("a=t,t=d"), "{restored}");
 
         state.set_scene(SurfaceGraphicsScene::default());
-        let removed = String::from_utf8(state.encode(
+        let removed = String::from_utf8(drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1207,7 +1540,8 @@ mod tests {
         graphics.placements.extend(popup_scene.placements);
         state.set_scene(graphics);
 
-        let bytes = String::from_utf8(state.encode(
+        let bytes = String::from_utf8(drain_units(
+            &mut state,
             Visibility::Popup,
             (2, 1),
             Some((20, 10)),
@@ -1227,9 +1561,9 @@ mod tests {
     fn retired_pending_direct_asset_is_deleted_even_before_cache_adoption() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
-        let _ = state.take_pending_cleanup();
+        let _ = drain_cleanup(&mut state);
         state.retire_direct_image(4242);
-        let cleanup = String::from_utf8(state.take_pending_cleanup()).unwrap();
+        let cleanup = String::from_utf8(drain_cleanup(&mut state)).unwrap();
         assert!(cleanup.contains("a=d,d=I,i=4242"), "{cleanup}");
     }
 
@@ -1238,7 +1572,7 @@ mod tests {
     fn unclaimed_direct_asset_is_deleted_by_the_next_authoritative_scene() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
-        let _ = state.take_pending_cleanup();
+        let _ = drain_cleanup(&mut state);
         let image = asset(
             SurfaceGraphicsTarget::Pane {
                 pane_id: "w1:p1".into(),
@@ -1250,7 +1584,8 @@ mod tests {
         assert!(state.trust_direct_asset(&image.key, image_id));
         state.set_scene(SurfaceGraphicsScene::default());
 
-        let bytes = state.encode(
+        let bytes = drain_units(
+            &mut state,
             Visibility::Hidden,
             (0, 0),
             None,
@@ -1276,7 +1611,8 @@ mod tests {
             vec![1, 2, 3, 4],
         );
         state.set_scene(scene(image, 0, 0));
-        let _ = state.encode(
+        let _ = drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1288,9 +1624,9 @@ mod tests {
         );
 
         state.set_scope("endpoint-a:boot-2");
-        let cleanup = String::from_utf8(state.take_pending_cleanup()).unwrap();
+        let cleanup = String::from_utf8(drain_cleanup(&mut state)).unwrap();
         assert!(cleanup.contains("a=d,d=I"), "{cleanup}");
-        assert!(state.take_pending_cleanup().is_empty());
+        assert!(drain_cleanup(&mut state).is_empty());
     }
 
     #[test]
@@ -1310,7 +1646,8 @@ mod tests {
         state.set_scene(first_scene);
         state.set_scene(replacement);
 
-        let bytes = state.encode(
+        let bytes = drain_units(
+            &mut state,
             Visibility::Main,
             (0, 0),
             None,
@@ -1321,5 +1658,408 @@ mod tests {
             &Occlusion::default(),
         );
         assert!(String::from_utf8_lossy(&bytes).contains("a=t,t=d"));
+    }
+
+    #[test]
+    fn replacing_unuploaded_scene_does_not_block_next_image() {
+        let mut state = ClientState::default();
+        state.set_scope("replacement");
+        let a = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![1, 2, 3, 4],
+        );
+        let b = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            2,
+            vec![5, 6, 7, 8],
+        );
+        let a_id = host_image_id("replacement", &a.key);
+        let b_id = host_image_id("replacement", &b.key);
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        state.set_scene(scene(a, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        state.set_scene(scene(b, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+
+        let mut bytes = Vec::new();
+        for _ in 0..16 {
+            let Some(unit) = state.next_unit() else { break };
+            bytes.extend_from_slice(&unit.bytes);
+            state.acknowledge(unit);
+        }
+        assert!(String::from_utf8_lossy(&bytes).contains(&format!("i={b_id}")));
+        assert!(state.host.images.contains_key(&b_id));
+        assert!(!state.host.images.contains_key(&a_id));
+        assert!(
+            state.next_unit().is_none(),
+            "cleanup must finish without spinning"
+        );
+    }
+
+    #[test]
+    fn absent_stale_is_pruned_before_cached_stale_cleanup() {
+        let mut state = ClientState::default();
+        state.set_scope("stale-order");
+        state.prepare(
+            Visibility::Hidden,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &Occlusion::default(),
+        );
+        let a = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![1, 2, 3, 4],
+        );
+        let cached = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            2,
+            vec![5, 6, 7, 8],
+        );
+        let next = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            3,
+            vec![9, 10, 11, 12],
+        );
+        let a_id = host_image_id("stale-order", &a.key);
+        let cached_id = host_image_id("stale-order", &cached.key);
+        let next_id = host_image_id("stale-order", &next.key);
+        state.set_scene(scene(a, 0, 0));
+        state.set_scene(scene(cached.clone(), 0, 0));
+        state
+            .host
+            .images
+            .insert(cached_id, image_signature_from_asset(&cached.key));
+        state.set_scene(scene(next, 0, 0));
+        assert_eq!(state.stale_images, [cached_id]);
+        state.prepare(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &Occlusion::default(),
+        );
+
+        let mut bytes = Vec::new();
+        for _ in 0..16 {
+            let Some(unit) = state.next_unit() else { break };
+            bytes.extend_from_slice(&unit.bytes);
+            state.acknowledge(unit);
+        }
+        let output = String::from_utf8_lossy(&bytes);
+        assert!(
+            output.contains(&format!("a=d,d=I,i={cached_id}")),
+            "{output}"
+        );
+        assert!(output.contains(&format!("i={next_id}")), "{output}");
+        assert!(!state.host.images.contains_key(&a_id));
+        assert!(!state.host.images.contains_key(&cached_id));
+        assert!(state.host.images.contains_key(&next_id));
+        assert!(
+            state.next_unit().is_none(),
+            "cleanup must finish without spinning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_asset_trust_survives_an_unrelated_output_acknowledgement() {
+        let mut state = ClientState::default();
+        state.set_scope("direct-race");
+        let inline = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![1, 2, 3, 4],
+        );
+        let direct = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            2,
+            vec![5, 6, 7, 8],
+        );
+        let direct_id = host_image_id("direct-race", &direct.key);
+        state.set_scene(scene(inline, 0, 0));
+        state.prepare(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &Occlusion::default(),
+        );
+        let unit = state.next_unit().expect("inline upload");
+        assert!(state.trust_direct_asset(&direct.key, direct_id));
+        state.acknowledge(unit);
+        assert_eq!(
+            state.host.images.get(&direct_id),
+            Some(&image_signature_from_asset(&direct.key))
+        );
+    }
+
+    #[test]
+    fn scene_churn_without_output_keeps_only_deliverable_cleanup() {
+        let mut state = ClientState::default();
+        state.set_scope("scene-churn-idle");
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let mut final_data = Vec::new();
+        for generation in 0..256_u16 {
+            final_data = vec![generation as u8; 8192];
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                u64::from(generation),
+                final_data.clone(),
+            );
+            image.key.image_width = 64;
+            image.key.image_height = 32;
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            assert!(
+                state.stale_images.is_empty(),
+                "undelivered generation {generation} left cleanup behind"
+            );
+        }
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        assert_eq!(last_uploaded_payload(&bytes), final_data);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scene_churn_with_first_chunk_unacknowledged_retains_only_its_cleanup() {
+        let mut state = ClientState::default();
+        state.set_scope("scene-churn-busy");
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let mut first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![42; 8192],
+        );
+        first.key.image_width = 64;
+        first.key.image_height = 32;
+        let first_id = host_image_id("scene-churn-busy", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let queued = state.next_unit().expect("first Kitty chunk queued");
+        assert!(queued.bytes.windows(3).any(|bytes| bytes == b"m=1"));
+        assert!(state.host.images.is_empty());
+        assert!(!state.upload_in_progress());
+
+        let mut final_data = Vec::new();
+        for generation in 0..256_u16 {
+            final_data = vec![generation as u8; 8192];
+            let mut image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                u64::from(generation) + 2,
+                final_data.clone(),
+            );
+            image.key.image_width = 64;
+            image.key.image_height = 32;
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            assert!(
+                state.stale_images.len() <= 1,
+                "unbounded cleanup after generation {generation}: {}",
+                state.stale_images.len()
+            );
+            assert!(state.stale_images.iter().all(|id| *id == first_id));
+        }
+        state.acknowledge(queued);
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("\x1b_Gm=0;\x1b\\"),
+            "in-flight upload must end before deletion"
+        );
+        assert!(
+            text.contains(&format!("a=d,d=I,i={first_id}")),
+            "in-flight image must be deleted"
+        );
+        assert_eq!(last_uploaded_payload(&bytes), final_data);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(!state.host.images.contains_key(&first_id));
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scope_switch_cleans_unacknowledged_single_chunk_image() {
+        let mut state = ClientState::default();
+        state.set_scope("scope-a");
+        let first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            31,
+            vec![1, 2, 3, 4],
+        );
+        let first_id = host_image_id("scope-a", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let unit = state.next_unit().expect("single Kitty chunk queued");
+        assert!(unit.bytes.windows(3).any(|bytes| bytes == b"m=0"));
+
+        state.set_scope("scope-b");
+        state.prepare(
+            Visibility::Hidden,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        state.acknowledge(unit);
+        let cleanup = drain_cleanup(&mut state);
+        assert!(String::from_utf8_lossy(&cleanup).contains(&format!("a=d,d=I,i={first_id}")));
+        assert!(state.host.images.is_empty());
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scope_switch_during_final_chunk_deletes_old_image_and_uploads_new_scope() {
+        let mut state = ClientState::default();
+        state.set_scope("scope-a");
+        let mut first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            32,
+            vec![42; 8192],
+        );
+        first.key.image_width = 64;
+        first.key.image_height = 32;
+        let first_id = host_image_id("scope-a", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        for _ in 0..2 {
+            let unit = state.next_unit().expect("partial upload chunk");
+            assert!(unit.bytes.windows(3).any(|bytes| bytes == b"m=1"));
+            state.acknowledge(unit);
+        }
+        let final_unit = state.next_unit().expect("final upload chunk");
+        assert!(final_unit.bytes.windows(3).any(|bytes| bytes == b"m=0"));
+        let second = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            33,
+            vec![9, 8, 7, 6],
+        );
+        let second_id = host_image_id("scope-b", &second.key);
+        let original_second = second.data.clone();
+        state.set_scope("scope-b");
+        state.set_scene(scene(second, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        state.acknowledge(final_unit);
+
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains(&format!("a=d,d=I,i={first_id}")));
+        assert_eq!(last_uploaded_payload(&bytes), original_second);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(state.host.images.contains_key(&second_id));
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn repeated_scope_switches_do_not_accumulate_old_images() {
+        let mut state = ClientState::default();
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        for generation in 0..8_u64 {
+            let scope = format!("scope-{generation}");
+            state.set_scope(&scope);
+            let image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                generation,
+                vec![generation as u8; 4],
+            );
+            let image_id = host_image_id(&scope, &image.key);
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            let unit = state.next_unit().expect("queued image");
+            state.set_scope(&format!("scope-{}", generation + 1));
+            state.prepare(
+                Visibility::Hidden,
+                (0, 0),
+                None,
+                cell,
+                &Occlusion::default(),
+            );
+            state.acknowledge(unit);
+            let cleanup = drain_cleanup(&mut state);
+            assert!(String::from_utf8_lossy(&cleanup).contains(&format!("a=d,d=I,i={image_id}")));
+            assert!(
+                state.host.images.is_empty(),
+                "old images survived scope switch {generation}"
+            );
+        }
     }
 }
