@@ -1,4 +1,6 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(test)]
+use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
@@ -192,6 +194,18 @@ pub struct ActionKeybinds {
 }
 
 impl ActionKeybinds {
+    pub(crate) fn from_labels(labels: &[String]) -> Result<Self, String> {
+        let mut bindings = Vec::new();
+        for label in labels {
+            match parse_binding_string(label) {
+                Some(ParsedBinding::Single(binding)) => bindings.push(binding),
+                Some(ParsedBinding::Range(range)) => bindings.extend(range),
+                None => return Err(format!("invalid endpoint command binding: {label}")),
+            }
+        }
+        Ok(Self { bindings })
+    }
+
     #[cfg(test)]
     pub fn prefix(label: &str) -> Self {
         let raw = if label.starts_with("prefix+") {
@@ -365,6 +379,7 @@ pub struct Keybinds {
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
+    pub workspace_picker: ActionKeybinds,
     pub workspace_switcher: ActionKeybinds,
     pub workspace_switcher_backward: ActionKeybinds,
     pub goto: ActionKeybinds,
@@ -429,15 +444,12 @@ impl Keybinds {
         self.workspace_switcher.first_direct_combo()
     }
 
+    #[cfg(test)]
     pub fn workspace_switcher_backward_combo(&self) -> Option<KeyCombo> {
-        self.workspace_switcher_backward
-            .first_direct_combo()
-            .or_else(|| {
-                self.workspace_switcher_forward_combo()
-                    .map(derived_workspace_switcher_backward_combo)
-            })
+        self.workspace_switcher_backward.first_direct_combo()
     }
 
+    #[cfg(test)]
     pub fn workspace_switcher_command_modifiers(&self) -> Option<KeyModifiers> {
         self.workspace_switcher_forward_combo()
             .map(|(_, modifiers)| modifiers)
@@ -588,6 +600,7 @@ impl Config {
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
             close_workspace: empty_action!(),
+            workspace_picker: empty_action!(),
             workspace_switcher: empty_action!(),
             workspace_switcher_backward: empty_action!(),
             goto: empty_action!(),
@@ -723,6 +736,7 @@ impl Config {
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
+            apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.workspace_switcher, workspace_switcher, source);
             apply_action!(
                 keybinds.workspace_switcher_backward,
@@ -830,6 +844,28 @@ impl Config {
                     &mut keybinds,
                     &mut registry,
                     &mut diagnostics,
+                );
+            }
+        }
+
+        if !self
+            .keys
+            .key_field_is_user_configured("workspace_switcher_backward")
+        {
+            if let Some(combo) = keybinds.workspace_switcher_forward_combo() {
+                let derived = BindingConfig::one(format_key_combo(
+                    derived_workspace_switcher_backward_combo(combo),
+                ));
+                keybinds.workspace_switcher_backward = parse_action_bindings(
+                    "keys.workspace_switcher_backward",
+                    &derived,
+                    &mut registry,
+                    &mut diagnostics,
+                    if self.keys.key_field_is_user_configured("workspace_switcher") {
+                        BindingSource::User
+                    } else {
+                        BindingSource::Default
+                    },
                 );
             }
         }
@@ -1541,6 +1577,7 @@ pub fn normalize_key_combo((mut code, mut modifiers): KeyCombo) -> KeyCombo {
     (code, modifiers)
 }
 
+#[cfg(test)]
 pub fn key_event_matches_combo(key: &KeyEvent, combo: KeyCombo) -> bool {
     key_parts_match_combo(key.code, key.modifiers, None, combo)
 }
@@ -2350,6 +2387,36 @@ workspace_switcher = "cmd+f13"
     }
 
     #[test]
+    fn workspace_switcher_explicit_disabled_backward_never_derives_a_binding() {
+        for disabled in ["''", "[]"] {
+            let config: Config = toml::from_str(&format!(
+                "[keys]\nworkspace_picker = 'prefix+w'\nworkspace_switcher = 'alt+tab'\nworkspace_switcher_backward = {disabled}\n"
+            )).unwrap();
+            let kb = config.keybinds();
+            assert!(kb.workspace_switcher_backward_combo().is_none());
+            assert!(kb
+                .workspace_picker
+                .matches_prefix_key(&TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty())));
+        }
+    }
+
+    #[test]
+    fn workspace_switcher_derived_backward_respects_explicit_binding_conflicts() {
+        let config: Config =
+            toml::from_str("[keys]\nworkspace_switcher = 'alt+tab'\nnew_tab = 'alt+shift+tab'\n")
+                .unwrap();
+        let (_, _, diagnostics, kb) = config.validated_keybinds();
+        assert!(kb.workspace_switcher_backward_combo().is_none());
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("workspace_switcher_backward")
+                && message.contains("new_tab")));
+        assert!(kb
+            .new_tab
+            .matches_direct_key(&TerminalKey::new(KeyCode::BackTab, KeyModifiers::ALT)));
+    }
+
+    #[test]
     fn workspace_switcher_backward_combo_uses_explicit_binding() {
         let config: Config = toml::from_str(
             r#"
@@ -2496,7 +2563,7 @@ switch_tab = "prefix+?"
                 KeyModifiers::CONTROL
             ))]
         );
-        assert!(kb.workspace_switcher_backward.bindings.is_empty());
+        assert_eq!(kb.workspace_switcher_backward.bindings.len(), 1);
         assert_eq!(
             kb.workspace_switcher_backward_combo(),
             Some((KeyCode::BackTab, KeyModifiers::CONTROL))

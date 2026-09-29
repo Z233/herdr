@@ -79,18 +79,6 @@ impl App {
         self.mark_git_status_refresh_due(now);
     }
 
-    /// Consume the open switcher's branch refresh demand and request the
-    /// existing asynchronous Git identity/branch refresh so branch metadata
-    /// arrives while the switcher is open, even without a sidebar branch
-    /// token. No-op when the switcher has not raised the demand. Shared by
-    /// the TUI and headless controllers; performs no synchronous Git I/O.
-    pub(crate) fn consume_workspace_switcher_branch_refresh(&mut self) {
-        if self.state.workspace_switcher.branch_refresh_requested {
-            self.state.workspace_switcher.branch_refresh_requested = false;
-            self.request_git_identity_refresh(Instant::now());
-        }
-    }
-
     pub(crate) fn mark_git_status_refresh_due(&mut self, now: Instant) {
         self.git_status_cache
             .retain(|_, entry| entry.fingerprint.is_some());
@@ -119,11 +107,6 @@ impl App {
                 crate::config::SpaceSidebarToken::GitStatus => demand.ahead_behind = true,
                 _ => {}
             }
-        }
-        // The open switcher shows branch metadata, so branch refresh stays
-        // demanded while it is open even without a sidebar branch token.
-        if self.state.workspace_switcher.active {
-            demand.branch = true;
         }
         demand
     }
@@ -446,47 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn open_switcher_demands_branch_refresh_without_sidebar_branch_token() {
-        let mut config = crate::config::Config::default();
-        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
-        let mut app = test_app(&config);
-        app.state.workspaces.push(Workspace::test_new("test"));
-
-        // No sidebar branch token: branch refresh is not demanded.
-        assert!(!app.git_refresh_demand().branch);
-        assert_eq!(app.git_refresh_deadline(), None);
-
-        // An open switcher shows branch metadata, so it demands the
-        // asynchronous Git identity/branch refresh on its own.
-        app.state.open_workspace_switcher();
-        assert!(app.git_refresh_demand().branch);
-        assert!(app.git_refresh_deadline().is_some());
-    }
-
-    #[test]
-    fn consume_switcher_branch_refresh_requests_identity_once_per_demand() {
-        let mut config = crate::config::Config::default();
-        config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
-        let mut app = test_app(&config);
-        app.state.workspaces.push(Workspace::test_new("test"));
-
-        // No demand raised: consuming is a no-op.
-        assert!(!app.state.workspace_switcher.branch_refresh_requested);
-        app.consume_workspace_switcher_branch_refresh();
-        assert!(!app.git_identity_refresh_requested);
-        assert_eq!(app.git_refresh_deadline(), None);
-
-        // An open switcher raises the demand; consuming requests the
-        // asynchronous identity refresh and clears the flag.
-        app.state.open_workspace_switcher();
-        assert!(app.state.workspace_switcher.branch_refresh_requested);
-        app.consume_workspace_switcher_branch_refresh();
-        assert!(!app.state.workspace_switcher.branch_refresh_requested);
-        assert!(app.git_identity_refresh_requested);
-        assert!(app.git_refresh_deadline().is_some());
-    }
-
-    #[test]
     fn unnamed_linked_worktree_does_not_force_periodic_branch_refresh() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
@@ -587,7 +529,7 @@ mod tests {
     fn test_app(config: &crate::config::Config) -> super::super::App {
         super::super::App::new(
             config,
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),

@@ -46,6 +46,7 @@ pub struct KeysConfig {
     /// Prefix key. Default: "ctrl+b".
     pub prefix: String,
     pub zoom: BindingConfig,
+    pub workspace_picker: BindingConfig,
     /// Prefix-mode custom command bindings.
     pub command: Vec<CommandKeybindConfig>,
     pub(crate) user_fields: BTreeSet<&'static str>,
@@ -211,6 +212,22 @@ class CheckTests(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIn("ui.removed_option", errors[0])
+        self.assertIn("not in src/config", errors[0])
+
+    def test_upstream_workspace_picker_requires_documentation(self) -> None:
+        errors = self.run_check(
+            [key for key in self.all_keys() if key != "keys.workspace_picker"]
+        )
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("keys.workspace_picker", errors[0])
+        self.assertIn("missing", errors[0])
+
+    def test_removed_fork_key_is_not_silently_ignored(self) -> None:
+        errors = self.run_check(self.all_keys() + ["keys.quick_switch_workspace"])
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("keys.quick_switch_workspace", errors[0])
         self.assertIn("not in src/config", errors[0])
 
     def test_swapped_key_fails_despite_equal_count(self) -> None:

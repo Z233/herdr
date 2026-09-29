@@ -19,7 +19,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // Candidate data and matching helpers
@@ -79,13 +81,11 @@ impl SearchProviderCandidate {
     /// full-path match would have a numerically better rank.
     pub(crate) fn match_rank(&self, query: &str) -> Option<(u8, usize)> {
         let basename = self.basename();
-        if let Some(basename_rank) =
-            crate::ui::workspace_switcher::workspace_switcher_match_rank(query, &basename)
-        {
+        if let Some(basename_rank) = crate::workspace_search::match_rank(query, &basename) {
             return Some(basename_rank);
         }
         let path_str = self.display_path();
-        crate::ui::workspace_switcher::workspace_switcher_match_rank(query, &path_str)
+        crate::workspace_search::match_rank(query, &path_str)
     }
 }
 
@@ -96,7 +96,11 @@ pub(crate) fn abbreviate_home(path: &Path) -> String {
     if let Some(home) = home_dir() {
         if let Ok(rest) = path.strip_prefix(&home) {
             let tilde = if cfg!(windows) { "%USERPROFILE%" } else { "~" };
-            return format!("{tilde}{}", rest.display());
+            return if rest.as_os_str().is_empty() {
+                tilde.to_owned()
+            } else {
+                format!("{tilde}{}{}", std::path::MAIN_SEPARATOR, rest.display())
+            };
         }
     }
     path.display().to_string()
@@ -219,47 +223,59 @@ pub(crate) struct DirectoryPreview {
 /// At most [`DIRECTORY_PREVIEW_LIMIT`] entries are returned; `truncated`
 /// records whether more entries exist.
 pub(crate) fn read_directory_preview(path: &Path) -> io::Result<DirectoryPreview> {
-    let mut entries = Vec::new();
+    let mut entries = std::collections::BTreeSet::new();
+    let mut truncated = false;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = entry.file_type()?.is_dir();
-        entries.push(DirectoryPreviewEntry { name, is_dir });
+        entries.insert((!is_dir, name));
+        if entries.len() > DIRECTORY_PREVIEW_LIMIT {
+            entries.pop_last();
+            truncated = true;
+        }
     }
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
-    let truncated = entries.len() > DIRECTORY_PREVIEW_LIMIT;
-    entries.truncate(DIRECTORY_PREVIEW_LIMIT);
+    let entries = entries
+        .into_iter()
+        .map(|(file, name)| DirectoryPreviewEntry {
+            name,
+            is_dir: !file,
+        })
+        .collect();
     Ok(DirectoryPreview { entries, truncated })
+}
+
+static FILESYSTEM_TASKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// Keep timed-out filesystem calls from accumulating unbounded blocking workers.
+pub(crate) async fn filesystem_task<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> io::Result<T> {
+    let permit = FILESYSTEM_TASKS.acquire().await.map_err(io::Error::other)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(io::Error::other)
+}
+
+async fn read_bounded(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    limit: u64,
+) -> io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut output = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut output).await?;
+    if output.len() as u64 > limit {
+        return Err(io::Error::other("zoxide output limit exceeded"));
+    }
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
 // Provider lifecycle: availability, query, and result shaping
 // ---------------------------------------------------------------------------
-
-/// Lifecycle status of the search provider for a Search session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum SearchProviderStatus {
-    /// No provider activity yet (Search not entered or not applicable).
-    #[default]
-    Idle,
-    /// A provider query is in flight and the process spawned successfully.
-    Loading,
-    /// The provider query completed (results may be empty).
-    Ready,
-    /// No provider binary is available on PATH.
-    Unavailable,
-}
-
-/// Cached state of a directory preview for one shown path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DirectoryPreviewState {
-    /// A preview load is in flight for this path.
-    Loading,
-    /// The preview was loaded successfully.
-    Ready(DirectoryPreview),
-    /// The preview load failed (directory missing or unreadable).
-    Error,
-}
 
 /// Outcome of a background zoxide query, reported back to the main loop.
 #[derive(Debug, Clone, PartialEq)]
@@ -268,29 +284,11 @@ pub(crate) struct ZoxideQueryResult {
     pub(crate) available: bool,
     /// Parsed and deduplicated candidates. Empty when unavailable or failed.
     pub(crate) candidates: Vec<SearchProviderCandidate>,
+    pub(crate) error: Option<crate::api::schema::ErrorBody>,
 }
 
-/// Run `zoxide query --list --score` with a timeout and return parsed
-/// candidates.
-///
-/// The `program` parameter is the binary to invoke (normally `"zoxide"`).
-/// Tests pass a controlled executable path so they never touch the
-/// developer's zoxide database.
-///
-/// `on_spawned` is invoked once immediately after a successful spawn,
-/// before polling/draining begins. This lets the caller emit a
-/// `ZoxideQueryStarted` event so the UI shows a Loading state while the
-/// query runs. If the spawn fails, `on_spawned` is never called and the
-/// caller should emit only `ZoxideQueryCompleted { available: false }`.
-///
-/// Returns `available: false` when the binary cannot be spawned. Returns
-/// `available: true` with an empty candidate list on timeout, non-zero
-/// exit, or malformed output — contributing no rows and no error.
-///
-/// Stdout is drained concurrently while waiting for the process to exit,
-/// preventing a pipe-buffer deadlock when the provider emits more data than
-/// the OS pipe capacity.
-pub(crate) fn run_zoxide_query<F>(
+/// Execute the provider without blocking the endpoint's input or render loop.
+pub(crate) async fn run_zoxide_query<F>(
     program: &str,
     timeout: Duration,
     on_spawned: F,
@@ -298,86 +296,77 @@ pub(crate) fn run_zoxide_query<F>(
 where
     F: FnOnce(),
 {
-    let mut child = match crate::noninteractive_process::command(program)
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut command = crate::noninteractive_process::command(program);
+    command
         .args(["query", "--list", "--score"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let mut command = tokio::process::Command::from(command);
+    command.kill_on_drop(true);
+    let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => {
-            return ZoxideQueryResult {
-                available: false,
-                candidates: Vec::new(),
-            }
-        }
+        Err(error) => return zoxide_failure("workspace_search_unavailable", error.to_string()),
     };
-
-    // Notify the caller that the process spawned successfully, so Loading
-    // can be shown while the query runs.
     on_spawned();
-
-    // Drain stdout in a separate thread so the child cannot block on a
-    // full pipe buffer while we are polling for exit.
-    let stdout_handle = child.stdout.take();
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut handle) = stdout_handle {
-            use std::io::Read;
-            let _ = handle.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    // Join the stdout thread to avoid a leak.
-                    let _ = stdout_thread.join();
-                    return ZoxideQueryResult {
-                        available: true,
-                        candidates: Vec::new(),
-                    };
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_thread.join();
-                return ZoxideQueryResult {
-                    available: true,
-                    candidates: Vec::new(),
-                };
-            }
-        }
+    let capture = async {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("zoxide stdout is unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("zoxide stderr is unavailable"))?;
+        tokio::try_join!(
+            child.wait(),
+            read_bounded(stdout, 4 * 1024 * 1024),
+            read_bounded(stderr, 64 * 1024)
+        )
     };
-
-    // Join the stdout reader and parse output.
-    let stdout_bytes = stdout_thread.join().unwrap_or_default();
-    let stdout = String::from_utf8_lossy(&stdout_bytes);
-
+    let (status, stdout, stderr) = match tokio::time::timeout_at(deadline, capture).await {
+        Err(_) => return zoxide_failure("workspace_search_timeout", "Directory search timed out"),
+        Ok(Err(error)) => return zoxide_failure("workspace_search_failed", error.to_string()),
+        Ok(Ok(output)) => output,
+    };
     if !status.success() {
-        return ZoxideQueryResult {
-            available: true,
-            candidates: Vec::new(),
-        };
+        let detail: String = String::from_utf8_lossy(&stderr)
+            .trim()
+            .chars()
+            .take(512)
+            .collect();
+        return zoxide_failure(
+            "workspace_search_failed",
+            format!("zoxide exited with {status}: {detail}"),
+        );
     }
+    let candidates = filesystem_task(move || {
+        let candidates = parse_zoxide_list(&String::from_utf8_lossy(&stdout))
+            .into_iter()
+            .map(|dir| SearchProviderCandidate::from_shown_path(dir.shown_path, dir.score))
+            .collect();
+        dedup_by_canonical_identity(candidates)
+    });
+    match tokio::time::timeout_at(deadline, candidates).await {
+        Ok(Ok(candidates)) => ZoxideQueryResult {
+            available: true,
+            candidates,
+            error: None,
+        },
+        Ok(Err(error)) => zoxide_failure("workspace_search_failed", error.to_string()),
+        Err(_) => zoxide_failure("workspace_search_timeout", "Directory search timed out"),
+    }
+}
 
-    let candidates: Vec<_> = parse_zoxide_list(&stdout)
-        .into_iter()
-        .map(|dir| SearchProviderCandidate::from_shown_path(dir.shown_path, dir.score))
-        .collect();
-    let candidates = dedup_by_canonical_identity(candidates);
+fn zoxide_failure(code: &str, message: impl Into<String>) -> ZoxideQueryResult {
     ZoxideQueryResult {
-        available: true,
-        candidates,
+        available: code != "workspace_search_unavailable",
+        candidates: Vec::new(),
+        error: Some(crate::api::schema::ErrorBody {
+            code: code.into(),
+            message: message.into(),
+        }),
     }
 }
 
@@ -630,8 +619,39 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_parses_valid_output() {
+    #[tokio::test]
+    async fn fork_merge_zoxide_rejects_unbounded_process_output() {
+        for stream in ["stdout", "stderr"] {
+            let output = if stream == "stdout" { "" } else { " >&2" };
+            let fake = write_fake_zoxide(stream, &format!("head -c 5000000 /dev/zero{output}"));
+            let result =
+                run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
+            assert_eq!(
+                result.error.as_ref().map(|error| error.code.as_str()),
+                Some("workspace_search_failed")
+            );
+            assert!(result.error.unwrap().message.contains("output limit"));
+            assert!(result.candidates.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fork_merge_zoxide_deadline_covers_all_query_stages() {
+        let fake = write_fake_zoxide("deadline", "printf '1 /tmp\n'");
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_millis(5), || {
+            std::thread::sleep(Duration::from_millis(20));
+        })
+        .await;
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_timeout")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_zoxide_query_parses_valid_output() {
         let dir = TestDir::new("zoxide-valid");
         let real = dir.path().join("real");
         fs::create_dir(&real).expect("mkdir real");
@@ -643,7 +663,7 @@ mod tests {
         );
         let fake = write_fake_zoxide("valid", &script);
 
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
         assert!(result.available);
         assert_eq!(result.candidates.len(), 2);
         // The existing directory is canonicalized; the stale one keeps its path.
@@ -656,64 +676,82 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_reports_unavailable_for_missing_binary() {
+    #[tokio::test]
+    async fn run_zoxide_query_reports_unavailable_for_missing_binary() {
         let missing =
             std::env::temp_dir().join(format!("herdr-zoxide-missing-{}", std::process::id()));
         let _ = fs::remove_file(&missing);
-        let result = run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result =
+            run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5), || {}).await;
         assert!(!result.available);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_unavailable")
+        );
         assert!(result.candidates.is_empty());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_reports_unavailable_for_non_executable() {
+    #[tokio::test]
+    async fn run_zoxide_query_reports_unavailable_for_non_executable() {
         // A file that exists but is not executable should fail to spawn.
         let dir = TestDir::new("non-exec");
         let fake = dir.path().join("not-zoxide");
         fs::write(&fake, "#!/bin/sh\necho should-not-run\n").expect("write fake");
         // Leave permissions as 0o644 (not executable).
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
         assert!(!result.available);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_unavailable")
+        );
         assert!(result.candidates.is_empty());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_times_out() {
+    #[tokio::test]
+    async fn run_zoxide_query_times_out() {
         // A script that sleeps longer than the timeout.
         let fake = write_fake_zoxide("slow", "sleep 10");
         let start = Instant::now();
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_millis(200), || {});
+        let result =
+            run_zoxide_query(fake.to_str().unwrap(), Duration::from_millis(200), || {}).await;
         let elapsed = start.elapsed();
         assert!(result.available);
         assert!(result.candidates.is_empty());
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_timeout")
+        );
         // Should return well before the 10-second sleep finishes.
         assert!(elapsed < Duration::from_secs(2));
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_returns_empty_on_nonzero_exit() {
+    #[tokio::test]
+    async fn run_zoxide_query_reports_nonzero_exit() {
         let fake = write_fake_zoxide("fail", "echo '100.0 /should-not-appear' >&2; exit 1");
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_failed")
+        );
         assert!(result.available);
         assert!(result.candidates.is_empty());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_returns_empty_on_malformed_output() {
+    #[tokio::test]
+    async fn run_zoxide_query_returns_empty_on_malformed_output() {
         let fake = write_fake_zoxide("malformed", "printf 'garbage no score\nbroken\n'");
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
         assert!(result.available);
         assert!(result.candidates.is_empty());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_deduplicates_canonical_aliases() {
+    #[tokio::test]
+    async fn run_zoxide_query_deduplicates_canonical_aliases() {
         let dir = TestDir::new("zoxide-dedup");
         let real = dir.path().join("real");
         let alias = dir.path().join("alias");
@@ -731,7 +769,7 @@ mod tests {
         );
         let fake = write_fake_zoxide("dedup", &script);
 
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {}).await;
         assert!(result.available);
         assert_eq!(result.candidates.len(), 1);
         // Highest-score alias wins.
@@ -741,8 +779,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_handles_large_output_without_deadlock() {
+    #[tokio::test]
+    async fn run_zoxide_query_handles_large_output_without_deadlock() {
         // Emit more data than a typical pipe buffer (64 KiB on Linux).
         // Each line is ~30 bytes; 10000 lines ≈ 300 KiB.
         let dir = TestDir::new("zoxide-large");
@@ -757,7 +795,7 @@ mod tests {
         let fake = write_fake_zoxide("large", &script);
 
         let start = Instant::now();
-        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(10), || {});
+        let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(10), || {}).await;
         let elapsed = start.elapsed();
 
         assert!(result.available);
@@ -770,8 +808,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_calls_on_spawned_after_successful_spawn() {
+    #[tokio::test]
+    async fn run_zoxide_query_calls_on_spawned_after_successful_spawn() {
         let dir = TestDir::new("zoxide-callback");
         let real = dir.path().join("real");
         fs::create_dir(&real).expect("mkdir real");
@@ -782,14 +820,15 @@ mod tests {
         let spawned_clone = spawned.clone();
         let result = run_zoxide_query(fake.to_str().unwrap(), Duration::from_secs(5), || {
             spawned_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
+        })
+        .await;
         assert!(result.available);
         assert!(spawned.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_zoxide_query_does_not_call_on_spawned_for_missing_binary() {
+    #[tokio::test]
+    async fn run_zoxide_query_does_not_call_on_spawned_for_missing_binary() {
         let missing =
             std::env::temp_dir().join(format!("herdr-zoxide-missing-cb-{}", std::process::id()));
         let _ = fs::remove_file(&missing);
@@ -797,8 +836,13 @@ mod tests {
         let spawned_clone = spawned.clone();
         let result = run_zoxide_query(missing.to_str().unwrap(), Duration::from_secs(5), || {
             spawned_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
+        })
+        .await;
         assert!(!result.available);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.code.as_str()),
+            Some("workspace_search_unavailable")
+        );
         assert!(!spawned.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

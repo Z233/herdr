@@ -32,13 +32,17 @@ ROOT_STRUCT = "Config"
 # therefore not enumerable in a flat reference table.
 SKIPPED_SUBTREES = ("keys.command",)
 
-# This fork keeps upstream documentation snapshots unchanged to reduce merge
-# conflicts. These fork-specific key changes are checked by Rust config tests.
+# Fork-only settings are documented in the root README and checked by the Rust
+# configuration tests. Keep upstream keys in the upstream reference contract.
 FORK_CONFIG_REFERENCE_EXCLUSIONS = frozenset(
     {
-        "keys.quick_switch_workspace",
-        "keys.quick_switch_workspace_backward",
-        "keys.workspace_picker",
+        "keys.chord_timeout_ms",
+        "keys.copy_mode_easymotion",
+        "keys.copy_mode_scroll_up",
+        "keys.open_pane_down",
+        "keys.open_pane_left",
+        "keys.open_pane_right",
+        "keys.open_pane_up",
         "keys.workspace_switcher",
         "keys.workspace_switcher_backward",
         "ui.sidebar.agents.visible",

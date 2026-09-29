@@ -5,7 +5,41 @@ use serde::{Deserialize, Serialize};
 use super::common::AgentStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceSearchParams {
+    #[serde(default)]
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceSearchCandidate {
+    pub shown_path: String,
+    pub canonical_path: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceDirectoryPreviewParams {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceDirectoryEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceDirectoryPreview {
+    pub canonical_path: String,
+    pub entries: Vec<WorkspaceDirectoryEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceCreateParams {
+    /// Workspace whose focused pane supplies the `follow` cwd policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -14,6 +48,13 @@ pub struct WorkspaceCreateParams {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceCloseParams {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub close_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

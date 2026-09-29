@@ -16,12 +16,12 @@ _Avoid_: Workspace, pane group
 A terminal session surface within a tab. An agent can run in a pane, but the pane is not the agent.
 _Avoid_: Agent, terminal tab
 
-**Frozen Copy View**:
-An immutable view of a Pane's visible terminal cells captured when EasyMotion first starts within a copy-mode session. It is distinct from the Pane's live content.
-_Avoid_: Pane snapshot, frozen Pane
+**Copy-mode Surface**:
+The terminal cells used by a client's current copy-mode session. EasyMotion results are valid only while the endpoint, content revision, geometry, selection, and copy session still match.
+_Avoid_: Frozen Copy View, frozen Pane
 
 **EasyMotion Target**:
-A query match in a Frozen Copy View that is identified by an EasyMotion label. It is distinct from a Selection Anchor.
+A query match in the validated Copy-mode Surface that is identified by an EasyMotion label. It is distinct from a Selection Anchor.
 _Avoid_: Anchor, jump anchor
 
 **Selection Anchor**:
@@ -36,14 +36,14 @@ _Avoid_: Managed workspace, any linked checkout
 The human-readable name of the shared Git repository that gives a managed linked worktree its repository context. It is distinct from the checkout directory and repository path.
 _Avoid_: Repository path, checkout name
 
-**Workspace Switcher**:
-The overlay that presents switcher items for moving among runtime destinations or opening a searched directory as a workspace. It includes Quick Switch and Search behavior.
-_Avoid_: Workspace Picker, picker
+**Navigator**:
+The client-owned overlay for searching destinations across Local and saved SSH machines, opening a directory as a workspace, and Quick Switch. The `workspace_picker` and `workspace_switcher` bindings open different modes of this same controller.
+_Avoid_: Server overlay, separate picker controller
 
 **Switcher Item**:
-A selectable destination in the Workspace Switcher that refers to a workspace, tab, or directory.
+A selectable destination in the Navigator that includes its endpoint and a workspace, tab, pane, or directory target.
 _Avoid_: Row, card, search result
 
 **Quick Switch**:
-The Workspace Switcher interaction that cycles through recently used workspaces and accepts the selected destination when its hold modifier is released.
-_Avoid_: Full list, Workspace Picker
+The Navigator interaction that cycles through a client's recently used workspaces and accepts the selected destination when its hold modifier is released. Recency changes after successful activation is presented.
+_Avoid_: Server MRU, attempted activation

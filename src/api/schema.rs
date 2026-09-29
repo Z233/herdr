@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod commands;
 pub mod common;
 pub mod events;
 pub mod integrations;
@@ -14,6 +15,7 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agents::*;
+pub use commands::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
@@ -57,16 +59,28 @@ pub enum Method {
     ServerReloadAgentManifests(EmptyParams),
     #[serde(rename = "notification.show")]
     NotificationShow(NotificationShowParams),
+    #[serde(rename = "product_announcement.dismiss")]
+    ProductAnnouncementDismiss(ProductAnnouncementDismissParams),
+    #[serde(rename = "release_notes.dismiss")]
+    ReleaseNotesDismiss(ReleaseNotesDismissParams),
+    #[serde(rename = "command.invoke")]
+    CommandInvoke(CommandInvokeParams),
     #[serde(rename = "client.window_title.set")]
     ClientWindowTitleSet(ClientWindowTitleSetParams),
     #[serde(rename = "client.window_title.clear")]
     ClientWindowTitleClear(EmptyParams),
+    #[serde(rename = "client_shell.surface.set")]
+    ClientShellSurfaceSet(ClientShellSurfaceSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
     WorkspaceList(EmptyParams),
+    #[serde(rename = "workspace.search")]
+    WorkspaceSearch(WorkspaceSearchParams),
+    #[serde(rename = "workspace.directory_preview")]
+    WorkspaceDirectoryPreview(WorkspaceDirectoryPreviewParams),
     #[serde(rename = "workspace.get")]
     WorkspaceGet(WorkspaceTarget),
     #[serde(rename = "workspace.focus")]
@@ -80,7 +94,7 @@ pub enum Method {
     #[serde(rename = "workspace.report_metadata")]
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
-    WorkspaceClose(WorkspaceTarget),
+    WorkspaceClose(WorkspaceCloseParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]
@@ -129,6 +143,8 @@ pub enum Method {
     AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
+    #[serde(rename = "pane.split.directional")]
+    PaneSplitDirectional(PaneSplitParams),
     #[serde(rename = "pane.swap")]
     PaneSwap(PaneSwapParams),
     #[serde(rename = "pane.move")]
@@ -153,6 +169,16 @@ pub enum Method {
     PaneFocusDirection(PaneFocusDirectionParams),
     #[serde(rename = "pane.resize")]
     PaneResize(PaneResizeParams),
+    #[serde(rename = "pane.scroll")]
+    PaneScroll(PaneScrollParams),
+    #[serde(rename = "pane.edit_scrollback")]
+    PaneEditScrollback(PaneTarget),
+    #[serde(rename = "pane.selection.read")]
+    PaneSelectionRead(PaneSelectionReadParams),
+    #[serde(rename = "pane.copy_motion")]
+    PaneCopyMotion(PaneCopyMotionParams),
+    #[serde(rename = "pane.copy_search")]
+    PaneCopySearch(PaneCopySearchParams),
     #[serde(rename = "pane.list")]
     PaneList(PaneListParams),
     #[serde(rename = "pane.current")]
@@ -163,6 +189,10 @@ pub enum Method {
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.input.set")]
     PaneInputSet(PaneInputSetParams),
+    #[serde(rename = "pane.link.activate")]
+    PaneLinkActivate(PaneLinkActivateParams),
+    #[serde(rename = "pane.link.resolve")]
+    PaneLinkResolve(PaneLinkActivateParams),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
@@ -214,6 +244,8 @@ pub enum Method {
     EventsWait(EventsWaitParams),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
+    #[serde(rename = "integration.list")]
+    IntegrationList(EmptyParams),
     #[serde(rename = "integration.install")]
     IntegrationInstall(IntegrationInstallParams),
     #[serde(rename = "integration.uninstall")]
@@ -244,3 +276,16 @@ pub enum Method {
 
 #[cfg(test)]
 mod tests;
+
+impl Method {
+    /// These requests carry explicit targets and do not require an active display surface.
+    pub(crate) fn permits_inactive_surface(&self) -> bool {
+        match self {
+            Self::WorkspaceSearch(_) | Self::WorkspaceDirectoryPreview(_) => true,
+            Self::PaneLayout(params) => params.pane_id.is_some(),
+            Self::PaneRead(_) => true,
+            Self::WorkspaceCreate(params) => !params.focus && params.cwd.is_some(),
+            _ => false,
+        }
+    }
+}

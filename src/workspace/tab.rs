@@ -204,12 +204,6 @@ impl Tab {
         ))
     }
 
-    pub fn display_name(&self) -> String {
-        self.custom_name
-            .clone()
-            .unwrap_or_else(|| self.number.to_string())
-    }
-
     pub fn is_auto_named(&self) -> bool {
         self.custom_name.is_none()
     }
@@ -237,37 +231,6 @@ impl Tab {
             true,
             direction,
             SplitMode::Default,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            host_terminal_appearance,
-            shell_config,
-            launch_env,
-            None,
-        )
-    }
-
-    #[cfg(test)]
-    pub fn split_focused_with_placement(
-        &mut self,
-        direction: Direction,
-        placement: SplitPlacement,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
-        shell_config: crate::pane::PaneShellConfig<'_>,
-        launch_env: &PaneLaunchEnv,
-    ) -> std::io::Result<NewPane> {
-        self.split_pane_with_runtime(
-            self.layout.focused(),
-            true,
-            direction,
-            SplitMode::WithPlacement(placement),
             rows,
             cols,
             cwd,
