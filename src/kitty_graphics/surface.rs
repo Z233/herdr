@@ -149,7 +149,6 @@ impl ClientState {
         #[cfg(unix)]
         self.direct_trust_during_output.clear();
         self.stale_images.clear();
-        self.pending_image_id = None;
         self.forced_delete_images.clear();
         self.reset_pending = true;
     }
@@ -253,7 +252,11 @@ impl ClientState {
     ) {
         self.presentation_generation = self.presentation_generation.wrapping_add(1);
         self.host.request_placement_replay();
-        if self.reset_pending && self.host.images.is_empty() {
+        if self.reset_pending
+            && self.host.images.is_empty()
+            && self.uploading.is_none()
+            && self.pending_image_id.is_none()
+        {
             self.host.clear_bytes();
             self.reset_pending = false;
         }
@@ -1927,5 +1930,136 @@ mod tests {
         assert_eq!(state.host.images.len(), 1);
         assert!(!state.host.images.contains_key(&first_id));
         assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scope_switch_cleans_unacknowledged_single_chunk_image() {
+        let mut state = ClientState::default();
+        state.set_scope("scope-a");
+        let first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            31,
+            vec![1, 2, 3, 4],
+        );
+        let first_id = host_image_id("scope-a", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        let unit = state.next_unit().expect("single Kitty chunk queued");
+        assert!(unit.bytes.windows(3).any(|bytes| bytes == b"m=0"));
+
+        state.set_scope("scope-b");
+        state.prepare(
+            Visibility::Hidden,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        state.acknowledge(unit);
+        let cleanup = drain_cleanup(&mut state);
+        assert!(String::from_utf8_lossy(&cleanup).contains(&format!("a=d,d=I,i={first_id}")));
+        assert!(state.host.images.is_empty());
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn scope_switch_during_final_chunk_deletes_old_image_and_uploads_new_scope() {
+        let mut state = ClientState::default();
+        state.set_scope("scope-a");
+        let mut first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            32,
+            vec![42; 8192],
+        );
+        first.key.image_width = 64;
+        first.key.image_height = 32;
+        let first_id = host_image_id("scope-a", &first.key);
+        state.set_scene(scene(first, 0, 0));
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        for _ in 0..2 {
+            let unit = state.next_unit().expect("partial upload chunk");
+            assert!(unit.bytes.windows(3).any(|bytes| bytes == b"m=1"));
+            state.acknowledge(unit);
+        }
+        let final_unit = state.next_unit().expect("final upload chunk");
+        assert!(final_unit.bytes.windows(3).any(|bytes| bytes == b"m=0"));
+        let second = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            33,
+            vec![9, 8, 7, 6],
+        );
+        let second_id = host_image_id("scope-b", &second.key);
+        let original_second = second.data.clone();
+        state.set_scope("scope-b");
+        state.set_scene(scene(second, 0, 0));
+        state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+        state.acknowledge(final_unit);
+
+        let bytes = drain_units(
+            &mut state,
+            Visibility::Main,
+            (0, 0),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains(&format!("a=d,d=I,i={first_id}")));
+        assert_eq!(last_uploaded_payload(&bytes), original_second);
+        assert_eq!(state.host.images.len(), 1);
+        assert!(state.host.images.contains_key(&second_id));
+        assert!(state.next_unit().is_none());
+    }
+
+    #[test]
+    fn repeated_scope_switches_do_not_accumulate_old_images() {
+        let mut state = ClientState::default();
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        for generation in 0..8_u64 {
+            let scope = format!("scope-{generation}");
+            state.set_scope(&scope);
+            let image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                generation,
+                vec![generation as u8; 4],
+            );
+            let image_id = host_image_id(&scope, &image.key);
+            state.set_scene(scene(image, 0, 0));
+            state.prepare(Visibility::Main, (0, 0), None, cell, &Occlusion::default());
+            let unit = state.next_unit().expect("queued image");
+            state.set_scope(&format!("scope-{}", generation + 1));
+            state.prepare(
+                Visibility::Hidden,
+                (0, 0),
+                None,
+                cell,
+                &Occlusion::default(),
+            );
+            state.acknowledge(unit);
+            let cleanup = drain_cleanup(&mut state);
+            assert!(String::from_utf8_lossy(&cleanup).contains(&format!("a=d,d=I,i={image_id}")));
+            assert!(
+                state.host.images.is_empty(),
+                "old images survived scope switch {generation}"
+            );
+        }
     }
 }
