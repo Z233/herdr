@@ -183,8 +183,9 @@ pub(super) fn write_host_terminal_appearance_query(mut writer: impl io::Write) -
     writer.flush()
 }
 
-pub(super) fn should_query_host_terminal_theme() -> bool {
-    !cfg!(windows)
+#[cfg(windows)]
+pub(super) fn query_host_terminal_theme() {
+    let _ = write_host_terminal_theme_query(io::stdout());
 }
 
 pub(super) fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {

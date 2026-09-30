@@ -241,6 +241,44 @@ detach = "prefix+x"
 }
 
 #[test]
+fn multiple_prefixes_each_execute_the_same_three_key_split_chord() {
+    let config = toml::from_str::<Config>(
+        r#"
+[keys]
+prefix = ["ctrl+b", "ctrl+s"]
+open_pane_left = "prefix+w+h"
+"#,
+    )
+    .expect("configured keybinds");
+    for prefix_byte in [0x02, 0x13] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec![
+            "pane.split".into(),
+            "pane.split.directional".into(),
+        ]));
+        state.compose(106, 20).expect("composed frame");
+
+        let prefix = state.handle_input_bytes(&[prefix_byte]);
+        assert!(prefix.requests.is_empty());
+        assert!(prefix.repaint);
+
+        let waiting = state.handle_input_bytes(b"w");
+        assert!(waiting.actions.is_empty(), "ambiguous chord step waits");
+
+        let completed = state.handle_input_bytes(b"h");
+        let [ClientShellAction::Endpoint { request, .. }] = completed.actions.as_slice() else {
+            panic!("completed chord must issue an endpoint request");
+        };
+        let request = serde_json::to_value(request).unwrap();
+        assert_eq!(request["method"], "pane.split.directional");
+        assert_eq!(request["params"]["direction"], "left");
+        assert_eq!(request["params"]["target_pane_id"], "pane_1");
+    }
+}
+
+#[test]
 fn prefix_endpoint_action_uses_public_api_with_stable_ids() {
     let mut config = Config::default();
     config.ui.prompt_new_tab_name = false;
@@ -282,7 +320,7 @@ command = "local-only"
     .unwrap();
     let remote_local = ClientShellConfig::from_config(&local)
         .with_keybinding_source(ClientShellKeybindingSource::RemoteLocal);
-    assert_eq!(remote_local.keybinds.prefix.0, KeyCode::Char('a'));
+    assert_eq!(remote_local.keybinds.prefix[0].0, KeyCode::Char('a'));
     assert!(remote_local.keybinds.keybinds.custom_commands.is_empty());
     assert_eq!(
         remote_local.keybinds.keybinds.new_tab.label().as_deref(),
@@ -377,7 +415,7 @@ new_tab = "prefix+n"
         });
     state.set_snapshot(Box::new(projection));
 
-    assert_eq!(state.config.keybinds.prefix.0, KeyCode::Char('x'));
+    assert_eq!(state.config.keybinds.prefix[0].0, KeyCode::Char('x'));
     assert_eq!(
         state.config.keybinds.keybinds.new_tab.label().as_deref(),
         Some("prefix+n")

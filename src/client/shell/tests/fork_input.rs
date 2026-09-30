@@ -70,6 +70,35 @@ fn fork_merge_zero_chord_timeout_does_not_restore_removed_picker() {
 }
 
 #[test]
+fn fork_merge_multiple_prefixes_keep_chord_timeout_and_removed_picker_behavior() {
+    let config: Config = toml::from_str(
+        "[keys]\nprefix = ['ctrl+b', 'ctrl+s']\nchord_timeout_ms = 500\nworkspace_picker = 'prefix+w'\nopen_pane_left = 'prefix+w+h'\n",
+    )
+    .unwrap();
+    for prefix_byte in [0x02u8, 0x13] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        state.set_snapshot(Box::new(snapshot()));
+        state.set_pane_surface(surface());
+        state.set_endpoint_methods(Some(vec![
+            "pane.split".into(),
+            "pane.split.directional".into(),
+        ]));
+        state.compose(106, 20).unwrap();
+        state.handle_input_bytes(&[prefix_byte, b'w']);
+        assert!(state.overlay.is_none());
+        assert_eq!(state.mode, ClientShellMode::Prefix);
+        let mut expired = ClientShellInput::default();
+        state.expire_prefix_chord(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            &mut expired,
+        );
+        assert!(state.overlay.is_none());
+        assert!(expired.actions.is_empty());
+        assert_eq!(state.mode, ClientShellMode::Terminal);
+    }
+}
+
+#[test]
 fn fork_merge_config_coexists_and_three_step_chord_opens_left_on_the_selected_pane() {
     let config: Config = toml::from_str(
         "[keys]\nworkspace_picker = 'prefix+w'\nworkspace_switcher = 'alt+tab'\nopen_pane_left = 'prefix+w+h'\n",

@@ -1,13 +1,13 @@
 # Herdr Fork (z233) — 功能与合并边界
 
-本次合并固定采用上游 v0.9.1（`065ef9d6a531c49fb8bee7e818ef837065b21ee9`）。用户说明集中在根目录 `README.md`；本文记录维护边界、实现入口和验证路线。下方历史记录只说明当时的实现，不是当前架构约束。
+本次合并固定采用上游 v0.9.3（`7b116c05bfda646af39d2524c54e70c751f57ee8`）。用户说明集中在根目录 `README.md`；本文记录维护边界、实现入口和验证路线。下方历史记录只说明当时的实现，不是当前架构约束。
 
-## v0.9.1 架构边界
+## v0.9.3 架构边界
 
 | 能力 | 所属层 | 当前实现与约束 |
 |---|---|---|
 | Navigator 与 MRU | client shell | 一个 Navigator 同时支持搜索与按住修饰键切换；目标包含 endpoint 与明确的 workspace/tab/pane 类型。MRU 每客户端独立，仅在激活结果实际呈现后更新。 |
-| 普通入口与 hold 入口 | client configuration/input | 保留 `workspace_picker`、`workspace_switcher` 和 `workspace_switcher_backward`。保留显式禁用、快捷键冲突诊断与派生反向键。 |
+| 普通入口与 hold 入口 | client configuration/input | 普通搜索入口为 `keys.goto`（默认 `prefix+g`）；hold 入口保留 `workspace_switcher` 和 `workspace_switcher_backward`，保留显式禁用、快捷键冲突诊断与派生反向键。`workspace_picker` 已移除，不得恢复。 |
 | 目录搜索与创建 | endpoint API/runtime | `workspace.search`、`workspace.directory_preview` 与 `workspace.create` 在所选 endpoint 执行；客户端不读取远端路径。响应绑定请求、endpoint、boot 与连接 generation。 |
 | 终端预览 | client shell + 中立读取 API | 宽屏预览整个选中 tab；已有本地 surface 可直接复用，其他目标通过显式 `pane.layout`、`pane.read` 读取。ANSI 解码在响应处理阶段完成，render 只绘制缓存。 |
 | Mobile gesture | client shell | tap、hold/drag、展开/折叠均为客户端状态；背景刷新不改变手势锚点，目标移除或 endpoint 更换时取消。 |
@@ -29,13 +29,14 @@ Host input
             → Client projection and cached rendering
 ```
 
-终端 wire protocol 随上游从 20 升至 22；endpoint generation 1 envelope 保持不变。新增读取能力通过 advertised method list 发现。`pane.read.expected_size`、`pane.layout.panes[].terminal_size` 为可选 JSON 字段；读取返回实际 content revision，尺寸或内容在捕获期间变化时返回明确错误。被动预览不得抢占 foreground、focus 或其他客户端的 geometry。客户端仅在 endpoint 广告 `pane.split.directional` 后发送 left/up；该中立 API 与 `pane.split` 共用四向实现。旧客户端的 right/down 请求形状保持不变，公开 `pane.split` API 仍支持四向。
+终端 wire protocol 保持 22（上游 v0.9.2 的新能力经协商字段扩展，未再升版本）；endpoint generation 1 envelope 保持不变。新增读取能力通过 advertised method list 发现。`pane.read.expected_size`、`pane.layout.panes[].terminal_size` 为可选 JSON 字段；读取返回实际 content revision，尺寸或内容在捕获期间变化时返回明确错误。被动预览不得抢占 foreground、focus 或其他客户端的 geometry。客户端仅在 endpoint 广告 `pane.split.directional` 后发送 left/up；该中立 API 与 `pane.split` 共用四向实现。旧客户端的 right/down 请求形状保持不变，公开 `pane.split` API 仍支持四向。上游 v0.9.2 移除自定义 `pane.graphics` API，图像经标准 Kitty 协议传输；fork 保留 ACK 驱动的有界输出工作线程（按写确认推进、不阻塞输入循环）。
 
 ## 配置与行为
 
 | 配置项 | 默认值 | 行为 |
 |---|---|---|
-| `keys.workspace_picker` | `"prefix+w"` | 普通 Navigator 搜索；与更长 chord 重叠时等待 timeout。 |
+| `prefix` | `"ctrl+b"` | 可为数组（上游 v0.9.2）；每个 prefix 进入同一 prefix mode 与 chord gateway，prefix 集合内所有键均为保留键。 |
+| `keys.goto` | `"prefix+g"` | 普通 Navigator 搜索入口。 |
 | `keys.workspace_switcher` | `"ctrl+tab"` | MRU hold-to-switch，释放打开时使用的修饰键后确认。 |
 | `keys.workspace_switcher_backward` | 未设置时自动推导 | 显式空字符串或空列表禁用反向键，不再自动补回。 |
 | `keys.chord_timeout_ms` | `500` | 最多三步 prefix chord；`0` 禁用等待。 |
@@ -44,7 +45,7 @@ Host input
 | `keys.copy_mode_scroll_up` | 未设置 | 进入 copy mode 后上滚半页。 |
 | `ui.sidebar.agents.visible` | `true` | 显示所有机器的 agent 区域。 |
 
-旧的 `quick_switch_workspace` / `quick_switch_workspace_backward` 名称继续作为过时配置诊断，不是当前配置字段。`workspace_picker` 已恢复，旧测试中拒绝该字段的断言已明确替换为与 switcher 共存的验证。
+旧的 `quick_switch_workspace` / `quick_switch_workspace_backward` 名称继续作为过时配置诊断，不是当前配置字段。`workspace_picker` 已于 `44a95b03` 移除：作为静默忽略的旧 key（无诊断、无绑定），不得恢复；`prefix+w` 仅作为方向 split chord 的前缀，等待 timeout 或 Esc 时不打开任何界面。
 
 Hold 模式支持修饰键+Tab 循环、Shift 反向、j/k 导航、h/l 折叠/展开、s 或 / 转为搜索，Esc 取消。切换尚未完成时显式本地选择可取消远端目标。目标的 boot 或连接 generation 变化后不得接受旧选择。
 
@@ -79,7 +80,7 @@ Fork characterization + upstream regression cases
       → JSON assertions and captured terminal frames
 ```
 
-先运行 `just test-one fork_merge` 与相应 feature filter，再运行 `just check`。`tests/fork_merge.rs` 为 Unix 上可实际执行的 CLI 黑盒入口，不将 macOS 上零匹配的 CLI target 视为通过。client shell 的 fixture tests 与真实终端 E2E、跨版本 handoff 是不同证据，不得互相替代。
+先运行 `just test-one fork_merge` 与相应 feature filter，再运行 `just check`。`tests/fork_merge.rs` 为 Unix 上可实际执行的 CLI 黑盒入口，不将 macOS 上零匹配的 CLI target 视为通过。client shell 的 fixture tests 与真实终端 E2E、跨版本 handoff 是不同证据，不得互相替代。真实终端 E2E 额外记录 escape-prefixed 词移动（`AB Z_CD`）与 kitty associated-text（`你好`）的按键证据帧。
 
 必须保留的 upstream regression：`foreign_preview_survives_local_updates_and_rejects_stale_enter`、`clicking_local_can_cancel_a_remote_switch_while_local_is_still_displayed`、`navigator_foreign_tab_selection_keeps_the_tab_target`、`api_pane_layout_returns_public_ids_rects_and_splits`、`same_tab_geometry_follows_meaningful_client_activity`、`text_delivery_paths_insert_at_the_cursor`、`keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe`。
 
@@ -87,6 +88,20 @@ Fork characterization + upstream regression cases
 
 ## 历史合并记录（非当前架构）
 
+### Merge v0.9.3 (7b116c05, 2026-09-30)
+
+冲突文件 (37)：构建/文档 18（`Cargo.toml`、`Cargo.lock`、`justfile`、`skills/herdr/SKILL.md`、`CHANGELOG.md`、`docs/next` 多语言文档），运行时 19（`src/api/schema/panes.rs`、`src/client/mod.rs`、`src/client/state.rs`、`src/client/terminal_geometry.rs`、`src/client/terminal_setup.rs`、`src/client/shell/{actions,aggregate_navigation,composition,graphics,input,overlays,render}.rs`、`src/client/shell/tests/{endpoints,graphics,input}.rs`、`src/config/{keybinds,model}.rs`、`src/kitty_graphics/surface.rs`、`src/layout.rs`、`src/platform/windows.rs`、`src/server/client_commands.rs`）。
+
+非平凡解决：
+- **multi-prefix × prefix chord** — 上游 `prefix: BindingConfig` 解析为 `Vec<KeyCombo>` 并保留全部 prefix 键；fork 保留三步 `PrefixSequence`、chord timeout gateway、派生反向键与显式禁用。任一 prefix 进入同一 chord 控制器；chord 任一步与任一 prefix 冲突均拒绝。`workspace_picker` 移除保持不回退。
+- **native Kitty × ACK 输出工作线程** — 采纳上游 native Kitty（自定义 `pane.graphics` API 保持删除）、`ComposedFrame`/deferred `GraphicsOutput`、native tempfile banks/fallback/retirement、cell-grid 裁剪与 offscreen 保留；移植进 fork 的 ACK 驱动有界输出管线（`queue_direct_file`、generation 键控 ack、`DirectFile` 四元组），不在输入循环直接写 stdout。`run_client_loop` 参数收敛为 `ClientTerminalLifecycle`。
+- **Navigator 分组 × hold/tab 目标** — 采纳上游 workspace→pane 分组、逐词搜索、滚动条与 ←/→ 跳转；保留 fork `ClientNavigatorTarget::Tab`、hold 展开、MRU 仅在呈现后更新、目录搜索与 endpoint+boot+generation stale 校验。修复自动合并静默丢失的 Tab 变体与 `navigator_foreign_tab_selection_keeps_the_tab_target`。
+- **layout targeted split × placement** — 上游 `find_pane_mut`/`split_node` 定向叶修改；fork 新增 `split_node_with_placement`：left/up 插在前、ratio 表示第一个 child，focus history 与 rollback 保留。
+- **API 方法表** — `pane.clear` 等上游方法与 fork `pane.split.directional`/预览方法并存于 advertised 摘要；`tests/fixtures/endpoint-method-shapes-v1.json` 保持字节不变。
+- **client_mode graphics 测试** — 两个驱动已删除自定义 API 的 fork 测试移植为 native 路径（pane 应用经脚本文件写标准 Kitty chunk）：保留输入响应、文本先于末块、有界上传单元、未变化场景不重传、SIGHUP 关停先终止上传等断言；层 API 专属段落按上游 native retirement 与 frame_output_tests 覆盖删除。
+- **raw_input** — 干净合并：上游字节成帧层（escape/mouse/host-color 恢复）与 fork 事件展开层（associated-text flat_map、release 抑制）叠加；新增 `kitty_associated_text_split_across_reads_expands_once`。
+- **文档/构建** — 冲突文档按 hunk 审计后与上游 v0.9.3 字节一致（fork 文档改动均被上游包含或为旧 base 文本）；`Cargo.toml` 0.9.3 + `crates/ghostty-vt` workspace；justfile 保留 fork `test_install_and_handoff` 与上游全部新 recipe；vendor patch 0006/0007 随上游索引与应用。
+- **环境基线（非合并回归）** — `just windows-lint` 在合并前后同样失败（Zig native helper 在 Windows sysroot 下找不到 libSystem）；`native_file_render_scale_profile` 在本机 pristine v0.9.3 同样失败（CoW 保留不可用）。
 
 ### Merge v0.8.0 (346411f, 2026-08-03)
 

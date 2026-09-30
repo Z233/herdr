@@ -63,6 +63,49 @@ fn add_main_image(
     surface.graphics.placements.push(placement);
 }
 
+#[cfg(unix)]
+#[test]
+fn failed_direct_ack_composition_restores_graphics_for_inline_retry() {
+    use crate::kitty_graphics::surface::host_image_id;
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane = surface();
+    let (mut asset, mut placement) = image(
+        SurfaceGraphicsTarget::Pane {
+            pane_id: "pane_1".into(),
+        },
+        0,
+        0,
+        71,
+    );
+    asset.key.source = SurfaceGraphicsSource::PaneLayer {
+        pane_id: "pane_1".into(),
+        layer_id: "direct-rollback".into(),
+    };
+    placement.asset = asset.key.clone();
+    let key = asset.key.clone();
+    pane.graphics.assets.push(asset);
+    pane.graphics.placements.push(placement);
+    state.set_pane_surface(pane);
+
+    // Model an ACK arriving while projection pairing makes composition unavailable.
+    state.pending_pane_surface = Some(surface());
+    let image_id = host_image_id(state.graphics_scope(), &key);
+    let graphics_before = format!("{:?}", state.graphics);
+    let checkpoint = state.direct_graphics_checkpoint();
+    assert!(state.trust_direct_graphics_asset(&key, image_id));
+    assert!(state.compose(106, 20).is_none());
+    state.restore_direct_graphics_checkpoint(checkpoint);
+    assert_eq!(format!("{:?}", state.graphics), graphics_before);
+
+    // Once pairing is available, fallback still owns the asset and uploads it normally.
+    state.pending_pane_surface = None;
+    state.compose(106, 20).expect("fallback frame");
+    let retry = accepted_graphics(&mut state);
+    assert!(String::from_utf8_lossy(&retry).contains("a=t"));
+}
+
 fn is_placed(bytes: &[u8], point: (u16, u16)) -> bool {
     String::from_utf8_lossy(bytes).contains(&format!("\x1b[{};{}H", point.1 + 1, point.0 + 1))
 }
@@ -229,6 +272,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
         }),
         ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
             workspace_id: "ws_1".into(),
+            tab_target: None,
             title: "close".into(),
             detail: "confirm".into(),
         }),
@@ -244,7 +288,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             selected: None,
             scroll: 0,
             filter: None,
-            expanded_workspaces: HashSet::new(),
+            expanded_workspaces: Default::default(),
         }),
         ClientShellOverlay::WorktreeCreate(ClientWorktreeCreateOverlay {
             source_workspace_id: "ws_1".into(),

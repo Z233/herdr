@@ -228,6 +228,22 @@ fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile(
         .unwrap();
     wait_screen(&second_output, 100, 30, "PICKER_IGNORED");
     save_frame(&evidence, "removed-picker-ignored", &second_output, 100, 30);
+    second_input.write_all(b"echo AB CD").unwrap();
+    second_input.write_all(b"\x1bb").unwrap();
+    second_input.write_all(b"Z_").unwrap();
+    second_input.write_all(b"\r").unwrap();
+    wait_screen(&second_output, 100, 30, "AB Z_CD");
+    second_input.write_all(b"echo ").unwrap();
+    second_input.write_all(b"\x1b[0;;20320:22909u").unwrap();
+    second_input.write_all(b"\r").unwrap();
+    wait_screen(&second_output, 100, 30, "你好");
+    save_frame(
+        &evidence,
+        "escape-hotfix-and-associated-text",
+        &second_output,
+        100,
+        30,
+    );
     second_input.write_all(b"\x02wh").unwrap();
     assert!(
         wait_until(Duration::from_secs(5), Duration::from_millis(40), || {

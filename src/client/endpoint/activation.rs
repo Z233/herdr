@@ -768,7 +768,7 @@ impl PendingEndpointActivation {
                 | ActivationPhase::AwaitingPresentationEffects { lease, .. }
                     if lease.endpoint_id == self.target.endpoint_id =>
                 {
-                    return ActivationRollback::Pending
+                    return ActivationRollback::Pending;
                 }
                 _ => {}
             }

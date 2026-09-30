@@ -540,3 +540,107 @@ fn fork_merge_navigator_preview_rejects_wrong_pane_and_displays_endpoint_failure
         }
     }
 }
+
+#[test]
+fn fork_merge_grouped_search_and_scroll_keep_the_selected_tab_preview() {
+    let (mut state, remote) = super::fork_navigator::two_endpoints();
+    let mut projected = snapshot();
+    projected.boot_id = "remote-boot".into();
+    for index in 2..=40 {
+        let mut pane = projected.panes[0].clone();
+        pane.pane_id = format!("pane_{index}");
+        pane.label = Some(format!("agent {index}"));
+        pane.focused = false;
+        projected.panes.push(pane);
+    }
+    state.set_endpoint_snapshot(&remote, Box::new(projected));
+    state.open_navigator_overlay();
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+        panic!("navigator");
+    };
+    let tab_target = ClientNavigatorTarget::Tab {
+        endpoint_id: remote.clone(),
+        tab_id: "tab_1".into(),
+    };
+    navigator.selected = Some(tab_target.clone());
+    state.compose(120, 24).unwrap();
+    let mut poll = ClientShellInput::default();
+    state.refresh_navigator_preview(Instant::now(), &mut poll);
+    let layout_request = request_id(&poll.actions, &remote, None);
+    let (_, reads) = state.handle_endpoint_result("remote-boot", &layout_request, Ok(layout()));
+    let first = request_id(&reads, &remote, Some("pane_1"));
+    let (_, reads) = state.handle_endpoint_result(
+        "remote-boot",
+        &first,
+        Ok(read_result("pane_1", "\x1b[31mREMOTE界\x1b[0m", 2)),
+    );
+    let second = request_id(&reads, &remote, Some("pane_2"));
+    let (_, actions) = state.handle_endpoint_result(
+        "remote-boot",
+        &second,
+        Ok(read_result("pane_2", "NEIGHBOR", 8)),
+    );
+    assert!(actions.is_empty());
+    let rows = |state: &ClientShellState| {
+        let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+            panic!("navigator");
+        };
+        render::client_navigator_rows(&state.endpoints, &state.active_endpoint_id, navigator)
+    };
+    let set_query = |state: &mut ClientShellState, query: &str| {
+        let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+            panic!("navigator");
+        };
+        navigator.query = query.into();
+    };
+
+    // Grouped search is word-based: every word must match the same field.
+    set_query(&mut state, "agent 40");
+    let filtered = rows(&state);
+    assert_eq!(
+        filtered
+            .iter()
+            .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+            .count(),
+        1
+    );
+    assert!(filtered.iter().any(|row| matches!(
+        &row.target,
+        ClientNavigatorTarget::Workspace { endpoint_id, .. } if endpoint_id == &remote
+    )));
+    set_query(&mut state, "agent zzz");
+    assert!(rows(&state).is_empty());
+    set_query(&mut state, "");
+
+    // Overflowing grouped rows show the scrollbar; track clicks scroll without
+    // moving the selection off the tab target or opening a destination.
+    state.compose(120, 24).unwrap();
+    let track = state.hits.navigator_scrollbar;
+    assert!(!track.is_empty());
+    let metrics = state.hits.navigator_scroll_metrics.expect("scroll metrics");
+    assert_eq!(metrics.offset_from_bottom, metrics.max_offset_from_bottom);
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: track.x,
+        row: track.bottom() - 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(outcome.actions.is_empty());
+    state.compose(120, 24).unwrap();
+    assert_eq!(
+        state
+            .hits
+            .navigator_scroll_metrics
+            .expect("metrics")
+            .offset_from_bottom,
+        0
+    );
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("navigator");
+    };
+    assert_eq!(navigator.selected, Some(tab_target));
+
+    // The cached tab preview survives search edits and scrollbar scrolling.
+    let rendered = frame_rows(&state.compose(120, 24).unwrap()).join("\n");
+    assert!(rendered.contains("REMOTE界"), "{rendered}");
+}
