@@ -186,15 +186,6 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
-                if action == crate::input::KeybindAction::WorkspacePicker {
-                    self.open_navigator_overlay();
-                    if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
-                        navigator.search_focused = true;
-                    }
-                    outcome.repaint = true;
-                    return;
-                }
-
                 if action == crate::input::KeybindAction::EnterResizeMode {
                     self.mode = ClientShellMode::Resize;
                     outcome.repaint = true;

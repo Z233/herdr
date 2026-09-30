@@ -64,7 +64,7 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 - **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right/left to expand/collapse a workspace's tabs, and release to accept; a tap leaves the switcher open
 - Full keyboard **and** mouse support (hover, click, scroll)
 
-Default bindings: `prefix+w` opens Navigator search through `workspace_picker`; `ctrl+tab` opens hold-to-switch through `workspace_switcher`. When a longer `prefix+w+…` chord is configured, `prefix+w` waits for the chord timeout. Explicit disabled bindings and binding-conflict diagnostics remain effective.
+Default binding: `ctrl+tab` opens hold-to-switch through `workspace_switcher`. Enter search from the switcher with `s` while holding its command modifier. `prefix+w` is only a leader for directional pane-opening chords; letting it time out does nothing. The removed `workspace_picker` config key is silently ignored. Explicit disabled bindings and binding-conflict diagnostics remain effective.
 
 ### Zoxide Workspace Search
 
@@ -122,7 +122,6 @@ Most fork-specific options live under the `[keys]` section of `config.toml`:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `chord_timeout_ms` | `u64` | `500` | Chord sequence timeout in ms; `0` disables chords |
-| `workspace_picker` | `BindingConfig` | `"prefix+w"` | Open ordinary Navigator search |
 | `workspace_switcher` | `BindingConfig` | `"ctrl+tab"` | Open workspace switcher / MRU quick-switch |
 | `workspace_switcher_backward` | `BindingConfig` | *(auto-derived)* | Reverse cycle key; derived from `workspace_switcher` when unset |
 | `open_pane_left` | `BindingConfig` | `"prefix+w+h"` | Open pane to the left |

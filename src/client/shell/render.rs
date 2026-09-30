@@ -91,8 +91,6 @@ pub(super) fn render_mode_bar(
                     (" cancel  ".to_owned(), base),
                     (prefix, key),
                     (" send prefix  ".to_owned(), base),
-                    (prefix_rhs(&keybinds.keybinds.workspace_picker), key),
-                    (" workspace nav  ".to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.help), key),
                     (" keybinds".to_owned(), base),
                 ]);

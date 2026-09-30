@@ -379,7 +379,6 @@ pub struct Keybinds {
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
-    pub workspace_picker: ActionKeybinds,
     pub workspace_switcher: ActionKeybinds,
     pub workspace_switcher_backward: ActionKeybinds,
     pub goto: ActionKeybinds,
@@ -600,7 +599,6 @@ impl Config {
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
             close_workspace: empty_action!(),
-            workspace_picker: empty_action!(),
             workspace_switcher: empty_action!(),
             workspace_switcher_backward: empty_action!(),
             goto: empty_action!(),
@@ -736,7 +734,6 @@ impl Config {
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
-            apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.workspace_switcher, workspace_switcher, source);
             apply_action!(
                 keybinds.workspace_switcher_backward,
@@ -2394,9 +2391,6 @@ workspace_switcher = "cmd+f13"
             )).unwrap();
             let kb = config.keybinds();
             assert!(kb.workspace_switcher_backward_combo().is_none());
-            assert!(kb
-                .workspace_picker
-                .matches_prefix_key(&TerminalKey::new(KeyCode::Char('w'), KeyModifiers::empty())));
         }
     }
 

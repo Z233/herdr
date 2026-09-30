@@ -42,8 +42,6 @@ fn preview_key(state: &mut ClientShellState, bytes: &[u8]) {
 }
 
 fn enter_navigation(state: &mut ClientShellState) {
-    // The workspace_picker binding now opens the shared Navigator. Keep the
-    // sidebar/mobile navigation contract independent of that entry point.
     state.mode = ClientShellMode::Navigate;
     state.navigate_workspace_id = state.focused_navigation_target();
     state.reveal_navigation_workspace = true;

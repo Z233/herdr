@@ -73,6 +73,20 @@ fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile(
     );
     wait_for_socket(&api, Duration::from_secs(10));
     wait_for_socket(&remote_api, Duration::from_secs(10));
+    let checked = std::process::Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["config", "check"])
+        .env(
+            "HERDR_CONFIG_PATH",
+            config.join(app_dir_name()).join("config.toml"),
+        )
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&checked.stdout).trim(),
+        "config: ok"
+    );
+    assert!(checked.stderr.is_empty(), "{checked:?}");
     let mut records = Vec::new();
     let mut request = |endpoint: &str, socket: &PathBuf, method: &str, params: Value| {
         let message = serde_json::json!({"id":format!("e2e-{}", records.len()),"method":method,"params":params});
@@ -205,6 +219,31 @@ fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile(
         "local input remained gated: {}",
         screen(&second_output, 100, 30)
     );
+    second_input.write_all(b"\x02w").unwrap();
+    thread::sleep(Duration::from_millis(800));
+    assert!(!screen(&second_output, 100, 30).contains("PREFIX"));
+    assert!(!screen(&second_output, 100, 30).contains("release to open"));
+    second_input
+        .write_all(b"\x07printf 'PICKER_%s\\n' IGNORED\r")
+        .unwrap();
+    wait_screen(&second_output, 100, 30, "PICKER_IGNORED");
+    save_frame(&evidence, "removed-picker-ignored", &second_output, 100, 30);
+    second_input.write_all(b"\x02wh").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(40), || {
+            let layout = send_json_request(
+                &api,
+                &serde_json::json!({
+                    "id":"split-proof", "method":"pane.layout", "params":{"pane_id":local_pane}
+                })
+                .to_string(),
+            );
+            layout["result"]["layout"]["panes"]
+                .as_array()
+                .is_some_and(|panes| panes.len() == 2)
+        }),
+        "prefix+w+h did not split the local pane"
+    );
     let before = request(
         "local",
         &api,
@@ -259,7 +298,9 @@ fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile(
         .as_str()
         .unwrap()
         .contains("REMOTE_INPUT"));
-    first_input.write_all(b"\x07missing-directory").unwrap();
+    first_input
+        .write_all(b"\x1b[9;3u\x1b[115;3umissing-directory")
+        .unwrap();
     wait_screen(&first_output, 120, 36, "remote zoxide failure");
     save_frame(&evidence, "remote-search-error", &first_output, 120, 36);
     first_input.write_all(b"\x1b[27u\x1b[27u").unwrap();
@@ -345,8 +386,8 @@ fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile(
     .unwrap();
     fs::write(evidence.join("input-sequence.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "binary":env!("CARGO_BIN_EXE_herdr"),"transport":"private SSH command adapter to real stdio endpoint bridge",
-        "first_client":["alt+tab hold","left-alt release","remote shell input","ctrl+g directory search","esc twice","ctrl+e","界Q","f","esc","resize 45x30","tap switch"],
-        "second_client":"100x30 Local; recorded geometry before and after remote preview"
+        "first_client":["alt+tab hold","left-alt release","remote shell input","alt+tab then alt+s directory search","esc twice","ctrl+e","界Q","f","esc","resize 45x30","tap switch"],
+        "second_client":"100x30 Local; prefix+w idle; legacy ctrl+g forwarded to shell; recorded geometry before and after remote preview"
     })).unwrap()).unwrap();
     drop(first_input);
     drop(second_input);

@@ -151,7 +151,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
-# workspace_picker = "prefix+w"
 # workspace_switcher = "ctrl+tab"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"

@@ -110,10 +110,6 @@ pub(crate) fn keybind_help_groups(
         (
             "workspaces / tabs",
             vec![
-                entry(
-                    binding_label(&keybinds.workspace_picker),
-                    "workspace navigation",
-                ),
                 entry(binding_label(&keybinds.goto), "session navigator"),
                 entry(binding_label(&keybinds.new_workspace), "new workspace"),
                 entry(binding_label(&keybinds.new_worktree), "new worktree"),

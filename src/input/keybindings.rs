@@ -27,7 +27,6 @@ pub(crate) enum KeybindAction {
     SwitchWorkspace(usize),
     SwitchTab(usize),
     FocusAgent(usize),
-    WorkspacePicker,
     WorkspaceSwitcher,
     WorkspaceSwitcherBackward,
     PreviousWorkspace,
@@ -103,7 +102,6 @@ fn action_bindings(
     [
         (&keybinds.help, KeybindAction::Help),
         (&keybinds.settings, KeybindAction::Settings),
-        (&keybinds.workspace_picker, KeybindAction::WorkspacePicker),
         (
             &keybinds.workspace_switcher,
             KeybindAction::WorkspaceSwitcher,

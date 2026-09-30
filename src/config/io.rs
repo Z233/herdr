@@ -516,6 +516,10 @@ fn unknown_config_key_diagnostics(
     paths.dedup();
     paths
         .into_iter()
+        .filter(|path| {
+            !matches!(path.as_slice(), [ConfigKeyPathSegment::Key(section), ConfigKeyPathSegment::Key(key)]
+                if section == "keys" && key == "workspace_picker")
+        })
         .map(|path| {
             format!(
                 "unknown config key {}; ignoring key",
@@ -1005,7 +1009,7 @@ claude = [["terminal_title"]]
     }
 
     #[test]
-    fn load_live_config_accepts_picker_and_switcher_and_rejects_removed_aliases() {
+    fn load_live_config_ignores_picker_and_accepts_switcher_and_rejects_removed_aliases() {
         let loaded = load_live_config_from_str(
             r#"
 [keys]
@@ -1023,10 +1027,6 @@ workspace_switcher = "alt+tab"
                 "unknown config key keys.quick_switch_workspace; ignoring key",
                 "unknown config key keys.quick_switch_workspace_backward; ignoring key",
             ]
-        );
-        assert_eq!(
-            loaded.config.keybinds().workspace_picker.label().as_deref(),
-            Some("prefix+w")
         );
         assert_eq!(
             loaded

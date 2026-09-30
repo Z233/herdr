@@ -37,7 +37,7 @@ The human-readable name of the shared Git repository that gives a managed linked
 _Avoid_: Repository path, checkout name
 
 **Navigator**:
-The client-owned overlay for searching destinations across Local and saved SSH machines, opening a directory as a workspace, and Quick Switch. The `workspace_picker` and `workspace_switcher` bindings open different modes of this same controller.
+The client-owned overlay for searching destinations across Local and saved SSH machines, opening a directory as a workspace, and Quick Switch. Quick Switch and destination search share this controller.
 _Avoid_: Server overlay, separate picker controller
 
 **Switcher Item**:

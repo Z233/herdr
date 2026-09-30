@@ -32,8 +32,8 @@ ROOT_STRUCT = "Config"
 # therefore not enumerable in a flat reference table.
 SKIPPED_SUBTREES = ("keys.command",)
 
-# Fork-only settings are documented in the root README and checked by the Rust
-# configuration tests. Keep upstream keys in the upstream reference contract.
+# Fork-specific settings and removals are documented in the root README and
+# checked by configuration tests. Keep other keys in the upstream reference contract.
 FORK_CONFIG_REFERENCE_EXCLUSIONS = frozenset(
     {
         "keys.chord_timeout_ms",
@@ -43,6 +43,7 @@ FORK_CONFIG_REFERENCE_EXCLUSIONS = frozenset(
         "keys.open_pane_left",
         "keys.open_pane_right",
         "keys.open_pane_up",
+        "keys.workspace_picker",
         "keys.workspace_switcher",
         "keys.workspace_switcher_backward",
         "ui.sidebar.agents.visible",

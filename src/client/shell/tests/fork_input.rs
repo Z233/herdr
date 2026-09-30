@@ -16,7 +16,26 @@ fn chord_shell(timeout_ms: u64) -> ClientShellState {
 }
 
 #[test]
-fn fork_merge_chord_timeout_runs_the_short_binding_and_escape_cancels() {
+fn fork_merge_default_workspace_chord_timeout_does_not_open_navigator() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 20).unwrap();
+    state.handle_input_bytes(b"\x02w");
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+    let mut expired = ClientShellInput::default();
+    state.expire_prefix_chord(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut expired,
+    );
+    assert!(state.overlay.is_none());
+    assert!(expired.actions.is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn fork_merge_workspace_chord_timeout_and_escape_do_not_open_navigator() {
     let mut state = chord_shell(500);
     state.handle_input_bytes(b"\x02w");
     assert!(state.overlay.is_none());
@@ -25,10 +44,8 @@ fn fork_merge_chord_timeout_runs_the_short_binding_and_escape_cancels() {
         std::time::Instant::now() + std::time::Duration::from_secs(1),
         &mut expired,
     );
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Navigator(_))
-    ));
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
     assert!(expired.actions.is_empty());
 
     let mut state = chord_shell(500);
@@ -44,13 +61,11 @@ fn fork_merge_chord_timeout_runs_the_short_binding_and_escape_cancels() {
 }
 
 #[test]
-fn fork_merge_zero_chord_timeout_preserves_immediate_short_binding() {
+fn fork_merge_zero_chord_timeout_does_not_restore_removed_picker() {
     let mut state = chord_shell(0);
     let outcome = state.handle_input_bytes(b"\x02w");
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Navigator(_))
-    ));
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
     assert!(outcome.actions.is_empty());
 }
 
