@@ -46,8 +46,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn take_pending_graphics_cleanup(&mut self) -> Vec<u8> {
-        // The output owner drains cleanup in bounded acknowledged transactions.
-        Vec::new()
+        self.graphics.take_pending_cleanup()
     }
 
     pub(crate) fn set_graphics_cell_size(&mut self, width_px: u32, height_px: u32) {
@@ -74,36 +73,12 @@ impl ClientShellState {
             .popup
             .as_ref()
             .map(|popup| (popup.inner_rect.x, popup.inner_rect.y));
-        // The responsive pipeline records visibility here; the acknowledged output
-        // owner produces and writes each bounded unit via next_graphics_unit.
-        self.graphics.prepare(
+        self.graphics.encode_output(
             visibility,
             (layout.pane_surface.x, layout.pane_surface.y),
             popup_origin,
             self.graphics_cell_size,
             occlusion,
-        );
-        crate::kitty_graphics::GraphicsOutput::default()
-    }
-
-    pub(crate) fn next_graphics_unit(
-        &mut self,
-    ) -> Option<crate::kitty_graphics::surface::GraphicsUnit> {
-        self.graphics.next_unit()
-    }
-
-    pub(crate) fn graphics_upload_in_progress(&self) -> bool {
-        self.graphics.upload_in_progress()
-    }
-
-    pub(crate) fn interrupt_graphics_upload(&mut self) {
-        self.graphics.interrupt_upload();
-    }
-
-    pub(crate) fn acknowledge_graphics(
-        &mut self,
-        unit: crate::kitty_graphics::surface::GraphicsUnit,
-    ) {
-        self.graphics.acknowledge(unit);
+        )
     }
 }

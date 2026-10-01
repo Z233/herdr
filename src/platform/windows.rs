@@ -13,11 +13,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-mod client_terminal;
 mod clipboard_image;
 mod config_backup;
-
-pub(crate) use client_terminal::{interrupt_client_terminal_writer, open_client_terminal_writer};
 
 pub(crate) fn windows_virtual_terminal_input_active() -> bool {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;

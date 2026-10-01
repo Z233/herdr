@@ -31,7 +31,6 @@ mod image_files;
 mod input;
 mod loop_config;
 mod notifications;
-mod output;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -61,8 +60,8 @@ pub(crate) use shell::{ClientShellConfig, ClientShellState};
 pub use startup::{run_client, run_terminal_attach};
 pub use terminal_sessions::{run_terminal_session_control, run_terminal_session_observe};
 
-#[cfg(windows)]
-use terminal_geometry::query_host_terminal_theme;
+#[cfg(not(windows))]
+use terminal_geometry::query_host_terminal_appearance;
 #[cfg(test)]
 use terminal_geometry::{
     cell_size_fallback, current_terminal_geometry_with, ioctl_cell_size, pack_cell_size,
@@ -70,19 +69,18 @@ use terminal_geometry::{
     write_host_terminal_appearance_query, write_host_terminal_theme_query,
 };
 use terminal_geometry::{
-    host_cell_size_query_required, initial_terminal_geometry, resize_poll_loop,
+    host_cell_size_query_required, initial_terminal_geometry, query_host_cell_size,
+    query_host_terminal_theme, resize_poll_loop,
 };
 #[cfg(unix)]
 use terminal_geometry::{reported_cell_size_from_events, store_reported_cell_size};
 use terminal_setup::{
-    effective_mouse_capture, effective_sgr_pixel_mouse, setup_direct_attach_terminal,
-    setup_terminal, should_draw_host_cursor, TerminalGuard,
+    effective_mouse_capture, effective_sgr_pixel_mouse, set_mouse_capture,
+    setup_direct_attach_terminal, setup_terminal, should_draw_host_cursor, TerminalGuard,
 };
 
-fn refresh_host_mouse_capture(state: &mut ClientState, enabled: bool, sgr_pixels: bool) {
-    if let Err(err) = state
-        .queue_host_effect(|bytes| terminal_setup::set_mouse_capture_to(bytes, enabled, sgr_pixels))
-    {
+fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
+    if let Err(err) = set_mouse_capture(enabled, sgr_pixels) {
         warn!(err = %err, "failed to re-assert host mouse capture");
     }
 }
@@ -299,8 +297,6 @@ fn run_client_with_mode(
 
     // The federated shell can show connection notices without any server snapshot.
     let direct_attach = attach_escape.is_some();
-    let original_hook = std::panic::take_hook();
-    let output_shutdown = Arc::new(output::TerminalOutputShutdown::default());
     let mut terminal_guard = if direct_attach {
         setup_direct_attach_terminal(mouse_capture)
     } else {
@@ -316,13 +312,9 @@ fn run_client_with_mode(
 
     // Install a panic hook so the foreground client always restores its terminal.
     let panic_restore = terminal_guard.panic_restore();
-    let panic_output_shutdown = output_shutdown.clone();
-    let _ = std::panic::take_hook(); // Ratatui's hook restores without waiting for the writer.
+    let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if !panic_output_shutdown.is_worker_thread() {
-            panic_output_shutdown.stop();
-            panic_restore();
-        }
+        panic_restore();
         original_hook(info);
     }));
 
@@ -355,10 +347,7 @@ fn run_client_with_mode(
             should_quit,
             loop_config,
             attach_escape,
-            ClientTerminalLifecycle {
-                output_shutdown,
-                guard: &terminal_guard,
-            },
+            &terminal_guard,
         )
         .await
     });
@@ -377,11 +366,8 @@ fn run_client_with_mode(
                 reason: Some(reason)
             } if reason == "detached"
         );
-        let connection_lost_during_terminal_hangup = terminal_restore_failed
-            && matches!(
-                &err,
-                ClientError::ConnectionLost(_) | ClientError::TerminalOutput(_)
-            );
+        let connection_lost_during_terminal_hangup =
+            terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
         if detached || connection_lost_during_terminal_hangup {
             return Ok(());
         }
@@ -426,13 +412,6 @@ fn graphics_owner_is_active(
 /// - resize poller thread → sends resize events to main loop
 /// - server reader thread → reads ServerMessages and sends to main loop
 /// - main loop: coordinates input, output, and server communication
-struct ClientTerminalLifecycle<'a> {
-    output_shutdown: Arc<output::TerminalOutputShutdown>,
-    // Read only by the Windows VT-input recovery paths.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    guard: &'a TerminalGuard,
-}
-
 async fn run_client_loop(
     initial: Option<(LocalStream, handshake::HandshakeResult)>,
     mut endpoint_catalog: endpoint::EndpointCatalog,
@@ -444,7 +423,7 @@ async fn run_client_loop(
     should_quit: Arc<AtomicBool>,
     mut config: ClientLoopConfig,
     attach_escape: Option<AttachEscapeState>,
-    terminal: ClientTerminalLifecycle<'_>,
+    _terminal_guard: &TerminalGuard,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
@@ -453,14 +432,6 @@ async fn run_client_loop(
     let local_unavailable = initial.is_none();
 
     let mut state = ClientState {
-        output: None,
-        output_error: None,
-        pending_frame: None,
-        pending_controls: std::collections::VecDeque::new(),
-        queued_control_bytes: 0,
-        output_completion: None,
-        #[cfg(unix)]
-        direct_file_written: None,
         blit_encoder: render_ansi::BlitEncoder::new(),
         image_files: image_files::FileTransport::from_environment(),
         mouse_capture_active: config.mouse_capture_active,
@@ -480,8 +451,6 @@ async fn run_client_loop(
         pixel_geometry_exact: initial_pixel_geometry_exact,
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
-        #[cfg(unix)]
-        early_direct_response: None,
         #[cfg(unix)]
         retired_direct_graphics: HashMap::new(),
         #[cfg(unix)]
@@ -537,10 +506,6 @@ async fn run_client_loop(
 
     // Channel for events from the resize and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
-    state.output = Some(
-        output::TerminalOutput::start(event_tx.clone(), terminal.output_shutdown)
-            .map_err(ClientError::ConnectionFailed)?,
-    );
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
     // Keep Windows console draining independent of server-frame backpressure.
@@ -591,23 +556,15 @@ async fn run_client_loop(
 
     #[cfg(unix)]
     if will_query_host_terminal_theme {
-        state
-            .queue_host_effect(|bytes| terminal_geometry::write_host_terminal_theme_query(bytes))
-            .map_err(ClientError::ConnectionFailed)?;
+        query_host_terminal_theme();
         #[cfg(not(windows))]
         if state.shell.is_some() {
-            state
-                .queue_host_effect(|bytes| {
-                    terminal_geometry::write_host_terminal_appearance_query(bytes)
-                })
-                .map_err(ClientError::ConnectionFailed)?;
+            query_host_terminal_appearance();
         }
     }
 
     if will_query_host_cell_size {
-        state
-            .queue_host_effect(|bytes| terminal_geometry::write_host_cell_size_query(bytes))
-            .map_err(ClientError::ConnectionFailed)?;
+        query_host_cell_size();
     }
 
     // Spawn the resize poller thread.
@@ -696,20 +653,6 @@ async fn run_client_loop(
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
-        if let Some(error) = state.output_error.take() {
-            return Err(ClientError::TerminalOutput(error));
-        }
-        state.pump_output().map_err(ClientError::TerminalOutput)?;
-        #[cfg(unix)]
-        while let Some(written) = state.take_direct_file_written() {
-            write_stream.send_to(
-                &written.owner,
-                &ClientMessage::GraphicsTransmissionStarted {
-                    transfer_id: written.transfer_id,
-                    image_id: written.image_id,
-                },
-            );
-        }
         if pending_activation.is_none() {
             if let Some(reload) = pending_catalog.take() {
                 match reload {
@@ -843,8 +786,6 @@ async fn run_client_loop(
         #[cfg(unix)]
         let event = if let Some(event) = immediate_event {
             event
-        } else if let Some(response) = state.early_direct_response.take() {
-            ClientLoopEvent::DirectGraphicsResponse(response)
         } else {
             tokio::select! {
                 biased;
@@ -859,7 +800,6 @@ async fn run_client_loop(
         }
 
         match event {
-            ClientLoopEvent::OutputReady => {}
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
@@ -913,10 +853,8 @@ async fn run_client_loop(
                     }
                     let events = crate::raw_input::parse_raw_input_bytes_sync(&data);
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
-                        let enabled = state.mouse_capture_active;
                         refresh_host_mouse_capture(
-                            &mut state,
-                            enabled,
+                            state.mouse_capture_active,
                             host_sgr_pixels_active.load(Ordering::Acquire),
                         );
                     }
@@ -996,18 +934,10 @@ async fn run_client_loop(
                         state.request_repaint();
                     }
                     if crate::raw_input::events_require_host_terminal_appearance_query(&events) {
-                        state
-                            .queue_host_effect(|bytes| {
-                                terminal_geometry::write_host_terminal_appearance_query(bytes)
-                            })
-                            .map_err(ClientError::ConnectionFailed)?;
+                        query_host_terminal_appearance();
                     }
                     if crate::raw_input::events_require_host_terminal_theme_query(&events) {
-                        state
-                            .queue_host_effect(|bytes| {
-                                terminal_geometry::write_host_terminal_theme_query(bytes)
-                            })
-                            .map_err(ClientError::ConnectionFailed)?;
+                        query_host_terminal_theme();
                     }
                     if let Some((width_px, height_px)) = reported_cell_size_from_events(&events) {
                         store_reported_cell_size(&reported_cell_size, width_px, height_px);
@@ -1184,10 +1114,8 @@ async fn run_client_loop(
                     if events.iter().any(|event| {
                         matches!(event, crate::protocol::ClientInputEvent::FocusGained)
                     }) {
-                        let enabled = state.mouse_capture_active;
                         refresh_host_mouse_capture(
-                            &mut state,
-                            enabled,
+                            state.mouse_capture_active,
                             host_sgr_pixels_active.load(Ordering::Acquire),
                         );
                     }
@@ -1268,25 +1196,15 @@ async fn run_client_loop(
                 #[cfg(unix)]
                 if will_query_host_terminal_theme {
                     host_theme_query_pending.fetch_add(1, Ordering::AcqRel);
-                    state
-                        .queue_host_effect(|bytes| {
-                            terminal_geometry::write_host_terminal_theme_query(bytes)
-                        })
-                        .map_err(ClientError::ConnectionFailed)?;
+                    query_host_terminal_theme();
                 }
                 if !pixel_geometry_exact && host_sgr_pixels_active.load(Ordering::Acquire) {
-                    let enabled = state.mouse_capture_active;
-                    state
-                        .queue_host_effect(|bytes| {
-                            terminal_setup::set_mouse_capture_to(bytes, enabled, false)
-                        })
+                    set_mouse_capture(state.mouse_capture_active, false)
                         .map_err(ClientError::ConnectionFailed)?;
                     host_sgr_pixels_active.store(false, Ordering::Release);
                 } else {
-                    let enabled = state.mouse_capture_active;
                     refresh_host_mouse_capture(
-                        &mut state,
-                        enabled,
+                        state.mouse_capture_active,
                         host_sgr_pixels_active.load(Ordering::Acquire),
                     );
                 }
@@ -1618,25 +1536,24 @@ async fn run_client_loop(
                         {
                             record_received_kitty_graphics(&frame.bytes);
                         }
-                        state
-                            .queue_terminal_bytes(frame.bytes)
-                            .map_err(ClientError::ConnectionFailed)?;
+                        let mut stdout = io::stdout();
+                        let _ = stdout.write_all(&frame.bytes);
+                        let _ = stdout.flush();
                     }
                     ServerMessage::Graphics { bytes } => {
                         if state.kitty_graphics_enabled {
                             record_received_kitty_graphics(&bytes);
-                            state
-                                .queue_terminal_bytes(bytes)
-                                .map_err(ClientError::ConnectionFailed)?;
+                            let mut stdout = io::stdout();
+                            let _ = stdout.write_all(&bytes);
+                            let _ = stdout.flush();
                         }
                     }
                     ServerMessage::TerminalBell { count } => {
-                        let mut bytes = Vec::new();
-                        crate::terminal_effects::write_terminal_bells(&mut bytes, count)
-                            .map_err(ClientError::ConnectionFailed)?;
-                        state
-                            .queue_terminal_bytes(bytes)
-                            .map_err(ClientError::ConnectionFailed)?;
+                        if let Err(err) =
+                            crate::terminal_effects::write_terminal_bells(&mut io::stdout(), count)
+                        {
+                            warn!(err = %err, "failed to emit terminal bell");
+                        }
                     }
                     ServerMessage::GraphicsFile {
                         path,
@@ -1727,21 +1644,34 @@ async fn run_client_loop(
                                     &control,
                                     &path,
                                 );
-                                state
-                                    .queue_direct_file(
-                                        command,
-                                        endpoint_id.clone(),
-                                        generation,
-                                        transfer_id,
-                                        image_id,
-                                        surface_asset.clone(),
-                                    )
-                                    .is_ok()
+                                let mut stdout = io::stdout();
+                                let written = state
+                                    .flush_native_cleanup(&mut stdout)
+                                    .and_then(|()| stdout.write_all(&command))
+                                    .and_then(|()| stdout.flush())
+                                    .is_ok();
+                                if written {
+                                    record_received_kitty_graphics(&command);
+                                }
+                                written
                             } else {
                                 false
                             };
                             if sent {
-                                // Start is sent only after the serialized output owner acknowledges the write.
+                                if let Some(asset) = surface_asset {
+                                    state.pending_surface_graphics.insert(
+                                        (endpoint_id.clone(), generation, transfer_id, image_id),
+                                        asset,
+                                    );
+                                }
+                                if let Ok(mut matcher) = state.direct_graphics_response.lock() {
+                                    matcher.start(transfer_id);
+                                }
+                                let started = ClientMessage::GraphicsTransmissionStarted {
+                                    transfer_id,
+                                    image_id,
+                                };
+                                write_stream.send_to(&endpoint_id, &started);
                             } else {
                                 state.pending_surface_graphics.remove(&(
                                     endpoint_id.clone(),
@@ -1996,14 +1926,13 @@ async fn run_client_loop(
                                 state.present_frame(frame);
                             }
                         }
+                        let _ = io::stdout().flush();
                     }
                     ServerMessage::WindowTitle { title } => {
-                        let mut bytes = Vec::new();
-                        crate::terminal_effects::write_window_title(&mut bytes, title.as_deref())
-                            .map_err(ClientError::ConnectionFailed)?;
-                        state
-                            .queue_terminal_bytes(bytes)
-                            .map_err(ClientError::ConnectionFailed)?;
+                        let _ = crate::terminal_effects::write_window_title(
+                            &mut io::stdout(),
+                            title.as_deref(),
+                        );
                     }
                     ServerMessage::ReloadSoundConfig => apply_reload(
                         &mut state,
@@ -2030,26 +1959,17 @@ async fn run_client_loop(
                             || next_sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire);
                         #[cfg(windows)]
                         if enabled && windows_vti_input_backend_enabled() && is_ssh_session() {
-                            terminal
-                                .guard
+                            _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;
                         }
                         if mouse_mode_changed {
-                            state
-                                .queue_host_effect(|bytes| {
-                                    terminal_setup::set_mouse_capture_to(
-                                        bytes,
-                                        enabled,
-                                        next_sgr_pixels,
-                                    )
-                                })
+                            set_mouse_capture(enabled, next_sgr_pixels)
                                 .map_err(ClientError::ConnectionFailed)?;
                         }
                         #[cfg(windows)]
                         if enabled && windows_vti_input_backend_enabled() && !is_ssh_session() {
-                            terminal
-                                .guard
+                            _terminal_guard
                                 .recover_windows_virtual_terminal_input()
                                 .map_err(ClientError::ConnectionFailed)?;
                         }
@@ -2062,17 +1982,13 @@ async fn run_client_loop(
                         modify_other_keys_level,
                     } => {
                         if state.attach_escape.is_some() {
-                            let mut keyboard = std::mem::take(&mut state.direct_keyboard_protocol);
-                            let result = state.queue_host_effect(|bytes| {
-                                crate::terminal_modes::set_direct_host_keyboard_protocol(
-                                    bytes,
-                                    &mut keyboard,
-                                    flags,
-                                    modify_other_keys_level,
-                                )
-                            });
-                            state.direct_keyboard_protocol = keyboard;
-                            result.map_err(ClientError::ConnectionFailed)?;
+                            crate::terminal_modes::set_direct_host_keyboard_protocol(
+                                &mut io::stdout(),
+                                &mut state.direct_keyboard_protocol,
+                                flags,
+                                modify_other_keys_level,
+                            )
+                            .map_err(ClientError::ConnectionFailed)?;
                         }
                     }
                     ServerMessage::ClientShellKeyboardReportAll { enabled } => {
@@ -2375,6 +2291,7 @@ async fn run_client_loop(
     // Clean exit (Ctrl+C). Send Detach before closing.
     let detach = ClientMessage::Detach;
     let _ = write_to_server(&mut write_stream, &detach);
+    let _ = io::stdout().flush();
 
     Ok(())
 }

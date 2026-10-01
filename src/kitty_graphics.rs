@@ -692,7 +692,7 @@ fn kitty_format_code(format: KittyImageFormat) -> u32 {
     }
 }
 
-pub(crate) fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
+fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
     write_kitty_data(out, control, data).expect("writing to Vec cannot fail");
 }
 
@@ -715,16 +715,6 @@ pub(crate) fn write_kitty_data(
         write!(out, "\x1b_Gm={more};{encoded}\x1b\\")?;
     }
     Ok(())
-}
-
-fn encode_kitty_chunk(out: &mut Vec<u8>, control: Option<&str>, data: &[u8], more: bool) {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    let more = u8::from(more);
-    if let Some(control) = control {
-        let _ = write!(out, "\x1b_G{control},m={more};{encoded}\x1b\\");
-    } else {
-        let _ = write!(out, "\x1b_Gm={more};{encoded}\x1b\\");
-    }
 }
 
 #[cfg(test)]

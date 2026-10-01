@@ -45,11 +45,7 @@ pub(super) fn apply_reload(
         if enabled != state.mouse_capture_active
             || sgr_pixels != host_sgr_pixels_active.load(Ordering::Acquire)
         {
-            state
-                .queue_host_effect(|bytes| {
-                    terminal_setup::set_mouse_capture_to(bytes, enabled, sgr_pixels)
-                })
-                .map_err(ClientError::ConnectionFailed)?;
+            set_mouse_capture(enabled, sgr_pixels).map_err(ClientError::ConnectionFailed)?;
         }
         state.mouse_capture_active = enabled;
         host_mouse_capture_active.store(enabled, Ordering::Release);

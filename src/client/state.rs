@@ -1,32 +1,4 @@
 use super::*;
-use crate::protocol::FrameData;
-use std::collections::VecDeque;
-
-pub(super) enum OutputCompletion {
-    Frame(FrameData, render_ansi::EncodedBlit),
-    Patch(
-        Vec<crate::protocol::PaneSurfacePatchRow>,
-        Option<crate::protocol::CursorState>,
-        render_ansi::EncodedBlit,
-    ),
-    Graphics(Box<crate::kitty_graphics::surface::GraphicsUnit>),
-    Control,
-    #[cfg(unix)]
-    DirectFile(
-        endpoint::ClientEndpointId,
-        u64,
-        u64,
-        u32,
-        Option<crate::protocol::SurfaceGraphicsAssetKey>,
-    ),
-}
-
-#[cfg(unix)]
-pub(super) struct DirectFileWritten {
-    pub(super) owner: endpoint::ClientEndpointId,
-    pub(super) transfer_id: u64,
-    pub(super) image_id: u32,
-}
 
 #[cfg(unix)]
 const MAX_RETIRED_DIRECT_GRAPHICS: usize = 64;
@@ -59,14 +31,6 @@ impl RetiredDirectGraphics {
 
 /// State tracking for the thin client.
 pub(super) struct ClientState {
-    pub(super) output: Option<output::TerminalOutput>,
-    pub(super) output_error: Option<io::Error>,
-    pub(super) pending_frame: Option<FrameData>,
-    pub(super) pending_controls: VecDeque<(Vec<u8>, OutputCompletion)>,
-    pub(super) queued_control_bytes: usize,
-    pub(super) output_completion: Option<OutputCompletion>,
-    #[cfg(unix)]
-    pub(super) direct_file_written: Option<DirectFileWritten>,
     /// Stateful semantic-frame encoder used when the server sends FrameData.
     pub(super) blit_encoder: render_ansi::BlitEncoder,
     pub(super) image_files: image_files::FileTransport,
@@ -89,8 +53,6 @@ pub(super) struct ClientState {
     pub(super) pixel_geometry_exact: bool,
     #[cfg(unix)]
     pub(super) direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
-    #[cfg(unix)]
-    pub(super) early_direct_response: Option<direct_graphics::Response>,
     #[cfg(unix)]
     pub(super) retired_direct_graphics: HashMap<endpoint::ClientEndpointId, RetiredDirectGraphics>,
     #[cfg(unix)]
@@ -120,37 +82,6 @@ pub(super) struct ClientState {
 
 impl Drop for ClientState {
     fn drop(&mut self) {
-        if let Some(mut output) = self.output.take() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            let written = output
-                .finish_pending(deadline.saturating_duration_since(std::time::Instant::now()));
-            if written.as_ref().is_some_and(Result::is_ok) {
-                if let Some(OutputCompletion::Graphics(unit)) = self.output_completion.take() {
-                    if let Some(shell) = self.shell.as_mut() {
-                        shell.acknowledge_graphics(*unit);
-                    }
-                }
-                if let Some(shell) = self
-                    .shell
-                    .as_mut()
-                    .filter(|shell| shell.graphics_upload_in_progress())
-                {
-                    shell.interrupt_graphics_upload();
-                    if let Some(unit) = shell.next_graphics_unit() {
-                        let mut bytes = Vec::new();
-                        bytes.extend_from_slice(b"\x1b7");
-                        bytes.extend_from_slice(&unit.bytes);
-                        bytes.extend_from_slice(b"\x1b8");
-                        if output.send(bytes).is_ok() {
-                            let _ = output.finish_pending(
-                                deadline.saturating_duration_since(std::time::Instant::now()),
-                            );
-                        }
-                    }
-                }
-            }
-            output.stop();
-        }
         if self.attach_escape.is_some() {
             let _ = crate::terminal_modes::set_direct_host_keyboard_protocol(
                 &mut io::stdout(),
@@ -166,14 +97,6 @@ impl ClientState {
     #[cfg(test)]
     pub(super) fn test_new() -> Self {
         Self {
-            output: None,
-            output_error: None,
-            pending_frame: None,
-            pending_controls: VecDeque::new(),
-            queued_control_bytes: 0,
-            output_completion: None,
-            #[cfg(unix)]
-            direct_file_written: None,
             blit_encoder: render_ansi::BlitEncoder::new(),
             image_files: image_files::FileTransport::default(),
             mouse_capture_active: false,
@@ -193,8 +116,6 @@ impl ClientState {
             pixel_geometry_exact: false,
             #[cfg(unix)]
             direct_graphics_response: Default::default(),
-            #[cfg(unix)]
-            early_direct_response: None,
             #[cfg(unix)]
             retired_direct_graphics: HashMap::new(),
             #[cfg(unix)]
@@ -224,7 +145,6 @@ impl ClientState {
 
     pub(super) fn freeze_presentation(&mut self) {
         self.presentation_frozen = true;
-        self.pending_frame = None;
     }
 
     pub(super) fn record_host_theme_update(
@@ -372,9 +292,8 @@ impl ClientState {
         true
     }
 
-    /// Test-only mirror of the frozen deferral enforced by pump_output and
-    /// queue_direct_file; production cleanup flushes through the ACK pipeline.
-    #[cfg(all(test, unix))]
+    /// Flush owned image cleanup before a synchronous direct-file write unless frozen.
+    #[cfg(unix)]
     pub(super) fn flush_native_cleanup(
         &mut self,
         writer: &mut impl std::io::Write,
@@ -389,22 +308,7 @@ impl ClientState {
     }
 
     pub(super) fn present_graphics(&mut self, graphics: &[u8]) {
-        if self.presentation_frozen || !self.kitty_graphics_enabled {
-            return;
-        }
-        if let Some(output) = self.output.as_ref() {
-            if !graphics.is_empty() {
-                if let Err(error) = self.queue_terminal_bytes(graphics.to_vec()) {
-                    self.output_error = Some(error);
-                }
-            } else if !output.is_busy() {
-                if let Err(error) = self.pump_output() {
-                    self.output_error = Some(error);
-                }
-            }
-            return;
-        }
-        if graphics.is_empty() {
+        if self.presentation_frozen || graphics.is_empty() || !self.kitty_graphics_enabled {
             return;
         }
         let mut stdout = io::stdout();
@@ -421,14 +325,6 @@ impl ClientState {
             || (self.kitty_graphics_enabled && !self.pending_native_cleanup.is_empty())
         {
             crate::render_prof::event("client_surface_patch.fallback.repaint");
-            return Ok(false);
-        }
-        if self
-            .output
-            .as_ref()
-            .is_some_and(output::TerminalOutput::is_busy)
-            || self.pending_frame.is_some()
-        {
             return Ok(false);
         }
         let rows = if self.draw_host_cursor {
@@ -452,12 +348,6 @@ impl ClientState {
             return Ok(false);
         };
         crate::render_prof::duration_since("client_surface_patch.encode", encode_started);
-        if let Some(output) = self.output.as_mut() {
-            let bytes = encoded.bytes.clone();
-            output.send(bytes)?;
-            self.output_completion = Some(OutputCompletion::Patch(rows, patch.cursor, encoded));
-            return Ok(true);
-        }
         let write_started = crate::render_prof::timer();
         if !encoded.bytes.is_empty() {
             let mut stdout = io::stdout();
@@ -661,34 +551,11 @@ impl ClientState {
             frame: frame_data,
             graphics,
         } = frame_data.into();
-        let mut frame_data = if self.draw_host_cursor {
+        let frame_data = if self.draw_host_cursor {
             render_ansi::frame_with_drawn_cursor(frame_data)
         } else {
             frame_data
         };
-        if self.output.is_some() {
-            // The serialized output owner advances the frame only after a write
-            // acknowledgement; the frame's graphics travel inside its sync block.
-            if self.kitty_graphics_enabled && !graphics.is_empty() {
-                let mut bytes = Vec::new();
-                for operation in graphics.operations {
-                    match operation {
-                        crate::kitty_graphics::GraphicsOperation::Bytes(next) => {
-                            bytes.extend_from_slice(&next)
-                        }
-                        crate::kitty_graphics::GraphicsOperation::Upload { control, data } => {
-                            crate::kitty_graphics::encode_kitty_data(&mut bytes, &control, &data);
-                        }
-                    }
-                }
-                frame_data.graphics = bytes;
-            }
-            self.pending_frame = Some(frame_data);
-            if let Err(error) = self.pump_output() {
-                self.output_error = Some(error);
-            }
-            return true;
-        }
         let encoded = if self.draw_host_cursor {
             self.blit_encoder
                 .encode_with_suppressed_visible_cursor(&frame_data, self.repaint_pending)
@@ -704,202 +571,6 @@ impl ClientState {
         self.blit_encoder.commit(frame_data, encoded);
         self.repaint_pending = false;
         true
-    }
-
-    pub(super) fn queue_terminal_bytes(&mut self, bytes: Vec<u8>) -> io::Result<()> {
-        self.queue_control(bytes, OutputCompletion::Control)
-    }
-
-    pub(super) fn queue_host_effect(
-        &mut self,
-        effect: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let mut bytes = Vec::new();
-        effect(&mut bytes)?;
-        self.queue_terminal_bytes(bytes)
-    }
-
-    fn queue_control(&mut self, bytes: Vec<u8>, completion: OutputCompletion) -> io::Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        const MAX_QUEUED_CONTROL_BYTES: usize = crate::protocol::MAX_GRAPHICS_FRAME_SIZE;
-        if self.queued_control_bytes.saturating_add(bytes.len()) > MAX_QUEUED_CONTROL_BYTES {
-            return Err(io::Error::other("terminal control output queue is full"));
-        }
-        self.queued_control_bytes += bytes.len();
-        self.pending_controls.push_back((bytes, completion));
-        self.pump_output()
-    }
-
-    #[cfg(unix)]
-    pub(super) fn queue_direct_file(
-        &mut self,
-        bytes: Vec<u8>,
-        owner: endpoint::ClientEndpointId,
-        generation: u64,
-        transfer_id: u64,
-        image_id: u32,
-        asset: Option<crate::protocol::SurfaceGraphicsAssetKey>,
-    ) -> io::Result<()> {
-        // Native deletion must reach the terminal before a file command that can reuse the
-        // image ID. The serialized pipeline preserves that order inside one ACK unit.
-        let cleanup = if self.presentation_frozen || self.pending_native_cleanup.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut self.pending_native_cleanup)
-        };
-        let mut command = cleanup.clone();
-        command.extend_from_slice(&bytes);
-        match self.queue_control(
-            command,
-            OutputCompletion::DirectFile(owner, generation, transfer_id, image_id, asset),
-        ) {
-            Ok(()) => {
-                record_received_kitty_graphics(&bytes);
-                Ok(())
-            }
-            Err(error) => {
-                // A rejected write must not lose the owned deletion.
-                self.pending_native_cleanup = cleanup;
-                Err(error)
-            }
-        }
-    }
-
-    /// Advances a single accepted output unit. An acknowledged frame is the only
-    /// frame against which another delta may be encoded.
-    pub(super) fn pump_output(&mut self) -> io::Result<()> {
-        let Some(output) = self.output.as_mut() else {
-            return Ok(());
-        };
-        if let Some(result) = output.acknowledge() {
-            result?;
-            match self.output_completion.take() {
-                Some(OutputCompletion::Frame(frame, encoded)) => {
-                    self.blit_encoder.commit(frame, encoded);
-                }
-                Some(OutputCompletion::Patch(rows, cursor, encoded)) => {
-                    if !self.blit_encoder.commit_patch(&rows, cursor, encoded) {
-                        self.repaint_pending = true;
-                    }
-                }
-                Some(OutputCompletion::Graphics(unit)) => {
-                    if let Some(shell) = self.shell.as_mut() {
-                        shell.acknowledge_graphics(*unit);
-                    }
-                }
-                #[cfg(unix)]
-                Some(OutputCompletion::DirectFile(
-                    owner,
-                    generation,
-                    transfer_id,
-                    image_id,
-                    asset,
-                )) => {
-                    if let Some(asset) = asset {
-                        self.pending_surface_graphics
-                            .insert((owner.clone(), generation, transfer_id, image_id), asset);
-                    }
-                    if let Ok(mut matcher) = self.direct_graphics_response.lock() {
-                        matcher.start(transfer_id);
-                        self.early_direct_response = matcher.take_ready();
-                    }
-                    self.direct_file_written = Some(DirectFileWritten {
-                        owner,
-                        transfer_id,
-                        image_id,
-                    });
-                }
-                Some(OutputCompletion::Control) | None => {}
-            }
-        }
-        if output.is_busy() {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        if self.early_direct_response.is_some() {
-            return Ok(());
-        }
-        if let Some(frame) = self.pending_frame.take() {
-            let encoded = if self.draw_host_cursor {
-                self.blit_encoder
-                    .encode_with_suppressed_visible_cursor(&frame, self.repaint_pending)
-            } else {
-                self.blit_encoder.encode(&frame, self.repaint_pending)
-            };
-            let mut bytes = Vec::new();
-            // Native image deletion must precede the frame's graphics inside the same
-            // acknowledged write, mirroring the direct-writer flush ordering.
-            let graphics = if self.kitty_graphics_enabled && !self.presentation_frozen {
-                let mut graphics = std::mem::take(&mut self.pending_native_cleanup);
-                graphics.extend_from_slice(&frame.graphics);
-                graphics
-            } else if self.kitty_graphics_enabled {
-                frame.graphics.clone()
-            } else {
-                Vec::new()
-            };
-            write_encoded_frame_with_graphics(&mut bytes, &encoded.bytes, &graphics)?;
-            output.send(bytes)?;
-            self.output_completion = Some(OutputCompletion::Frame(frame, encoded));
-            self.repaint_pending = false;
-            return Ok(());
-        }
-        let graphics_control_waiting =
-            self.pending_controls
-                .front()
-                .is_some_and(|(bytes, completion)| {
-                    #[cfg(unix)]
-                    if matches!(completion, OutputCompletion::DirectFile(..)) {
-                        return true;
-                    }
-                    let _ = completion;
-                    contains_kitty_graphics_bytes(bytes)
-                });
-        if graphics_control_waiting
-            && self
-                .shell
-                .as_ref()
-                .is_some_and(shell::ClientShellState::graphics_upload_in_progress)
-        {
-            let shell = self.shell.as_mut().expect("checked shell");
-            shell.interrupt_graphics_upload();
-            if let Some(unit) = shell.next_graphics_unit() {
-                let mut bytes = Vec::new();
-                write_encoded_frame_with_graphics(&mut bytes, &[], &unit.bytes)?;
-                output.send(bytes)?;
-                self.output_completion = Some(OutputCompletion::Graphics(Box::new(unit)));
-                return Ok(());
-            }
-        }
-        if let Some((bytes, completion)) = self.pending_controls.pop_front() {
-            self.queued_control_bytes -= bytes.len();
-            output.send(bytes)?;
-            self.output_completion = Some(completion);
-            return Ok(());
-        }
-        if !self.presentation_frozen && self.kitty_graphics_enabled {
-            if let Some(unit) = self
-                .shell
-                .as_mut()
-                .and_then(shell::ClientShellState::next_graphics_unit)
-            {
-                let mut bytes = Vec::new();
-                bytes.extend_from_slice(b"\x1b7");
-                bytes.extend_from_slice(&unit.bytes);
-                bytes.extend_from_slice(b"\x1b8");
-                record_received_kitty_graphics(&unit.bytes);
-                output.send(bytes)?;
-                self.output_completion = Some(OutputCompletion::Graphics(Box::new(unit)));
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    pub(super) fn take_direct_file_written(&mut self) -> Option<DirectFileWritten> {
-        self.direct_file_written.take()
     }
 }
 
@@ -1167,138 +838,5 @@ mod native_cleanup_tests {
             String::from_utf8(output).unwrap().matches("a=d,").count(),
             1
         );
-    }
-
-    fn native_asset_key(image_id: u32) -> crate::protocol::SurfaceGraphicsAssetKey {
-        crate::protocol::SurfaceGraphicsAssetKey {
-            source: crate::protocol::SurfaceGraphicsSource::Terminal {
-                target: crate::protocol::SurfaceGraphicsTarget::Pane {
-                    pane_id: "p".into(),
-                },
-                image_id,
-            },
-            image_width: 1,
-            image_height: 1,
-            format: crate::protocol::SurfaceGraphicsFormat::Rgba,
-            data_len: 4,
-            data_fingerprint: 1,
-        }
-    }
-
-    #[test]
-    fn direct_file_start_and_asset_adoption_wait_for_output_acknowledgement() {
-        let mut state = ClientState::test_new();
-        let endpoint = endpoint::ClientEndpointId::Local;
-        let transfer = crate::kitty_graphics::surface::NATIVE_TRANSFER_BIT | 3;
-        let key = native_asset_key(1);
-
-        // Without an output worker the write is accepted but never delivered: neither the
-        // transmission start nor the surface asset adoption may be visible yet.
-        state
-            .queue_direct_file(
-                b"file-command".to_vec(),
-                endpoint.clone(),
-                7,
-                transfer,
-                1234,
-                Some(key),
-            )
-            .unwrap();
-
-        assert!(state.pending_surface_graphics.is_empty());
-        assert!(state.take_direct_file_written().is_none());
-        assert_eq!(state.pending_controls.len(), 1);
-        let Some((bytes, completion)) = state.pending_controls.front() else {
-            panic!("expected exactly one queued direct file unit");
-        };
-        assert!(matches!(
-            completion,
-            OutputCompletion::DirectFile(_, 7, _, 1234, _)
-        ));
-        assert_eq!(bytes, b"file-command");
-    }
-
-    #[test]
-    fn direct_file_unit_carries_owned_native_cleanup_ahead_of_the_file() {
-        let mut state = ClientState::test_new();
-        let endpoint = endpoint::ClientEndpointId::Local;
-        let transfer = crate::kitty_graphics::surface::NATIVE_TRANSFER_BIT | 3;
-        state.queue_native_image_cleanup(4242);
-        let cleanup = state.pending_native_cleanup.clone();
-        assert!(!cleanup.is_empty());
-
-        state
-            .queue_direct_file(
-                b"file-command".to_vec(),
-                endpoint.clone(),
-                7,
-                transfer,
-                1234,
-                None,
-            )
-            .unwrap();
-
-        // One bounded unit deletes the owned image before the file command reuses the ID.
-        assert!(state.pending_native_cleanup.is_empty());
-        assert_eq!(state.pending_controls.len(), 1);
-        let Some((bytes, _)) = state.pending_controls.front() else {
-            panic!("expected exactly one queued direct file unit");
-        };
-        let mut expected = cleanup;
-        expected.extend_from_slice(b"file-command");
-        assert_eq!(*bytes, expected);
-    }
-
-    #[test]
-    fn rejected_direct_file_restores_owned_native_cleanup() {
-        let mut state = ClientState::test_new();
-        let endpoint = endpoint::ClientEndpointId::Local;
-        let transfer = crate::kitty_graphics::surface::NATIVE_TRANSFER_BIT | 3;
-        state.queue_native_image_cleanup(4242);
-        let cleanup = state.pending_native_cleanup.clone();
-        state.queued_control_bytes = usize::MAX;
-
-        let error = state
-            .queue_direct_file(
-                b"file-command".to_vec(),
-                endpoint.clone(),
-                7,
-                transfer,
-                1234,
-                None,
-            )
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(state.pending_native_cleanup, cleanup);
-        assert!(state.pending_controls.is_empty());
-    }
-
-    #[test]
-    fn frozen_handoff_keeps_native_cleanup_out_of_direct_file_unit() {
-        let mut state = ClientState::test_new();
-        let endpoint = endpoint::ClientEndpointId::Local;
-        let transfer = crate::kitty_graphics::surface::NATIVE_TRANSFER_BIT | 3;
-        state.queue_native_image_cleanup(4242);
-        let cleanup = state.pending_native_cleanup.clone();
-        state.presentation_frozen = true;
-
-        state
-            .queue_direct_file(
-                b"file-command".to_vec(),
-                endpoint.clone(),
-                7,
-                transfer,
-                1234,
-                None,
-            )
-            .unwrap();
-
-        // While frozen the deletion stays deferred for the acknowledged handoff owner.
-        assert_eq!(state.pending_native_cleanup, cleanup);
-        assert_eq!(state.pending_controls.len(), 1);
-        let Some((bytes, _)) = state.pending_controls.front() else {
-            panic!("expected exactly one queued direct file unit");
-        };
-        assert_eq!(bytes, b"file-command");
     }
 }
