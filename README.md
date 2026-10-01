@@ -113,6 +113,12 @@ visible = false
 
 The Spaces section uses the reclaimed height in both expanded and compact collapsed modes. Agent detection, notifications, keyboard navigation, sorting configuration, and the agent-view API continue to operate. The default is `true`, so existing configurations keep the standard Spaces and Agents sections.
 
+### Compressed Kitty Image Output
+
+The client compresses inline RGB/RGBA images with zlib before Base64 encoding when the result is less than 90% of the original bytes. It uses standard Kitty `o=z`; pixels, size, and placement stay unchanged. PNG images and local file transfers keep their existing path. No configuration or new Herdr protocol is needed.
+
+This reduces the client-to-terminal transfer, including when the client runs across SSH. It does not reduce server-to-client surface frames or make text and input responsive during an image upload.
+
 ---
 
 ## Configuration

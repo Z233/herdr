@@ -71,6 +71,22 @@ pub(super) fn write_composed_frame(
                     let path = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
                     write!(writer, "\x1b_G{control};{path}\x1b\\")?;
                 } else {
+                    let raw_pixels = control
+                        .split(',')
+                        .any(|part| matches!(part, "f=24" | "f=32"))
+                        && control.split(',').any(|part| part == "t=d")
+                        && !control.split(',').any(|part| part.starts_with("o="));
+                    if raw_pixels && !data.is_empty() {
+                        let compressed = miniz_oxide::deflate::compress_to_vec_zlib(data, 1);
+                        if compressed.len() < data.len().saturating_mul(9) / 10 {
+                            crate::kitty_graphics::write_kitty_data(
+                                &mut writer,
+                                &format!("{control},o=z"),
+                                &compressed,
+                            )?;
+                            continue;
+                        }
+                    }
                     crate::kitty_graphics::write_kitty_data(&mut writer, control, data)?;
                 }
             }

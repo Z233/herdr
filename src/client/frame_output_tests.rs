@@ -190,3 +190,83 @@ mod local_files {
         assert_eq!(actual, expected);
     }
 }
+
+mod compression {
+    use super::*;
+
+    fn inline_upload(control: &str, data: &[u8]) -> Vec<u8> {
+        let graphics = GraphicsOutput {
+            operations: vec![GraphicsOperation::Upload {
+                control: control.to_owned(),
+                data: std::sync::Arc::from(data),
+            }],
+        };
+        let mut output = Vec::new();
+        write_composed_frame(
+            &mut output,
+            b"text before image",
+            &graphics,
+            &mut FileTransport::default(),
+        )
+        .unwrap();
+        assert!(output.starts_with(b"text before image\x1b7"));
+        assert!(output.ends_with(b"\x1b8"));
+        output
+    }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state = 42_u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_rgb_and_rgba_zlib_round_trip_through_ghostty() {
+        for (format, channels) in [(24, 3), (32, 4)] {
+            // Repeated noise stays large enough to exercise Kitty continuation records.
+            let data = noise(256 * 16 * channels).repeat(8);
+            let control = format!("a=T,t=d,f={format},s=256,v=128,i=7,q=2");
+            let output = inline_upload(&control, &data);
+            assert!(output.windows(4).any(|w| w == b",o=z"));
+            assert!(output.windows(3).any(|w| w == b"m=1"));
+            assert!(output.len() < data.len());
+
+            let mut terminal = ghostty_vt::Terminal::new(80, 24, 0).unwrap();
+            terminal.enable_kitty_graphics().unwrap();
+            terminal.resize(80, 24, 8, 16).unwrap();
+            terminal.write(&output);
+            let placements = terminal.kitty_image_placements().unwrap();
+            assert_eq!(placements.len(), 1);
+            assert_eq!(placements[0].data, data);
+
+            let artifacts = std::path::Path::new("target/kitty-zlib");
+            std::fs::create_dir_all(artifacts).unwrap();
+            std::fs::write(artifacts.join(format!("rgb{format}.kitty")), &output).unwrap();
+        }
+    }
+
+    #[test]
+    fn inline_incompressible_tiny_png_and_encoded_payloads_stay_unchanged() {
+        for (control, data) in [
+            ("a=t,t=d,f=32", noise(32 * 1024)),
+            ("a=t,t=d,f=24", vec![42; 3]),
+            ("a=t,t=d,f=100", vec![42; 32 * 1024]),
+            ("a=t,t=d,f=32,o=z", vec![42; 32 * 1024]),
+            ("a=t,t=d,f=320", vec![42; 32 * 1024]),
+            ("a=t,t=f,f=32", vec![42; 32 * 1024]),
+            ("a=t,t=d,f=32", Vec::new()),
+        ] {
+            let output = inline_upload(control, &data);
+            let mut expected = b"text before image\x1b7".to_vec();
+            crate::kitty_graphics::write_kitty_data(&mut expected, control, &data).unwrap();
+            expected.extend_from_slice(b"\x1b8");
+            assert_eq!(output, expected, "{control}");
+        }
+    }
+}

@@ -795,6 +795,7 @@ dependencies = [
  "interprocess",
  "jsonc-parser",
  "libc",
+ "miniz_oxide",
  "png",
  "portable-pty",
  "ratatui",
