@@ -6,6 +6,7 @@ use crossterm::event::{KeyEventKind, KeyModifiers, ModifierKeyCode};
 pub(super) struct NavigatorState {
     pub(super) preview: super::navigator_preview::NavigatorPreview,
     pub(super) hold: Option<NavigatorHold>,
+    pub(super) quick_switch: bool,
     pub(super) scopes: HashMap<ClientEndpointId, (String, Option<u64>)>,
     pub(super) directory: NavigatorDirectory,
 }
@@ -130,6 +131,7 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
             navigator.search_focused = false;
             navigator.expanded_workspaces.clear();
+            navigator.fork.quick_switch = true;
             navigator.selected = targets
                 .first()
                 .map(|target| ClientNavigatorTarget::Workspace {

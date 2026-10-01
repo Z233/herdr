@@ -695,18 +695,31 @@ fn render_navigator_overlay(
     p: &Palette,
 ) -> Option<OverlayRender> {
     let a = b.area;
-    let width = a.width.saturating_sub(4).min(116);
-    let height = a.height.saturating_sub(2).min(42);
-    if width < 4 || height < 9 {
+    let q = if n.fork.quick_switch {
+        // Quick Switch restores the fork's pre-0.9.3 inset geometry; Go To
+        // keeps the upstream capped centered box.
+        let mx = (a.width / 16).max(2);
+        let my = (a.height / 10).max(1);
+        Rect::new(
+            a.x + mx,
+            a.y + my,
+            a.width.saturating_sub(mx * 2).max(4),
+            a.height.saturating_sub(my * 2).max(4),
+        )
+    } else {
+        let width = a.width.saturating_sub(4).min(116);
+        let height = a.height.saturating_sub(2).min(42);
+        Rect::new(
+            a.x + (a.width - width) / 2,
+            a.y + (a.height - height) / 2,
+            width,
+            height,
+        )
+    }
+    .intersection(a);
+    if q.width < 4 || q.height < 9 {
         return None;
     }
-    let q = Rect::new(
-        a.x + (a.width - width) / 2,
-        a.y + (a.height - height) / 2,
-        width,
-        height,
-    )
-    .intersection(a);
     let i = panel(b, q, p.accent, p.panel_bg)?;
     put_text(
         b,

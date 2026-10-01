@@ -534,3 +534,55 @@ fn fork_merge_hold_shift_press_collapse_and_search_keep_endpoint_identity() {
     assert!(typed.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { endpoint_id, request, .. }
         if endpoint_id == &remote && matches!(request.method, crate::api::schema::Method::WorkspaceSearch(_)))));
 }
+
+#[test]
+fn fork_merge_quick_switch_restores_desktop_inset_geometry() {
+    let (mut state, _remote) = two_endpoints();
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Tab,
+        KeyModifiers::ALT,
+    ))]);
+    state.compose(200, 50).expect("navigator");
+    assert_eq!(state.hits.navigator_popup, Rect::new(12, 5, 176, 40));
+
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('s'),
+        KeyModifiers::ALT,
+    ))]);
+    state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(
+            KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftAlt),
+            KeyModifiers::empty(),
+        )
+        .with_kind(crossterm::event::KeyEventKind::Release),
+    )]);
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("navigator");
+    };
+    assert!(navigator.search_focused);
+    assert!(navigator.fork.hold.is_none());
+    state.compose(200, 50).expect("navigator");
+    assert_eq!(
+        state.hits.navigator_popup,
+        Rect::new(12, 5, 176, 40),
+        "search entered from Quick Switch keeps the session geometry"
+    );
+}
+
+#[test]
+fn fork_merge_goto_keeps_capped_centered_geometry() {
+    let (mut state, _remote) = two_endpoints();
+    state.open_navigator_overlay();
+    state.compose(200, 50).expect("navigator");
+    assert_eq!(state.hits.navigator_popup, Rect::new(42, 4, 116, 42));
+}
+
+#[test]
+fn fork_merge_quick_switch_keeps_narrow_render_guard() {
+    let (mut state, _remote) = two_endpoints();
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Tab,
+        KeyModifiers::ALT,
+    ))]);
+    assert!(state.compose(24, 10).is_none());
+}
