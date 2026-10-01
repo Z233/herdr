@@ -8,16 +8,23 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_PREVIEW_CELLS: u64 = 256_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct PreviewScope {
+struct PreviewIdentity {
     target: ClientNavigatorTarget,
     boot_id: String,
     connection_generation: Option<u64>,
-    projection_revision: u64,
-    surface_revision: Option<u64>,
     size: (u16, u16),
     workspace_id: String,
     tab_id: String,
     pane_id: String,
+    panes: Vec<(String, bool)>,
+    zoomed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PreviewScope {
+    identity: PreviewIdentity,
+    projection_revision: u64,
+    surface_revision: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -127,15 +134,27 @@ impl ClientShellState {
             })
             .map(|surface| surface.surface_revision);
         Some(PreviewScope {
-            target: target.clone(),
-            boot_id: snapshot.boot_id.clone(),
-            connection_generation: endpoint.snapshot_generation,
+            identity: PreviewIdentity {
+                target: target.clone(),
+                boot_id: snapshot.boot_id.clone(),
+                connection_generation: endpoint.snapshot_generation,
+                size,
+                workspace_id: pane.workspace_id.clone(),
+                tab_id: tab_id.clone(),
+                pane_id: pane.pane_id.clone(),
+                panes: snapshot
+                    .panes
+                    .iter()
+                    .filter(|pane| &pane.tab_id == tab_id)
+                    .map(|pane| (pane.pane_id.clone(), pane.focused))
+                    .collect(),
+                zoomed: snapshot
+                    .tabs
+                    .iter()
+                    .any(|tab| &tab.tab_id == tab_id && tab.zoomed),
+            },
             projection_revision: snapshot.revision,
             surface_revision,
-            size,
-            workspace_id: pane.workspace_id.clone(),
-            tab_id: tab_id.clone(),
-            pane_id: pane.pane_id.clone(),
         })
     }
 
@@ -149,9 +168,18 @@ impl ClientShellState {
             return;
         };
         let preview = &mut navigator.fork.preview;
-        if preview.scope != scope {
+        let changed = preview.scope != scope;
+        if changed {
+            let retained = preview
+                .scope
+                .as_ref()
+                .zip(scope.as_ref())
+                .is_some_and(|(previous, current)| previous.identity == current.identity);
             *preview = NavigatorPreview {
                 scope: scope.clone(),
+                ready: if retained { preview.ready.take() } else { None },
+                local: if retained { preview.local.take() } else { None },
+                requested_at: if retained { preview.requested_at } else { None },
                 ..Default::default()
             };
             self.pending_requests.retain(|_, pending| {
@@ -163,11 +191,12 @@ impl ClientShellState {
             return;
         };
         if scope.surface_revision.is_some() {
-            if preview.local.is_none() {
+            if preview.local.is_none() || changed {
                 preview.local = self
                     .pane_surface
                     .as_ref()
                     .and_then(|surface| surface.frame.to_ratatui_buffer());
+                preview.ready = None;
                 outcome.repaint = true;
             }
             return;
@@ -184,7 +213,7 @@ impl ClientShellState {
             scope.clone(),
             None,
             Method::PaneLayout(crate::api::schema::PaneLayoutParams {
-                pane_id: Some(scope.pane_id.clone()),
+                pane_id: Some(scope.identity.pane_id.clone()),
             }),
             outcome,
         );
@@ -197,7 +226,7 @@ impl ClientShellState {
         method: Method,
         outcome: &mut ClientShellInput,
     ) {
-        let endpoint_id = scope.target.endpoint_id().clone();
+        let endpoint_id = scope.identity.target.endpoint_id().clone();
         let method_name = crate::api::api_method_name(&method).to_owned();
         let unsupported = self
             .endpoints
@@ -220,7 +249,7 @@ impl ClientShellState {
         self.pending_requests.insert(
             request_id.clone(),
             PendingEndpointRequest {
-                boot_id: scope.boot_id.clone(),
+                boot_id: scope.identity.boot_id.clone(),
                 method_name,
                 confirmation_workspace_id: None,
                 kind: PendingEndpointKind::NavigatorPreview(PreviewRequest {
@@ -232,7 +261,7 @@ impl ClientShellState {
         );
         outcome.actions.push(ClientShellAction::Endpoint {
             endpoint_id,
-            boot_id: scope.boot_id,
+            boot_id: scope.identity.boot_id,
             request: Box::new(crate::api::schema::Request {
                 id: request_id,
                 method,
@@ -256,7 +285,7 @@ impl ClientShellState {
             return (false, Vec::new());
         }
         preview.in_flight = None;
-        if current.as_ref() != Some(&request.scope) || request.scope.boot_id != boot_id {
+        if current.as_ref() != Some(&request.scope) || request.scope.identity.boot_id != boot_id {
             return (false, Vec::new());
         }
         let result = match result {
@@ -280,12 +309,12 @@ impl ClientShellState {
                     .filter_map(|pane| pane.terminal_size)
                     .map(|size| u64::from(size.cols) * u64::from(size.rows))
                     .sum();
-                let valid = layout.workspace_id == request.scope.workspace_id
-                    && layout.tab_id == request.scope.tab_id
+                let valid = layout.workspace_id == request.scope.identity.workspace_id
+                    && layout.tab_id == request.scope.identity.tab_id
                     && layout
                         .panes
                         .iter()
-                        .any(|pane| pane.pane_id == request.scope.pane_id)
+                        .any(|pane| pane.pane_id == request.scope.identity.pane_id)
                     && layout.area.width > 0
                     && layout.area.height > 0
                     && cells <= MAX_PREVIEW_CELLS
@@ -312,8 +341,8 @@ impl ClientShellState {
             (Some(pane_id), ResponseResult::PaneRead { read }) => {
                 let capture = preview.capture.as_mut();
                 if read.pane_id != pane_id
-                    || read.workspace_id != request.scope.workspace_id
-                    || read.tab_id != request.scope.tab_id
+                    || read.workspace_id != request.scope.identity.workspace_id
+                    || read.tab_id != request.scope.identity.tab_id
                     || read.source != ReadSource::Visible
                     || read.format != ReadFormat::Ansi
                     || !read.revision.is_multiple_of(2)
@@ -381,6 +410,7 @@ impl ClientShellState {
             );
         } else {
             preview.ready = preview.capture.take();
+            preview.local = None;
             preview.error = None;
         }
         (true, outcome.actions)
@@ -457,7 +487,11 @@ impl ClientShellState {
             );
             return;
         };
-        if preview.scope.as_ref() != Some(&scope) {
+        if preview
+            .scope
+            .as_ref()
+            .is_none_or(|previous| previous.identity != scope.identity)
+        {
             super::render::put_text(
                 buffer,
                 area.x,

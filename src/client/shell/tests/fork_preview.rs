@@ -106,6 +106,38 @@ fn preview_area(state: &ClientShellState, width: u16) -> Rect {
         .expect("wide terminal preview")
 }
 
+fn preview_text(state: &ClientShellState, frame: &FrameData) -> String {
+    let area = preview_area(state, frame.width);
+    let buffer = frame.to_ratatui_buffer().unwrap();
+    preview_buffer_text(&buffer, area)
+}
+
+fn preview_buffer_text(buffer: &Buffer, area: Rect) -> String {
+    (area.y..area.bottom())
+        .map(|y| {
+            (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_preview_contains(state: &ClientShellState, frame: &FrameData, expected: &str) {
+    let semantic = preview_text(state, frame);
+    assert!(
+        semantic.contains(expected),
+        "SemanticFrame preview: {semantic}"
+    );
+    assert!(!semantic.contains("Loading preview"));
+    let encoded = crate::protocol::render_ansi::BlitEncoder::new().encode(frame, true);
+    let ansi = String::from_utf8(encoded.bytes).unwrap();
+    let terminal = crate::pane::render_ansi_snapshot(&ansi, frame.width, frame.height).unwrap();
+    let text = preview_buffer_text(&terminal, preview_area(state, frame.width));
+    assert!(text.contains(expected), "TerminalAnsi preview: {text}");
+    assert!(!text.contains("Loading preview"));
+}
+
 #[test]
 #[ignore = "manual cached Navigator preview scaling profile"]
 fn navigator_cached_preview_render_scale_profile() {
@@ -222,6 +254,224 @@ fn fork_merge_navigator_preview_reads_all_selected_tab_panes_without_focus_and_k
     let mut refresh = ClientShellInput::default();
     state.refresh_navigator_preview(Instant::now() + Duration::from_secs(2), &mut refresh);
     request_id(&refresh.actions, &remote, None);
+}
+
+#[test]
+fn fork_merge_navigator_preview_keeps_remote_content_during_metadata_refresh() {
+    for search in [false, true] {
+        let (mut state, remote) = remote_preview();
+        if !search {
+            state.overlay = None;
+            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Tab,
+                KeyModifiers::ALT,
+            ))]);
+            let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+                panic!("navigator");
+            };
+            navigator.selected = Some(ClientNavigatorTarget::Tab {
+                endpoint_id: remote.clone(),
+                tab_id: "tab_1".into(),
+            });
+        }
+        let now = Instant::now();
+        let mut poll = ClientShellInput::default();
+        state.refresh_navigator_preview(now, &mut poll);
+        let id = request_id(&poll.actions, &remote, None);
+        let (_, reads) = state.handle_endpoint_result("remote-boot", &id, Ok(layout()));
+        let id = request_id(&reads, &remote, Some("pane_1"));
+        let (_, reads) = state.handle_endpoint_result(
+            "remote-boot",
+            &id,
+            Ok(read_result("pane_1", "STABLE_REMOTE", 2)),
+        );
+        let id = request_id(&reads, &remote, Some("pane_2"));
+        state.handle_endpoint_result("remote-boot", &id, Ok(read_result("pane_2", "NEIGHBOR", 2)));
+        for revision in 2..5 {
+            let mut projection = state
+                .endpoints
+                .iter()
+                .find(|item| item.endpoint_id == remote)
+                .unwrap()
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .clone();
+            projection.revision = revision;
+            projection.workspaces[0].tokens = vec![("tick".into(), revision.to_string())];
+            state.set_endpoint_snapshot(&remote, Box::new(projection));
+            let frame = state.compose(120, 36).unwrap();
+            let rendered = preview_text(&state, &frame);
+            assert!(
+                rendered.contains("STABLE_REMOTE"),
+                "before refresh revision {revision}: {rendered}"
+            );
+            assert_preview_contains(&state, &frame, "STABLE_REMOTE");
+            poll = ClientShellInput::default();
+            state.refresh_navigator_preview(now + Duration::from_secs(revision), &mut poll);
+            let frame = state.compose(120, 36).unwrap();
+            let rendered = preview_text(&state, &frame);
+            assert!(
+                rendered.contains("STABLE_REMOTE"),
+                "during refresh revision {revision}: {rendered}"
+            );
+            assert_preview_contains(&state, &frame, "STABLE_REMOTE");
+        }
+        let id = request_id(&poll.actions, &remote, None);
+        let (_, reads) = state.handle_endpoint_result("remote-boot", &id, Ok(layout()));
+        let id = request_id(&reads, &remote, Some("pane_1"));
+        let (_, reads) = state.handle_endpoint_result(
+            "remote-boot",
+            &id,
+            Ok(read_result("pane_1", "UPDATED_REMOTE", 4)),
+        );
+        let id = request_id(&reads, &remote, Some("pane_2"));
+        state.handle_endpoint_result(
+            "remote-boot",
+            &id,
+            Ok(read_result("pane_2", "NEW_NEIGHBOR", 4)),
+        );
+        let frame = state.compose(120, 36).unwrap();
+        assert_preview_contains(&state, &frame, "UPDATED_REMOTE");
+        let mut projection = state
+            .endpoints
+            .iter()
+            .find(|item| item.endpoint_id == remote)
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .clone();
+        projection.revision += 1;
+        state.set_endpoint_snapshot(&remote, Box::new(projection));
+        let mut throttled = ClientShellInput::default();
+        state.refresh_navigator_preview(now + Duration::from_millis(4100), &mut throttled);
+        assert!(
+            throttled.actions.is_empty(),
+            "metadata updates keep the refresh interval"
+        );
+        let frame = state.compose(120, 36).unwrap();
+        assert_preview_contains(&state, &frame, "UPDATED_REMOTE");
+    }
+}
+
+#[test]
+fn fork_merge_navigator_preview_discards_retained_content_when_identity_changes() {
+    for change in 0..7 {
+        let (mut state, remote) = remote_preview();
+        let mut poll = ClientShellInput::default();
+        state.refresh_navigator_preview(Instant::now(), &mut poll);
+        let id = request_id(&poll.actions, &remote, None);
+        let (_, reads) = state.handle_endpoint_result("remote-boot", &id, Ok(layout()));
+        let id = request_id(&reads, &remote, Some("pane_1"));
+        let (_, reads) = state.handle_endpoint_result(
+            "remote-boot",
+            &id,
+            Ok(read_result("pane_1", "OLD_TARGET", 2)),
+        );
+        let id = request_id(&reads, &remote, Some("pane_2"));
+        state.handle_endpoint_result(
+            "remote-boot",
+            &id,
+            Ok(read_result("pane_2", "OLD_NEIGHBOR", 2)),
+        );
+        let frame = state.compose(120, 36).unwrap();
+        assert!(preview_text(&state, &frame).contains("OLD_TARGET"));
+        let endpoint = state
+            .endpoints
+            .iter_mut()
+            .find(|item| item.endpoint_id == remote)
+            .unwrap();
+        let mut projection = endpoint.snapshot.as_ref().unwrap().as_ref().clone();
+        projection.revision += 1;
+        match change {
+            0 => projection.panes.pop().map(|_| ()).unwrap(),
+            1 => projection.tabs[0].zoomed = true,
+            2 => {
+                projection.panes[0].focused = false;
+                projection.panes[1].focused = true;
+            }
+            3 => projection.boot_id = "next-boot".into(),
+            4 => {}
+            5 => {
+                let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+                    panic!("navigator");
+                };
+                navigator.selected = Some(ClientNavigatorTarget::Pane {
+                    endpoint_id: remote.clone(),
+                    pane_id: "pane_2".into(),
+                });
+            }
+            _ => {}
+        }
+        if change == 4 {
+            state.set_endpoint_snapshot_for_generation(&remote, 99, Box::new(projection));
+        } else {
+            state.set_endpoint_snapshot(&remote, Box::new(projection));
+        }
+        let size = if change == 6 { (100, 30) } else { (120, 36) };
+        let frame = state.compose(size.0, size.1).unwrap();
+        assert!(
+            !preview_text(&state, &frame).contains("OLD_TARGET"),
+            "before refresh change {change}"
+        );
+        state.refresh_navigator_preview(Instant::now(), &mut poll);
+        let frame = state.compose(size.0, size.1).unwrap();
+        assert!(
+            !preview_text(&state, &frame).contains("OLD_TARGET"),
+            "after refresh change {change}"
+        );
+    }
+}
+
+#[test]
+fn fork_merge_navigator_preview_keeps_local_content_between_snapshot_and_surface() {
+    for search in [false, true] {
+        let (mut state, _) = super::fork_navigator::two_endpoints();
+        if search {
+            state.open_navigator_overlay();
+        } else {
+            state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Tab,
+                KeyModifiers::ALT,
+            ))]);
+        }
+        let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
+            panic!("navigator");
+        };
+        navigator.selected = Some(ClientNavigatorTarget::Pane {
+            endpoint_id: ClientEndpointId::Local,
+            pane_id: "pane_1".into(),
+        });
+        let frame = state.compose(120, 36).unwrap();
+        let mut buffer = frame.to_ratatui_buffer().unwrap();
+        let popup = state.hits.navigator_popup;
+        let area = preview_area(&state, 120);
+        let now = Instant::now();
+        let mut poll = ClientShellInput::default();
+        state.refresh_navigator_preview(now, &mut poll);
+        let mut projection = snapshot();
+        projection.revision = 2;
+        projection.workspaces[0].label = "metadata".into();
+        state.set_endpoint_snapshot(&ClientEndpointId::Local, Box::new(projection));
+        state.render_navigator_preview(&mut buffer, popup);
+        assert!(preview_buffer_text(&buffer, area).contains("LIVE"));
+        state.refresh_navigator_preview(now, &mut poll);
+        state.render_navigator_preview(&mut buffer, popup);
+        assert!(preview_buffer_text(&buffer, area).contains("LIVE"));
+        let mut fresh = surface();
+        fresh.projection_revision = 2;
+        fresh.surface_revision = 2;
+        fresh.frame = FrameData::from_ratatui_buffer(&Buffer::with_lines(["UPDATED_LOCAL"]), None);
+        state.set_pane_surface(fresh);
+        let frame = state.compose(120, 36).unwrap();
+        assert_preview_contains(&state, &frame, "LIVE");
+        state.refresh_navigator_preview(now, &mut poll);
+        let frame = state.compose(120, 36).unwrap();
+        assert_preview_contains(&state, &frame, "UPDATED_LOCAL");
+    }
 }
 
 #[test]
@@ -412,7 +662,7 @@ fn fork_merge_navigator_status_backgrounds_and_directory_style_are_distinct() {
 
 #[test]
 fn fork_merge_navigator_preview_rejects_selection_endpoint_projection_and_resize_changes() {
-    for change in 0..5 {
+    for change in 0..6 {
         let (mut state, remote) = remote_preview();
         let mut poll = ClientShellInput::default();
         state.refresh_navigator_preview(Instant::now(), &mut poll);
@@ -443,7 +693,21 @@ fn fork_merge_navigator_preview_rejects_selection_endpoint_projection_and_resize
             3 => {
                 state.compose(100, 30).unwrap();
             }
-            _ => state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting),
+            4 => state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting),
+            _ => {
+                let mut projection = state
+                    .endpoints
+                    .iter()
+                    .find(|item| item.endpoint_id == remote)
+                    .unwrap()
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .clone();
+                projection.revision += 1;
+                state.set_endpoint_snapshot(&remote, Box::new(projection));
+            }
         }
         let (repaint, actions) = state.handle_endpoint_result(
             "remote-boot",
