@@ -731,21 +731,32 @@ fn mobile_pane_items(
                     .as_deref()
                     .or(pane.cwd.as_deref())
                     .unwrap_or_default();
+                let style = Style::default()
+                    .fg(foreground)
+                    .bg(background)
+                    .add_modifier(dim);
+                let mut name = vec![Span::styled("     └─ ", style)];
+                let mut name_width = content_width.saturating_sub(8);
+                if let Some(agent) = agent {
+                    let icon = status_icon(agent.agent_status, config.status_indicators);
+                    name.push(Span::styled(
+                        icon,
+                        style.fg(if endpoint.stale() {
+                            palette.overlay0
+                        } else {
+                            status_color(agent.agent_status, palette)
+                        }),
+                    ));
+                    name.push(Span::styled(" ", style));
+                    name_width = name_width.saturating_sub(display_width(icon) + 1);
+                }
+                name.push(Span::styled(
+                    crate::ui::truncate_end(&label, usize::from(name_width)),
+                    style,
+                ));
                 children.push(MobileItem {
                     lines: vec![
-                        Line::from(Span::styled(
-                            format!(
-                                "     └─ {}",
-                                crate::ui::truncate_end(
-                                    &label,
-                                    usize::from(content_width.saturating_sub(8))
-                                )
-                            ),
-                            Style::default()
-                                .fg(foreground)
-                                .bg(background)
-                                .add_modifier(dim),
-                        )),
+                        Line::from(name),
                         Line::from(Span::styled(
                             format!(
                                 "        {}",

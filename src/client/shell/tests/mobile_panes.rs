@@ -85,8 +85,13 @@ fn leaves(state: &mut ClientShellState, name: &str) -> Vec<String> {
     frame_rows(&frame)
         .iter()
         .filter_map(|row| {
-            row.split_once("└─ ")
-                .map(|(_, label)| label.trim().to_owned())
+            row.split_once("└─ ").map(|(_, label)| {
+                label
+                    .trim()
+                    .strip_prefix("● ")
+                    .unwrap_or(label.trim())
+                    .to_owned()
+            })
         })
         .collect()
 }
@@ -162,6 +167,86 @@ fn assert_focus(result: &ClientShellInput, endpoint: &ClientEndpointId, pane: &s
         }
         _ => false,
     }), "exact pane focus missing: {:?}", result.actions);
+}
+
+#[test]
+fn mobile_panes_status_icons_follow_config_and_survive_narrow_stale_rows() {
+    use crate::config::StatusIndicatorStyle;
+
+    for indicators in [StatusIndicatorStyle::Dots, StatusIndicatorStyle::Symbols] {
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Done,
+            AgentStatus::Idle,
+            AgentStatus::Unknown,
+        ] {
+            let mut state = state();
+            state.config.status_indicators = indicators;
+            let mut projected = projection();
+            projected.agents[0].name = Some("named-agent-with-a-long-name".into());
+            if status == AgentStatus::Done {
+                projected.agents[0].agent_status = AgentStatus::Working;
+                refresh(&mut state, projected.clone());
+                projected.agents[0].state_change_seq += 1;
+            }
+            projected.agents[0].agent_status = status;
+            refresh(&mut state, projected);
+            open(&mut state);
+            expand(&mut state);
+            for stale in [false, true] {
+                if stale {
+                    state.set_endpoint_status(
+                        &ClientEndpointId::Local,
+                        ClientEndpointStatus::Reconnecting,
+                    );
+                }
+                for width in [45, 20, 12] {
+                    let frame = state.compose(width, 60).unwrap();
+                    let buffer = frame.to_ratatui_buffer().unwrap();
+                    let pane_rows = state
+                        .hits
+                        .mobile_targets
+                        .iter()
+                        .filter_map(|(rect, target)| match target {
+                            ClientMobileTarget::Pane { pane_id, .. } => Some((rect, pane_id)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(pane_rows.len(), 4);
+                    for (rect, pane_id) in pane_rows {
+                        let x = rect.x + 8;
+                        let cell = &buffer[(x, rect.y)];
+                        if pane_id == "pane_3" {
+                            assert_eq!(cell.symbol(), status_icon(status, indicators));
+                            assert_eq!(
+                                cell.fg,
+                                if stale {
+                                    state.config.palette.overlay0
+                                } else {
+                                    status_color(status, &state.config.palette)
+                                }
+                            );
+                            assert_eq!(cell.modifier.contains(Modifier::DIM), stale);
+                            assert_eq!(buffer[(x + 1, rect.y)].symbol(), " ");
+                        } else {
+                            assert!(!["●", "○", "·", "×", "◐", "✓"].contains(&cell.symbol()));
+                        }
+                        assert!(frame_rows(&frame)[usize::from(rect.y + 1)].contains("/"));
+                    }
+                    if let Ok(directory) = std::env::var("HERDR_MOBILE_ARTIFACT_DIR") {
+                        std::fs::write(
+                            std::path::Path::new(&directory).join(format!(
+                                "status-{indicators:?}-{status:?}-{stale}-{width}.txt"
+                            )),
+                            frame_rows(&frame).join("\n"),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -553,6 +638,16 @@ fn mobile_panes_expanded_render_scale_profile() {
                 pane_id: format!("pane_{number}"),
                 label: Some(format!("shell-{number}")),
                 ..pane.clone()
+            })
+            .collect();
+        let agent = projection().agents[0].clone();
+        projected.agents = projected
+            .panes
+            .iter()
+            .map(|pane| ClientShellAgent {
+                pane_id: pane.pane_id.clone(),
+                tab_id: pane.tab_id.clone(),
+                ..agent.clone()
             })
             .collect();
         refresh(&mut state, projected);
