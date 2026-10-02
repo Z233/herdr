@@ -139,6 +139,23 @@ fn mobile_type_search_live_input_cancel_and_accept() {
         "directory acceptance did not enter terminal: {}",
         screen(&output, 44, 20)
     );
+    let workspaces = send_json_request(
+        &api,
+        r#"{"id":"directory-workspaces","method":"workspace.list","params":{}}"#,
+    );
+    let directory_workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("workspace.list failed: {workspaces}"))
+        .iter()
+        .find(|workspace| workspace["label"] == "mobile-dir42")
+        .expect("created directory workspace")["workspace_id"]
+        .as_str()
+        .unwrap();
+    let directory_pane = first_pane_id_in_workspace(&api, directory_workspace);
+    assert_ne!(directory_pane, pane);
+    send_pane_shell_command(&api, &directory_pane, "printf 'DIRECTORY_%s\\n' READY");
+    wait_screen(&output, 44, 20, "DIRECTORY_READY");
+    save_frame(&evidence, "directory-ready", &output, 44, 20);
     input
         .write_all(b"printf 'DIRECTORY_%s\\n' ACCEPTED\r")
         .unwrap();
@@ -146,7 +163,8 @@ fn mobile_type_search_live_input_cancel_and_accept() {
     save_frame(&evidence, "09-directory-accepted", &output, 44, 20);
     fs::write(evidence.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "binary":env!("CARGO_BIN_EXE_herdr"), "geometry":"44x20", "created":created,
-        "inputs":["tap switch", "s", "earchDest42", "Esc twice", "kitty associated text 你好", "bracketed paste ' world 42'", "Esc twice", "bracketed paste SearchDest42", "Enter", "printf MOBILE_CLEAN", "tap switch", "bracketed paste mobile-dir42", "Enter", "printf DIRECTORY_ACCEPTED"],
+        "inputs":["tap switch", "s", "earchDest42", "Esc twice", "kitty associated text 你好", "bracketed paste ' world 42'", "Esc twice", "bracketed paste SearchDest42", "Enter", "printf MOBILE_CLEAN", "tap switch", "bracketed paste mobile-dir42", "Enter", "targeted API printf DIRECTORY_READY", "observe DIRECTORY_READY in client frame", "printf DIRECTORY_ACCEPTED"],
+        "directory_readiness":{"workspace_id":directory_workspace,"pane_id":directory_pane,"marker":"DIRECTORY_READY"},
         "outcome":"search, cancel, Unicode, paste, pane and directory acceptance and no pane forwarding passed"
     })).unwrap()).unwrap();
     drop(input);
