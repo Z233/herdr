@@ -275,6 +275,48 @@ pub(super) fn online_agent_targets(
         .collect()
 }
 
+pub(super) fn navigator_pane_label(
+    workspace: &ClientShellWorkspace,
+    tab: &ClientShellTab,
+    pane: &crate::protocol::ClientShellPane,
+    agent: Option<&crate::protocol::ClientShellAgent>,
+    multiple_tabs: bool,
+    pane_count: usize,
+    index: usize,
+) -> String {
+    let agent_kind =
+        agent.and_then(|agent| agent.agent.as_deref().or(agent.display_agent.as_deref()));
+    let name = pane
+        .label
+        .as_deref()
+        .or_else(|| agent.and_then(|agent| agent.name.as_deref()));
+    let title = agent.and_then(|agent| {
+        agent
+            .title
+            .as_deref()
+            .or(agent.terminal_title_stripped.as_deref())
+    });
+    let tab_name =
+        (tab.custom_label || tab.label.parse::<usize>().is_err()).then_some(tab.label.as_str());
+    if pane_count == 1 {
+        match name.or(tab_name).or(title) {
+            Some(label) => label.to_owned(),
+            None if multiple_tabs => {
+                format!("{} · {}", agent_kind.unwrap_or("terminal"), tab.label)
+            }
+            None => workspace.label.clone(),
+        }
+    } else {
+        let pane_name = name.or(title).or(agent_kind).unwrap_or("terminal");
+        match tab_name {
+            Some(tab_name) if tab_name != pane_name => {
+                format!("{tab_name} · {pane_name} · {}", index + 1)
+            }
+            _ => format!("{pane_name} · {}", index + 1),
+        }
+    }
+}
+
 pub(super) fn navigator_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
@@ -356,35 +398,21 @@ pub(super) fn navigator_rows(
                         let agent_kind = agent.and_then(|agent| {
                             agent.agent.as_deref().or(agent.display_agent.as_deref())
                         });
-                        let name = pane
-                            .label
-                            .as_deref()
-                            .or_else(|| agent.and_then(|agent| agent.name.as_deref()));
                         let title = agent.and_then(|agent| {
                             agent
                                 .title
                                 .as_deref()
                                 .or(agent.terminal_title_stripped.as_deref())
                         });
-                        let tab_name = (tab.custom_label || tab.label.parse::<usize>().is_err())
-                            .then_some(tab.label.as_str());
-                        let label = if tab_panes.len() == 1 {
-                            match name.or(tab_name).or(title) {
-                                Some(label) => label.to_owned(),
-                                None if multiple_tabs => {
-                                    format!("{} · {}", agent_kind.unwrap_or("terminal"), tab.label)
-                                }
-                                None => workspace.label.clone(),
-                            }
-                        } else {
-                            let pane_name = name.or(title).or(agent_kind).unwrap_or("terminal");
-                            match tab_name {
-                                Some(tab_name) if tab_name != pane_name => {
-                                    format!("{tab_name} · {pane_name} · {}", index + 1)
-                                }
-                                _ => format!("{pane_name} · {}", index + 1),
-                            }
-                        };
+                        let label = navigator_pane_label(
+                            workspace,
+                            tab,
+                            pane,
+                            agent,
+                            multiple_tabs,
+                            tab_panes.len(),
+                            index,
+                        );
                         let meta = pane
                             .foreground_cwd
                             .as_deref()

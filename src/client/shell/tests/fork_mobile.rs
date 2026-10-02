@@ -80,6 +80,11 @@ fn fork_merge_mobile_horizontal_expansion_and_collapse_preserve_the_parent_targe
     second.label = "second".into();
     second.focused = false;
     projection.tabs.push(second);
+    let mut pane = projection.panes[0].clone();
+    pane.pane_id = "pane_2".into();
+    pane.tab_id = "tab_2".into();
+    pane.focused = false;
+    projection.panes.push(pane);
     state.set_snapshot(Box::new(projection));
     state.compose(45, 35).unwrap();
     let switch = state.hits.mobile_switch;
@@ -100,9 +105,10 @@ fn fork_merge_mobile_horizontal_expansion_and_collapse_preserve_the_parent_targe
         .mobile_expanded_groups
         .contains(&(ClientEndpointId::Local, "ws_1".into())));
     mobile_event(&mut state, MouseEventKind::Drag(MouseButton::Left), 9, 19);
-    assert!(
-        matches!(state.mobile_drag.as_ref(), Some(ClientMobileTarget::Tab { tab_id, .. }) if tab_id == "tab_2")
-    );
+    assert!(state.mobile_drag.as_ref().is_some_and(|target| !matches!(
+        target,
+        ClientMobileTarget::Tab { .. } | ClientMobileTarget::Workspace { .. }
+    )));
     mobile_event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 19);
     state.compose(45, 35).unwrap();
     assert!(state.mobile_expanded_groups.is_empty());

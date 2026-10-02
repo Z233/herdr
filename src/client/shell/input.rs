@@ -315,6 +315,7 @@ impl ClientShellState {
                 | RawInputEvent::Unsupported => {}
             }
             self.reconcile_input_source();
+            self.prepare_mobile_pane_order();
         }
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
         self.refresh_navigator_directory(&mut outcome);

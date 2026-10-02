@@ -96,7 +96,21 @@ impl ClientShellState {
             next.iter()
                 .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
         });
+        let obsolete = self
+            .endpoints
+            .iter()
+            .filter(|previous| {
+                !next.iter().any(|endpoint| {
+                    endpoint.endpoint_id == previous.endpoint_id && endpoint.snapshot.is_some()
+                })
+            })
+            .map(|endpoint| endpoint.endpoint_id.clone())
+            .collect::<Vec<_>>();
         self.endpoints = next;
+        for endpoint_id in obsolete {
+            self.reconcile_mobile_panes(&endpoint_id);
+        }
+        self.reconcile_mobile_gesture();
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
@@ -129,6 +143,7 @@ impl ClientShellState {
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
         }
+        self.reconcile_mobile_panes(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_status(
@@ -152,6 +167,7 @@ impl ClientShellState {
         {
             endpoint.status = status;
         }
+        self.reconcile_mobile_gesture();
     }
 
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
@@ -650,6 +666,7 @@ impl ClientShellState {
                 endpoint.agent_view_projection = None;
             }
         }
+        self.reconcile_mobile_panes(endpoint_id);
     }
 
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {

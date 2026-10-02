@@ -62,7 +62,8 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 - **Zoxide integration** — search any directory by path and open it as a workspace (see below)
 - **Mobile support** — switcher auto-opens in empty state on narrow terminals
 - **Mobile search** — type or paste while the mobile switcher is open to focus Navigator search. `s` is query text. Press `Esc` twice to return.
-- **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right/left to expand/collapse a workspace's tabs, and release to accept; a tap leaves the switcher open
+- **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right to show all panes across a workspace's tabs, and release to focus the selected workspace or pane. Swipe left on a pane to collapse its workspace; a tap leaves the switcher open.
+- **Mobile pane order** — panes use this client's in-memory, successfully presented focus history. Pane order stays fixed while the switcher is open, including collapse/re-expand; new panes append, removed panes disappear, and the next opening uses the latest history.
 - Full keyboard **and** mouse support (hover, click, scroll)
 
 Default binding: `ctrl+tab` opens hold-to-switch through `workspace_switcher`. Enter search from the switcher with `s` while holding its command modifier. `prefix+w` is only a leader for directional pane-opening chords; letting it time out does nothing. The removed `workspace_picker` config key is silently ignored. Explicit disabled bindings and binding-conflict diagnostics remain effective.
