@@ -390,14 +390,15 @@ fn workspace_navigation_respects_each_machines_visible_worktree_groups() {
         }
         state.compose(cols, 28).unwrap();
         enter_navigation(&mut state);
-        let local = if compact && !unavailable {
+        let mobile = cols == 44 && !unavailable;
+        let local = if (compact && !unavailable) || mobile {
             ["ws_2", "ws_3"]
         } else {
             ["ws_3", "ws_2"]
         };
         let remote_ids: &[&str] = if !show_child {
             &["ws_1", "ws_2"]
-        } else if compact {
+        } else if compact || mobile {
             &["ws_1", "ws_2", "ws_3"]
         } else {
             &["ws_1", "ws_3", "ws_2"]

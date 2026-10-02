@@ -23,6 +23,88 @@ impl WorkspaceNavigationTarget {
 }
 
 impl ClientShellState {
+    pub(super) fn mobile_ordered_workspace_targets(&self) -> Vec<WorkspaceNavigationTarget> {
+        let mut targets = Vec::new();
+        for endpoint in &self.endpoints {
+            let Some(snapshot) = endpoint.snapshot.as_deref() else {
+                continue;
+            };
+            targets.extend(
+                snapshot
+                    .workspaces
+                    .iter()
+                    .map(|workspace| WorkspaceNavigationTarget {
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        workspace_id: workspace.workspace_id.clone(),
+                        boot_id: snapshot.boot_id.clone(),
+                        generation: endpoint.snapshot_generation,
+                    }),
+            );
+        }
+        targets.sort_by_key(|target| {
+            self.workspace_mru
+                .iter()
+                .position(|recent| recent == target)
+                .unwrap_or(usize::MAX)
+        });
+        targets
+    }
+
+    pub(super) fn handle_mobile_workspace_action(
+        &mut self,
+        action: crate::input::KeybindAction,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        use crate::input::KeybindAction;
+        if !self.mobile_layout_active()
+            || self.snapshot.is_none()
+            || self.pane_surface.is_none()
+            || !matches!(
+                action,
+                KeybindAction::SwitchWorkspace(_)
+                    | KeybindAction::PreviousWorkspace
+                    | KeybindAction::NextWorkspace
+            )
+        {
+            return false;
+        }
+        let targets = self
+            .mobile_ordered_workspace_targets()
+            .into_iter()
+            .filter(|target| {
+                matches!(action, KeybindAction::SwitchWorkspace(_))
+                    || self.endpoint_is_online(&target.endpoint_id)
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return true;
+        }
+        let focused = self.focused_navigation_target();
+        let current = targets
+            .iter()
+            .position(|target| Some(target) == focused.as_ref());
+        let next = match (action, current) {
+            (KeybindAction::SwitchWorkspace(index), _) => index,
+            (KeybindAction::PreviousWorkspace, Some(index)) => {
+                (index + targets.len() - 1) % targets.len()
+            }
+            (KeybindAction::NextWorkspace, Some(index)) => (index + 1) % targets.len(),
+            (KeybindAction::PreviousWorkspace, None) => targets.len() - 1,
+            _ => 0,
+        };
+        if let Some(target) = targets
+            .get(next)
+            .filter(|target| self.navigation_target_valid(target))
+        {
+            self.focus_or_activate(
+                target.endpoint_id.clone(),
+                ClientEndpointFocusTarget::Workspace(target.workspace_id.clone()),
+                outcome,
+            );
+        }
+        true
+    }
+
     pub(crate) fn tick_workspace_highlight(&mut self, now: std::time::Instant) -> bool {
         if self
             .pending_workspace_highlight
@@ -100,43 +182,48 @@ impl ClientShellState {
         let mobile = self.mobile_layout_active();
         let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
         let empty_collapsed_groups = HashSet::new();
-        let mut targets = Vec::new();
-        for endpoint in &self.endpoints {
-            if endpoint.status != ClientEndpointStatus::Online {
-                continue;
-            }
-            let Some(snapshot) = endpoint.snapshot.as_deref() else {
-                continue;
-            };
-            let entries = if self.sidebar_collapsed && !mobile && surface_available {
-                snapshot
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| WorkspaceEntry {
-                        index,
-                        indented: false,
-                        last_child: false,
-                    })
-                    .collect()
-            } else {
-                let collapsed_groups = if mobile && surface_available {
-                    &empty_collapsed_groups
-                } else {
-                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
-                        .unwrap_or(&empty_collapsed_groups)
+        let mut targets = if mobile && surface_available {
+            self.mobile_ordered_workspace_targets()
+                .into_iter()
+                .filter(|target| self.endpoint_is_online(&target.endpoint_id))
+                .collect()
+        } else {
+            let mut targets = Vec::new();
+            for endpoint in &self.endpoints {
+                if endpoint.status != ClientEndpointStatus::Online {
+                    continue;
+                }
+                let Some(snapshot) = endpoint.snapshot.as_deref() else {
+                    continue;
                 };
-                render::workspace_entries(snapshot, collapsed_groups)
-            };
-            for entry in entries {
-                targets.push(WorkspaceNavigationTarget {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: snapshot.workspaces[entry.index].workspace_id.clone(),
-                    boot_id: snapshot.boot_id.clone(),
-                    generation: endpoint.snapshot_generation,
-                });
+                let entries = if self.sidebar_collapsed && !mobile && surface_available {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| WorkspaceEntry {
+                            index,
+                            indented: false,
+                            last_child: false,
+                        })
+                        .collect()
+                } else {
+                    let collapsed_groups = self
+                        .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                        .unwrap_or(&empty_collapsed_groups);
+                    render::workspace_entries(snapshot, collapsed_groups)
+                };
+                for entry in entries {
+                    targets.push(WorkspaceNavigationTarget {
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        workspace_id: snapshot.workspaces[entry.index].workspace_id.clone(),
+                        boot_id: snapshot.boot_id.clone(),
+                        generation: endpoint.snapshot_generation,
+                    });
+                }
             }
-        }
+            targets
+        };
         if targets.is_empty() {
             return;
         }

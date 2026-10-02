@@ -87,31 +87,32 @@ impl ClientShellState {
 
     fn mobile_navigation_targets(&self) -> Vec<ClientMobileTarget> {
         let mut targets = Vec::new();
-        for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(&self.endpoints) {
-            for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
-                let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
-                    continue;
-                };
-                targets.push(ClientMobileTarget::Workspace {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: workspace.workspace_id.clone(),
-                });
-                if self
-                    .mobile_expanded_groups
-                    .contains(&(endpoint.endpoint_id.clone(), workspace.workspace_id.clone()))
-                {
-                    targets.extend(
-                        endpoint
-                            .snapshot
-                            .tabs
-                            .iter()
-                            .filter(|tab| tab.workspace_id == workspace.workspace_id)
-                            .map(|tab| ClientMobileTarget::Tab {
-                                endpoint_id: endpoint.endpoint_id.clone(),
-                                tab_id: tab.tab_id.clone(),
-                            }),
-                    );
-                }
+        for target in self.mobile_ordered_workspace_targets() {
+            let Some(endpoint) =
+                super::aggregate_navigation::cached_endpoint_snapshots(&self.endpoints)
+                    .find(|endpoint| endpoint.endpoint_id == &target.endpoint_id)
+            else {
+                continue;
+            };
+            targets.push(ClientMobileTarget::Workspace {
+                endpoint_id: endpoint.endpoint_id.clone(),
+                workspace_id: target.workspace_id.clone(),
+            });
+            if self
+                .mobile_expanded_groups
+                .contains(&(endpoint.endpoint_id.clone(), target.workspace_id.clone()))
+            {
+                targets.extend(
+                    endpoint
+                        .snapshot
+                        .tabs
+                        .iter()
+                        .filter(|tab| tab.workspace_id == target.workspace_id)
+                        .map(|tab| ClientMobileTarget::Tab {
+                            endpoint_id: endpoint.endpoint_id.clone(),
+                            tab_id: tab.tab_id.clone(),
+                        }),
+                );
             }
         }
         targets

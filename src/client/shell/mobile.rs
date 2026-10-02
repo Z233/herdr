@@ -387,7 +387,8 @@ fn render_agent_summary(
     }
 }
 
-pub(super) struct MobileSwitcherSelection<'a> {
+pub(super) struct MobileSwitcherView<'a> {
+    pub(super) workspace_targets: &'a [WorkspaceNavigationTarget],
     pub(super) workspace: Option<&'a WorkspaceNavigationTarget>,
     pub(super) target: Option<&'a ClientMobileTarget>,
 }
@@ -399,16 +400,17 @@ pub(super) fn render_mobile_switcher(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    selection: MobileSwitcherSelection<'_>,
+    view: MobileSwitcherView<'_>,
     expanded_groups: &HashSet<(ClientEndpointId, String)>,
     scroll: &mut usize,
     reveal_workspace: &mut bool,
     hits: &mut ShellHitMap,
 ) {
-    let MobileSwitcherSelection {
+    let MobileSwitcherView {
+        workspace_targets,
         workspace: selected_workspace_id,
         target: selected_target,
-    } = selection;
+    } = view;
     if area.is_empty() {
         return;
     }
@@ -476,6 +478,7 @@ pub(super) fn render_mobile_switcher(
     let items = mobile_items(
         snapshot,
         endpoints,
+        workspace_targets,
         active_endpoint_id,
         config,
         selected_workspace_id,
@@ -616,6 +619,7 @@ fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
 fn mobile_items(
     snapshot: &ClientShellSnapshot,
     endpoints: &[ClientShellEndpoint],
+    workspace_targets: &[WorkspaceNavigationTarget],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&WorkspaceNavigationTarget>,
@@ -795,156 +799,142 @@ fn mobile_items(
         ClientMobileTarget::NewWorkspace,
         palette,
     ));
-    for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
-        for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
-            let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
-                continue;
-            };
-            let selected = selected_workspace_id.is_some_and(|target| {
-                target.matches(endpoint.endpoint_id, &workspace.workspace_id)
-            });
-            let background = if selected {
-                if palette.surface0 == ratatui::style::Color::Reset {
-                    palette.active_row_bg
-                } else {
-                    palette.surface0
-                }
-            } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
-                if selected_workspace_id.is_some()
-                    && palette.surface0 == ratatui::style::Color::Reset
-                {
-                    palette.panel_bg
-                } else {
-                    palette.surface_dim
-                }
+    let has_remote = endpoints
+        .iter()
+        .any(|endpoint| !endpoint.endpoint_id.is_local());
+    for target in workspace_targets {
+        let Some(endpoint) = super::aggregate_navigation::cached_endpoint_snapshots(endpoints)
+            .find(|endpoint| endpoint.endpoint_id == &target.endpoint_id)
+        else {
+            continue;
+        };
+        let Some(workspace) = endpoint
+            .snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == target.workspace_id)
+        else {
+            continue;
+        };
+        let selected = selected_workspace_id
+            .is_some_and(|target| target.matches(endpoint.endpoint_id, &workspace.workspace_id));
+        let background = if selected {
+            if palette.surface0 == ratatui::style::Color::Reset {
+                palette.active_row_bg
             } else {
+                palette.surface0
+            }
+        } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
+            if selected_workspace_id.is_some() && palette.surface0 == ratatui::style::Color::Reset {
                 palette.panel_bg
-            };
-            let connector = if entry.indented {
-                if entry.last_child {
-                    "└─ "
-                } else {
-                    "├─ "
-                }
             } else {
-                ""
-            };
-            let name = if entry.indented && !workspace.custom_label {
-                workspace
-                    .branch
-                    .as_deref()
-                    .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
-                    .unwrap_or(&workspace.label)
-            } else {
-                &workspace.label
-            };
-            let branch = workspace.branch.as_deref().unwrap_or("shell");
-            let detail_prefix = if entry.indented {
-                if entry.last_child {
-                    "       "
-                } else {
-                    "  │    "
-                }
-            } else {
-                "  "
-            };
-            let dim = if endpoint.stale() {
-                Modifier::DIM
-            } else {
-                Modifier::empty()
-            };
-            let foreground = if endpoint.stale() {
-                palette.overlay0
-            } else {
-                palette.text
-            };
-            let status = if endpoint.stale() {
-                palette.overlay0
-            } else {
-                status_color(workspace.agent_status, palette)
-            };
-            let stale_detail = if endpoint.stale() {
-                format!(" · {}", mobile_endpoint_state(endpoint.status))
-            } else {
-                String::new()
-            };
-            items.push(MobileItem {
-                lines: vec![
-                    Line::from(vec![
-                        Span::styled(
-                            format!("  {connector}"),
-                            Style::default()
-                                .fg(palette.overlay0)
-                                .bg(background)
-                                .add_modifier(dim),
-                        ),
-                        Span::styled(
-                            status_icon(workspace.agent_status, config.status_indicators),
-                            Style::default().fg(status).bg(background).add_modifier(dim),
-                        ),
-                        Span::styled(" ", Style::default().bg(background)),
-                        Span::styled(
-                            crate::ui::truncate_end(
-                                &format!("{} · {name}", endpoint.label),
-                                usize::from(content_width.saturating_sub(if entry.indented {
-                                    8
-                                } else {
-                                    5
-                                })),
-                            ),
-                            Style::default()
-                                .fg(foreground)
-                                .bg(background)
-                                .add_modifier(Modifier::BOLD | dim),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        crate::ui::truncate_end(
-                            &format!(
-                                "{detail_prefix}{branch} · {}{stale_detail}",
-                                compact_tab_status(endpoint.snapshot, workspace)
-                            ),
-                            usize::from(content_width),
-                        ),
+                palette.surface_dim
+            }
+        } else {
+            palette.panel_bg
+        };
+        let name = if endpoint.endpoint_id.is_local() {
+            workspace.label.clone()
+        } else {
+            format!("{} · {}", endpoint.label, workspace.label)
+        };
+        let branch = workspace.branch.as_deref().unwrap_or("shell");
+        let local_detail = if endpoint.endpoint_id.is_local() && has_remote {
+            " · Local"
+        } else {
+            ""
+        };
+        let dim = if endpoint.stale() {
+            Modifier::DIM
+        } else {
+            Modifier::empty()
+        };
+        let foreground = if endpoint.stale() {
+            palette.overlay0
+        } else {
+            palette.text
+        };
+        let status = if endpoint.stale() {
+            palette.overlay0
+        } else {
+            status_color(workspace.agent_status, palette)
+        };
+        let stale_detail = if endpoint.stale() {
+            format!(" · {}", mobile_endpoint_state(endpoint.status))
+        } else {
+            String::new()
+        };
+        items.push(MobileItem {
+            lines: vec![
+                Line::from(vec![
+                    Span::styled(
+                        "  ",
                         Style::default()
                             .fg(palette.overlay0)
                             .bg(background)
                             .add_modifier(dim),
-                    )),
-                ],
-                background,
-                target: Some(ClientMobileTarget::Workspace {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: workspace.workspace_id.clone(),
-                }),
-            });
-            if expanded_groups
-                .contains(&(endpoint.endpoint_id.clone(), workspace.workspace_id.clone()))
+                    ),
+                    Span::styled(
+                        status_icon(workspace.agent_status, config.status_indicators),
+                        Style::default().fg(status).bg(background).add_modifier(dim),
+                    ),
+                    Span::styled(" ", Style::default().bg(background)),
+                    Span::styled(
+                        crate::ui::truncate_end(
+                            &name,
+                            usize::from(content_width.saturating_sub(5)),
+                        ),
+                        Style::default()
+                            .fg(foreground)
+                            .bg(background)
+                            .add_modifier(Modifier::BOLD | dim),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    crate::ui::truncate_end(
+                        &format!(
+                            "  {branch} · {}{stale_detail}{local_detail}",
+                            compact_tab_status(endpoint.snapshot, workspace)
+                        ),
+                        usize::from(content_width),
+                    ),
+                    Style::default()
+                        .fg(palette.overlay0)
+                        .bg(background)
+                        .add_modifier(dim),
+                )),
+            ],
+            background,
+            target: Some(ClientMobileTarget::Workspace {
+                endpoint_id: endpoint.endpoint_id.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+            }),
+        });
+        if expanded_groups.contains(&(endpoint.endpoint_id.clone(), workspace.workspace_id.clone()))
+        {
+            for tab in endpoint
+                .snapshot
+                .tabs
+                .iter()
+                .filter(|tab| tab.workspace_id == workspace.workspace_id)
             {
-                for tab in endpoint
-                    .snapshot
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.workspace_id == workspace.workspace_id)
-                {
-                    items.push(MobileItem {
-                        lines: vec![Line::from(Span::styled(
-                            format!(
-                                "     └─ {}",
-                                crate::ui::truncate_end(
-                                    &tab.label,
-                                    usize::from(content_width.saturating_sub(8))
-                                )
-                            ),
-                            Style::default().fg(foreground).bg(palette.panel_bg),
-                        ))],
-                        background: palette.panel_bg,
-                        target: Some(ClientMobileTarget::Tab {
-                            endpoint_id: endpoint.endpoint_id.clone(),
-                            tab_id: tab.tab_id.clone(),
-                        }),
-                    });
-                }
+                items.push(MobileItem {
+                    lines: vec![Line::from(Span::styled(
+                        format!(
+                            "     └─ {}",
+                            crate::ui::truncate_end(
+                                &tab.label,
+                                usize::from(content_width.saturating_sub(8))
+                            )
+                        ),
+                        Style::default().fg(foreground).bg(palette.panel_bg),
+                    ))],
+                    background: palette.panel_bg,
+                    target: Some(ClientMobileTarget::Tab {
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        tab_id: tab.tab_id.clone(),
+                    }),
+                });
             }
         }
     }

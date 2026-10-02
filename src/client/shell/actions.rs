@@ -231,7 +231,9 @@ impl ClientShellState {
                     }
                     return;
                 }
-                if self.handle_endpoint_navigation(action, outcome) {
+                if self.handle_mobile_workspace_action(action, outcome)
+                    || self.handle_endpoint_navigation(action, outcome)
+                {
                     return;
                 }
                 if let Some(method) = self.endpoint_method_for_action(action) {

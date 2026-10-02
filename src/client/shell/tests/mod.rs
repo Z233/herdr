@@ -259,6 +259,7 @@ mod input_domain;
 mod keybindings_settings;
 mod link_hover;
 mod mobile;
+mod mobile_order;
 mod mouse_selection;
 mod popup_focus_projection;
 mod startup_overlays;

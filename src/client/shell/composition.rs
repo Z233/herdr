@@ -623,6 +623,7 @@ impl ClientShellState {
         {
             let mut composed = frame.to_ratatui_buffer()?;
             occlusion.cover(composed.area);
+            let workspace_targets = self.mobile_ordered_workspace_targets();
             super::mobile::render_mobile_switcher(
                 &mut composed,
                 Rect::new(0, 0, cols, rows),
@@ -630,7 +631,8 @@ impl ClientShellState {
                 &self.endpoints,
                 &self.active_endpoint_id,
                 &self.config,
-                super::mobile::MobileSwitcherSelection {
+                super::mobile::MobileSwitcherView {
+                    workspace_targets: &workspace_targets,
                     workspace: self
                         .navigate_workspace_id
                         .as_ref()
