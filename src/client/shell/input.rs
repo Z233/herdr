@@ -145,6 +145,21 @@ impl ClientShellState {
         false
     }
 
+    fn open_mobile_navigator_search(&mut self, text: &str) -> bool {
+        if text.is_empty()
+            || self.mode != ClientShellMode::Navigate
+            || self.overlay.is_some()
+            || !self.mobile_layout_active()
+        {
+            return false;
+        }
+        self.open_navigator_overlay();
+        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+            navigator.search_focused = true;
+        }
+        self.insert_overlay_text(text)
+    }
+
     pub(crate) fn replay_mouse_events(
         &mut self,
         events: Vec<crossterm::event::MouseEvent>,
@@ -195,7 +210,9 @@ impl ClientShellState {
                             &mut outcome,
                         );
                     } else if !self.popup_pending {
-                        if self.insert_overlay_text(&text) {
+                        if self.open_mobile_navigator_search(&text)
+                            || self.insert_overlay_text(&text)
+                        {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
                             self.push_focused_pane_event(
@@ -228,7 +245,9 @@ impl ClientShellState {
                             &mut outcome,
                         );
                     } else if !self.popup_pending {
-                        if self.insert_overlay_text(&text) {
+                        if self.open_mobile_navigator_search(&text)
+                            || self.insert_overlay_text(&text)
+                        {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
                             self.push_focused_pane_event(
@@ -617,6 +636,20 @@ impl ClientShellState {
                 None
             }
             ClientShellMode::Navigate => {
+                if let Some(character) =
+                    crate::input::keybind_help_text_char(key).filter(|ch| !ch.is_control())
+                {
+                    let character = character.to_string();
+                    let text = key
+                        .generated_text
+                        .as_deref()
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or(&character);
+                    if self.open_mobile_navigator_search(text) {
+                        outcome.repaint = true;
+                        return None;
+                    }
+                }
                 self.route_navigate_key(key, outcome);
                 None
             }

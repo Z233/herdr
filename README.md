@@ -61,6 +61,7 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 - **Repository names** shown for worktree switcher items, with structured labels (git branch names for grouped child worktrees)
 - **Zoxide integration** — search any directory by path and open it as a workspace (see below)
 - **Mobile support** — switcher auto-opens in empty state on narrow terminals
+- **Mobile search** — type or paste while the mobile switcher is open to focus Navigator search. `s` is query text. Press `Esc` twice to return.
 - **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right/left to expand/collapse a workspace's tabs, and release to accept; a tap leaves the switcher open
 - Full keyboard **and** mouse support (hover, click, scroll)
 

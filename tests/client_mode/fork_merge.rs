@@ -32,6 +32,130 @@ fn wait_screen(output: &SharedOutput, cols: u16, rows: u16, needle: &str) {
 }
 
 #[test]
+fn mobile_type_search_live_input_cancel_and_accept() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let evidence = std::env::var_os("HERDR_MOBILE_SEARCH_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/mobile-type-search/live")
+        });
+    fs::create_dir_all(&evidence).unwrap();
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let api = runtime.join("herdr.sock");
+    let directory = base.join("mobile-dir42");
+    let bin = base.join("bin");
+    fs::create_dir_all(&directory).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("zoxide"),
+        format!("#!/bin/sh\nprintf '10 {}\\n'\n", directory.display()),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("zoxide"), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let server = spawn_server_with_config_and_env(
+        &config,
+        &runtime,
+        &api,
+        "onboarding = false\n",
+        &[("PATH", &path)],
+    );
+    wait_for_socket(&api, Duration::from_secs(10));
+    let created = send_json_request(&api, &serde_json::json!({
+        "id":"mobile-create", "method":"workspace.create", "params":{"cwd":base,"label":"SearchDest42"}
+    }).to_string());
+    assert!(created.get("error").is_none(), "{created}");
+    let pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let client = spawn_client_shell_process(&config, &runtime, &api);
+    client
+        ._master
+        .as_ref()
+        .unwrap()
+        .resize(PtySize {
+            cols: 44,
+            rows: 20,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
+    let mut input = client._master.as_ref().unwrap().take_writer().unwrap();
+    wait_screen(&output, 44, 20, "switch");
+    send_pane_shell_command(&api, pane, "PS1='$ '; printf 'MOBILE_%s\\n' READY");
+    wait_screen(&output, 44, 20, "MOBILE_READY");
+    let open = |input: &mut Box<dyn Write + Send>| {
+        input.write_all(b"\x1b[<0;36;1M\x1b[<0;36;1m").unwrap();
+        wait_screen(&output, 44, 20, "+ new workspace");
+    };
+    open(&mut input);
+    save_frame(&evidence, "01-switcher", &output, 44, 20);
+    input.write_all(b"s").unwrap();
+    wait_screen(&output, 44, 20, "search");
+    save_frame(&evidence, "02-first-s", &output, 44, 20);
+    input.write_all(b"earchDest42").unwrap();
+    wait_screen(&output, 44, 20, "/ searchDest42");
+    save_frame(&evidence, "03-complete-query", &output, 44, 20);
+    input.write_all(b"\x1b[27u").unwrap();
+    thread::sleep(Duration::from_millis(150));
+    input.write_all(b"\x1b[27u").unwrap();
+    wait_screen(&output, 44, 20, "+ new workspace");
+    save_frame(&evidence, "04-cancelled", &output, 44, 20);
+    input.write_all(b"\x1b[0;;20320:22909u").unwrap();
+    wait_screen(&output, 44, 20, "你好");
+    input.write_all(b"\x1b[200~ world 42\x1b[201~").unwrap();
+    wait_screen(&output, 44, 20, "你好 world 42");
+    save_frame(&evidence, "05-unicode-paste", &output, 44, 20);
+    input.write_all(b"\x1b[27u").unwrap();
+    thread::sleep(Duration::from_millis(150));
+    input.write_all(b"\x1b[27u").unwrap();
+    wait_screen(&output, 44, 20, "+ new workspace");
+    input.write_all(b"\x1b[200~SearchDest42\x1b[201~").unwrap();
+    wait_screen(&output, 44, 20, "/ SearchDest42");
+    input.write_all(b"\r").unwrap();
+    wait_screen(&output, 44, 20, "MOBILE_READY");
+    assert!(!screen(&output, 44, 20).contains("+ new workspace"));
+    save_frame(&evidence, "06-accepted", &output, 44, 20);
+    input.write_all(b"printf 'MOBILE_%s\\n' CLEAN\r").unwrap();
+    wait_screen(&output, 44, 20, "MOBILE_CLEAN");
+    save_frame(&evidence, "07-no-pane-forwarding", &output, 44, 20);
+    open(&mut input);
+    input.write_all(b"\x1b[200~mobile-dir42\x1b[201~").unwrap();
+    wait_screen(&output, 44, 20, "create workspace");
+    save_frame(&evidence, "08-directory-search", &output, 44, 20);
+    input.write_all(b"\r").unwrap();
+    assert!(
+        wait_until(Duration::from_secs(12), Duration::from_millis(40), || {
+            let frame = screen(&output, 44, 20);
+            frame.contains("switch")
+                && !frame.contains("+ new workspace")
+                && !frame.contains("Go to")
+        }),
+        "directory acceptance did not enter terminal: {}",
+        screen(&output, 44, 20)
+    );
+    input
+        .write_all(b"printf 'DIRECTORY_%s\\n' ACCEPTED\r")
+        .unwrap();
+    wait_screen(&output, 44, 20, "DIRECTORY_ACCEPTED");
+    save_frame(&evidence, "09-directory-accepted", &output, 44, 20);
+    fs::write(evidence.join("result.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "binary":env!("CARGO_BIN_EXE_herdr"), "geometry":"44x20", "created":created,
+        "inputs":["tap switch", "s", "earchDest42", "Esc twice", "kitty associated text 你好", "bracketed paste ' world 42'", "Esc twice", "bracketed paste SearchDest42", "Enter", "printf MOBILE_CLEAN", "tap switch", "bracketed paste mobile-dir42", "Enter", "printf DIRECTORY_ACCEPTED"],
+        "outcome":"search, cancel, Unicode, paste, pane and directory acceptance and no pane forwarding passed"
+    })).unwrap()).unwrap();
+    drop(input);
+    drop(client);
+    drop(server);
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile() {
     let _lock = test_lock();
     let base = unique_test_dir();

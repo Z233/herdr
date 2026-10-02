@@ -210,6 +210,14 @@ impl ClientShellState {
         self.overlay = Some(ClientShellOverlay::Navigator(navigator));
     }
 
+    pub(super) fn close_activated_navigator(&mut self) {
+        self.overlay = None;
+        if self.mode == ClientShellMode::Navigate && self.mobile_layout_active() {
+            self.mode = ClientShellMode::Terminal;
+            self.navigate_workspace_id = None;
+        }
+    }
+
     pub(super) fn move_navigator_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
             return;
@@ -338,7 +346,7 @@ impl ClientShellState {
             ),
         };
         if activated {
-            self.overlay = None;
+            self.close_activated_navigator();
         }
         outcome.repaint = true;
     }

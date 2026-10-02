@@ -513,7 +513,7 @@ impl ClientShellState {
                 Ok(ResponseResult::WorkspaceCreated { workspace, .. }),
             ) => {
                 let endpoint_id = request.endpoint_id;
-                self.overlay = None;
+                self.close_activated_navigator();
                 self.focus_or_activate(
                     endpoint_id,
                     ClientEndpointFocusTarget::Workspace(workspace.workspace_id),

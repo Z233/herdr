@@ -1,5 +1,231 @@
 use super::*;
 
+fn mobile_search_shell() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(44, 20).expect("mobile header");
+    let switch = state.hits.mobile_switch;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: switch.x,
+        row: switch.y,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    state.compose(44, 20).expect("mobile switcher");
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    state
+}
+
+fn mobile_search_query(state: &ClientShellState) -> (&str, bool) {
+    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_ref() else {
+        panic!("typing must open Navigator");
+    };
+    assert!(navigator.fork.hold.is_none());
+    (navigator.query.as_str(), navigator.search_focused)
+}
+
+fn mobile_search_press(
+    state: &mut ClientShellState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        code, modifiers,
+    ))])
+}
+
+#[test]
+fn mobile_type_search_first_key_precedes_plain_navigation_bindings() {
+    for ch in "abcdefghijklmnopqrstuvwxyz0123456789 /界".chars() {
+        let mut state = mobile_search_shell();
+        let result = mobile_search_press(&mut state, KeyCode::Char(ch), KeyModifiers::NONE);
+        assert_eq!(mobile_search_query(&state), (ch.to_string().as_str(), true));
+        assert_eq!(state.mode, ClientShellMode::Navigate);
+        assert!(result.repaint);
+        assert!(result.requests.is_empty(), "{ch}");
+        assert!(
+            result.actions.iter().all(|action| matches!(action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(&request.method, crate::api::schema::Method::WorkspaceSearch(_))
+            )),
+            "unexpected action for {ch}: {:?}",
+            result.actions
+        );
+    }
+    let mut state = mobile_search_shell();
+    mobile_search_press(&mut state, KeyCode::Char('S'), KeyModifiers::SHIFT);
+    assert_eq!(mobile_search_query(&state), ("S", true));
+}
+
+#[test]
+fn mobile_type_search_preserves_complete_first_text_and_paste() {
+    for event in [
+        RawInputEvent::Text(crate::input::TextCommit::new("你好 world 42")),
+        RawInputEvent::Paste("你好 world 42".into()),
+        RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char('x'), KeyModifiers::NONE)
+                .with_generated_text(Some("你好 world 42".into())),
+        ),
+    ] {
+        let mut state = mobile_search_shell();
+        let result = state.handle_raw_events(vec![event]);
+        assert_eq!(mobile_search_query(&state), ("你好 world 42", true));
+        assert!(result.repaint);
+        assert!(result.requests.is_empty());
+        assert!(
+            result.actions.iter().all(|action| matches!(action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(&request.method, crate::api::schema::Method::WorkspaceSearch(_))
+            )),
+            "unexpected actions: {:?}",
+            result.actions
+        );
+        mobile_search_press(&mut state, KeyCode::Left, KeyModifiers::NONE);
+        state.handle_raw_events(vec![RawInputEvent::Paste("界".into())]);
+        mobile_search_press(&mut state, KeyCode::Backspace, KeyModifiers::NONE);
+        state.handle_raw_events(vec![RawInputEvent::Text(crate::input::TextCommit::new(
+            "中",
+        ))]);
+        assert_eq!(mobile_search_query(&state), ("你好 world 4中2", true));
+    }
+}
+
+#[test]
+fn mobile_type_search_two_escapes_return_to_rendered_switcher() {
+    let mut state = mobile_search_shell();
+    mobile_search_press(&mut state, KeyCode::Char('s'), KeyModifiers::NONE);
+    let frame = state.compose(44, 20).expect("focused Navigator");
+    assert!(frame_rows(&frame).join("\n").contains("search"));
+    assert!(frame.cursor.as_ref().is_some_and(|cursor| cursor.visible));
+    let first = mobile_search_press(&mut state, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(mobile_search_query(&state), ("s", false));
+    let second = mobile_search_press(&mut state, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    let frame = state.compose(44, 20).expect("restored switcher");
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("+ new workspace") && text.contains("+ new tab"));
+    assert!(!state.hits.mobile_close.is_empty());
+    assert!(first.actions.is_empty() && first.requests.is_empty());
+    assert!(second.actions.is_empty() && second.requests.is_empty());
+}
+
+#[test]
+fn mobile_type_search_acceptance_focuses_result_and_enters_terminal() {
+    let mut state = mobile_search_shell();
+    state.handle_raw_events(vec![RawInputEvent::Paste("client-shell".into())]);
+    assert_eq!(mobile_search_query(&state), ("client-shell", true));
+    let frame = state.compose(44, 20).expect("matching destination");
+    assert!(frame_rows(&frame).join("\n").contains("client-shell"));
+    let result = mobile_search_press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(result.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneFocus(params)
+                if params.pane_id == "pane_1")
+    )));
+    assert!(result.requests.is_empty());
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.navigate_workspace_id.is_none());
+    state.compose(44, 20).expect("target terminal");
+    assert!(state.hits.mobile_close.is_empty());
+}
+
+#[test]
+fn mobile_type_search_keeps_directions_enter_escape_and_modifier_shortcuts() {
+    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+        let mut state = mobile_search_shell();
+        mobile_search_press(&mut state, code, KeyModifiers::NONE);
+        assert!(state.overlay.is_none());
+    }
+    for code in [KeyCode::Enter, KeyCode::Esc] {
+        let mut state = mobile_search_shell();
+        mobile_search_press(&mut state, code, KeyModifiers::NONE);
+        assert!(state.overlay.is_none());
+        assert_eq!(state.mode, ClientShellMode::Terminal);
+    }
+    for modifier in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::ALT,
+        KeyModifiers::SUPER,
+    ] {
+        let mut state = mobile_search_shell();
+        mobile_search_press(&mut state, KeyCode::Char('s'), modifier);
+        assert!(state.overlay.is_none());
+    }
+    let mut state = mobile_search_shell();
+    mobile_search_press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn mobile_type_search_excludes_desktop_terminal_popups_and_existing_overlays() {
+    let events = || {
+        vec![
+            RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+            )),
+            RawInputEvent::Text(crate::input::TextCommit::new("你好")),
+            RawInputEvent::Paste(" pasted ".into()),
+        ]
+    };
+    let mut state = mobile_search_shell();
+    state.compose(100, 30).expect("desktop");
+    state.handle_raw_events(vec![
+        RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('界'),
+            KeyModifiers::NONE,
+        )),
+        RawInputEvent::Text(crate::input::TextCommit::new("你好")),
+        RawInputEvent::Paste(" pasted ".into()),
+    ]);
+    assert!(state.overlay.is_none());
+    assert_eq!(state.mode, ClientShellMode::Navigate);
+    mobile_search_press(&mut state, KeyCode::Char('s'), KeyModifiers::NONE);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Settings(_))
+    ));
+
+    let mut state = mobile_search_shell();
+    state.mode = ClientShellMode::Terminal;
+    let result = state.handle_raw_events(events());
+    assert!(state.overlay.is_none());
+    assert!(
+        matches!(result.requests.as_slice(), [ClientMessage::ClientShellPaneInput { pane_id, events }]
+        if pane_id == "pane_1" && events.len() == 3)
+    );
+    assert!(result.actions.is_empty());
+
+    for pending in [false, true] {
+        let mut state = mobile_search_shell();
+        if pending {
+            state.popup_pending = true;
+        } else {
+            state.popup_terminal_id = Some("popup_7".into());
+        }
+        let result = state.handle_raw_events(events());
+        assert!(state.overlay.is_none());
+        if pending {
+            assert!(result.requests.is_empty());
+        } else {
+            assert!(
+                matches!(result.requests.as_slice(), [ClientMessage::ClientShellPopupInput { terminal_id, events }]
+                if terminal_id == "popup_7" && events.len() == 3)
+            );
+        }
+    }
+
+    let mut state = mobile_search_shell();
+    state.open_rename_workspace_overlay();
+    state.handle_raw_events(events());
+    assert!(matches!(state.overlay, Some(ClientShellOverlay::Rename(_))));
+}
+
 #[test]
 fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
     let mut config = ClientShellConfig::from_config(&Config::default());
