@@ -25,6 +25,11 @@ test-windows-input *args:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
+# Real client output via an SSH byte relay; requires access to the chosen host.
+[unix]
+test-kitty-zlib-ssh host='gz':
+    HERDR_KITTY_SSH_HOST={{quote(host)}} cargo test --locked --test client_mode kitty_zlib:: -- --ignored --nocapture --test-threads=1
+
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture

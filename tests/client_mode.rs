@@ -4,6 +4,8 @@
 
 #[path = "client_mode/fork_merge.rs"]
 mod fork_live_merge;
+#[path = "client_mode/kitty_zlib.rs"]
+mod kitty_zlib;
 pub mod support;
 #[path = "support/terminal_screen.rs"]
 mod terminal_screen;

@@ -119,6 +119,8 @@ The client compresses inline RGB/RGBA images with zlib before Base64 encoding wh
 
 This reduces the client-to-terminal transfer, including when the client runs across SSH. It does not reduce server-to-client surface frames or make text and input responsive during an image upload.
 
+Run `just test-kitty-zlib-ssh gz` to test a real isolated Herdr client through an SSH byte relay (replace `gz` with another SSH host). SSH compression is disabled. The test checks RGB/RGBA pixels and incompressible fallback with libghostty, then compares raw and compressed replays. It saves Kitty streams and byte counts, pixel hashes, and timings in a printed `/var/tmp/herdr-kitty-zlib-ssh-*` directory. These are local-to-relay-to-local measurements, not RootShell display latency; the images are synthetic, not a benchmark of an actual screenshot. The test is opt-in and does not run in normal CI.
+
 ---
 
 ## Configuration
