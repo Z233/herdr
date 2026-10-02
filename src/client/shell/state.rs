@@ -78,6 +78,10 @@ pub(super) enum ClientMobileTarget {
         endpoint_id: ClientEndpointId,
         pane_id: String,
     },
+    Pane {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+    },
     Menu(usize),
 }
 
@@ -900,6 +904,7 @@ pub(crate) struct ClientShellState {
     pub(super) reveal_mobile_workspace: bool,
     pub(super) mobile_switcher_suspended: bool,
     pub(super) mobile_expanded_groups: HashSet<(ClientEndpointId, String)>,
+    pub(super) mobile_pane_order: Option<super::mobile_panes::MobilePaneOrder>,
     pub(super) mobile_hold: Option<super::mobile_gesture::MobileSwitchGesture>,
     pub(super) mobile_drag: Option<ClientMobileTarget>,
     pub(super) zoom_map: super::zoom_map::ZoomMapState,
@@ -933,6 +938,7 @@ pub(crate) struct ClientShellState {
     pub(super) copy_mode: Option<ClientCopyModeState>,
     pub(super) pending_chord: Option<super::prefix_chord::ClientPrefixChord>,
     pub(super) workspace_mru: VecDeque<WorkspaceNavigationTarget>,
+    pub(super) pane_mru: VecDeque<super::mobile_panes::PaneNavigationTarget>,
     pub(super) copy_session_generation: u64,
     pub(super) copy_operation_in_flight: bool,
     pub(super) copy_operation_queue: VecDeque<ClientCopyOperation>,
@@ -1072,6 +1078,7 @@ impl ClientShellState {
             reveal_mobile_workspace: false,
             mobile_switcher_suspended: false,
             mobile_expanded_groups: HashSet::new(),
+            mobile_pane_order: None,
             mobile_hold: None,
             mobile_drag: None,
             zoom_map: super::zoom_map::ZoomMapState::default(),
@@ -1105,6 +1112,7 @@ impl ClientShellState {
             copy_mode: None,
             pending_chord: None,
             workspace_mru: VecDeque::new(),
+            pane_mru: VecDeque::new(),
             copy_session_generation: 0,
             copy_operation_in_flight: false,
             copy_operation_queue: VecDeque::new(),
@@ -1157,6 +1165,7 @@ impl ClientShellState {
         } else {
             self.mode = ClientShellMode::Navigate;
         }
+        self.prepare_mobile_pane_order();
         true
     }
 
@@ -1251,6 +1260,7 @@ impl ClientShellState {
         self.pending_chord = None;
         self.mobile_hold = None;
         self.mobile_drag = None;
+        self.mobile_pane_order = None;
         self.zoom_map = Default::default();
         self.zoom_map_request_generation = self.zoom_map_request_generation.saturating_add(1);
         self.hits = ShellHitMap::default();
@@ -1855,6 +1865,7 @@ impl ClientShellState {
         self.pane_surface = Some(surface);
         self.pane_surface_generation = self.active_snapshot_generation;
         self.record_presented_workspace();
+        self.record_presented_pane();
         self.invalidate_link_hover();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();

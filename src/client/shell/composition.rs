@@ -160,6 +160,7 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        self.prepare_mobile_pane_order();
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -638,6 +639,7 @@ impl ClientShellState {
                         .as_ref()
                         .filter(|_| valid_navigation_target),
                     target: self.mobile_drag.as_ref(),
+                    pane_order: self.mobile_pane_order.as_ref(),
                 },
                 &self.mobile_expanded_groups,
                 &mut self.mobile_switcher_scroll,

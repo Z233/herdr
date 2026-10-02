@@ -25,6 +25,7 @@ mod input_source;
 mod link_hover;
 mod mobile;
 mod mobile_gesture;
+mod mobile_panes;
 mod mouse;
 mod navigator;
 mod navigator_preview;

@@ -1,6 +1,213 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn fork_merge_mobile_panes_live_hold_focus_fold_and_reopen_recency() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let evidence = std::env::var_os("HERDR_MOBILE_ARTIFACT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/mobile-pane-evidence")
+        });
+    fs::create_dir_all(&evidence).unwrap();
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let api = runtime.join("herdr.sock");
+    let mut server = spawn_server_with_config(
+        &config,
+        &runtime,
+        &api,
+        &runtime.join("client.sock"),
+        "onboarding = false\n[ui.sidebar.agents]\nvisible = false\n",
+    );
+    wait_for_socket(&api, Duration::from_secs(10));
+    let mut records = Vec::new();
+    let mut request = |method: &str, params: Value| {
+        let message = serde_json::json!({"id":format!("mobile-{}", records.len()),"method":method,"params":params});
+        let response = send_json_request(&api, &message.to_string());
+        records.push(serde_json::json!({"request":message,"response":response}));
+        fs::write(
+            evidence.join("mobile-live-api.json"),
+            serde_json::to_vec_pretty(&records).unwrap(),
+        )
+        .unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+        response
+    };
+    let workspace = request(
+        "workspace.create",
+        serde_json::json!({"cwd":base,"label":"SwipeWorkspace"}),
+    );
+    let workspace_id = workspace["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tab = request(
+        "tab.create",
+        serde_json::json!({"workspace_id":workspace_id,"focus":false}),
+    );
+    let second = tab["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let split = request(
+        "pane.split",
+        serde_json::json!({"target_pane_id":second,"direction":"right","focus":false}),
+    );
+    let third = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (pane, label) in [(&first, "Alpha"), (&second, "Beta"), (&third, "Gamma")] {
+        request(
+            "pane.rename",
+            serde_json::json!({"pane_id":pane,"label":label}),
+        );
+    }
+    request("pane.focus", serde_json::json!({"pane_id":first}));
+    let client = spawn_client_process_with_args(&config, &runtime, &api, &["client"]);
+    client
+        ._master
+        .as_ref()
+        .unwrap()
+        .resize(PtySize {
+            cols: 45,
+            rows: 36,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
+    let mut input = client._master.as_ref().unwrap().take_writer().unwrap();
+    wait_screen(&output, 45, 36, "switch");
+    let mut sequences = Vec::new();
+    let mut mouse = |button: u8, x: u16, y: u16, release: bool| {
+        let sequence = format!(
+            "\x1b[<{button};{};{}{}",
+            x + 1,
+            y + 1,
+            if release { 'm' } else { 'M' }
+        );
+        input.write_all(sequence.as_bytes()).unwrap();
+        input.flush().unwrap();
+        sequences.push(sequence);
+        fs::write(
+            evidence.join("mobile-live-input.json"),
+            serde_json::to_vec_pretty(&sequences).unwrap(),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(150));
+    };
+    mouse(0, 36, 0, false);
+    wait_screen(&output, 45, 36, "close");
+    mouse(32, 5, 12, false);
+    mouse(32, 9, 12, false);
+    wait_screen(&output, 45, 36, "└─ Gamma · 2");
+    let expanded = screen(&output, 45, 36);
+    save_frame(&evidence, "mobile-live-expanded", &output, 45, 36);
+    assert!(
+        expanded.contains("└─ Alpha") && expanded.contains("└─ Beta · 1"),
+        "{expanded}"
+    );
+    assert!(expanded.find("└─ Alpha").unwrap() < expanded.find("└─ Beta · 1").unwrap());
+    assert!(expanded.find("└─ Beta · 1").unwrap() < expanded.find("└─ Gamma · 2").unwrap());
+    mouse(32, 9, 16, false);
+    mouse(32, 5, 16, false);
+    assert!(!screen(&output, 45, 36).contains("└─"));
+    save_frame(&evidence, "mobile-live-folded", &output, 45, 36);
+    mouse(32, 9, 16, false);
+    wait_screen(&output, 45, 36, "└─ Gamma · 2");
+    // Clamp at the last pane, then append a pane without moving the pointer.
+    mouse(32, 9, 28, false);
+    save_frame(
+        &evidence,
+        "mobile-live-selected-before-append",
+        &output,
+        45,
+        36,
+    );
+    let appended = request(
+        "tab.create",
+        serde_json::json!({"workspace_id":workspace_id,"focus":false}),
+    );
+    let fourth = appended["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    request(
+        "pane.rename",
+        serde_json::json!({"pane_id":fourth,"label":"Delta"}),
+    );
+    wait_screen(&output, 45, 36, "└─ Delta");
+    save_frame(
+        &evidence,
+        "mobile-live-appended-during-hold",
+        &output,
+        45,
+        36,
+    );
+    mouse(0, 9, 28, true);
+    request(
+        "pane.list",
+        serde_json::json!({"workspace_id":workspace_id}),
+    );
+    assert!(
+        wait_until(Duration::from_secs(12), Duration::from_millis(40), || {
+            let response = send_json_request(&api, &serde_json::json!({
+            "id":"mobile-focus-proof","method":"pane.list","params":{"workspace_id":workspace_id}
+        }).to_string());
+            response["result"]["panes"].as_array().is_some_and(|panes| {
+                panes
+                    .iter()
+                    .any(|pane| pane["pane_id"] == third && pane["focused"] == true)
+            })
+        }),
+        "hold release did not focus exact cross-tab pane"
+    );
+    request(
+        "pane.list",
+        serde_json::json!({"workspace_id":workspace_id}),
+    );
+    wait_screen(&output, 45, 36, "switch");
+    assert!(!screen(&output, 45, 36).contains("close"));
+    save_frame(&evidence, "mobile-live-focused", &output, 45, 36);
+    mouse(0, 36, 0, false);
+    wait_screen(&output, 45, 36, "close");
+    mouse(0, 36, 0, true);
+    wait_screen(&output, 45, 36, "└─ Gamma · 2");
+    let reopened = screen(&output, 45, 36);
+    assert!(reopened.find("└─ Gamma · 2").unwrap() < reopened.find("└─ Alpha").unwrap());
+    assert!(reopened.find("└─ Alpha").unwrap() < reopened.find("└─ Beta · 1").unwrap());
+    save_frame(&evidence, "mobile-live-reopened-mru", &output, 45, 36);
+    // Another client's focus changes the snapshot, not this opening's order.
+    request("pane.focus", serde_json::json!({"pane_id":second}));
+    thread::sleep(Duration::from_millis(500));
+    let frozen = screen(&output, 45, 36);
+    assert!(frozen.find("└─ Gamma · 2").unwrap() < frozen.find("└─ Alpha").unwrap());
+    save_frame(&evidence, "mobile-live-frozen-refresh", &output, 45, 36);
+    request(
+        "pane.list",
+        serde_json::json!({"workspace_id":workspace_id}),
+    );
+    drop(input);
+    drop(client);
+    if let Some(pid) = server.child.process_id() {
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+    assert!(
+        wait_until(Duration::from_secs(5), Duration::from_millis(20), || {
+            server.child.try_wait().unwrap().is_some()
+        }),
+        "isolated server did not shut down"
+    );
+    drop(server);
+    cleanup_test_base(&base);
+}
+
 fn screen(output: &SharedOutput, cols: u16, rows: u16) -> String {
     terminal_screen::text(&output.lock().unwrap().bytes, cols, rows)
 }

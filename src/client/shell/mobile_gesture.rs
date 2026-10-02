@@ -6,6 +6,7 @@ struct MobileSelection {
     target: ClientMobileTarget,
     boot_id: String,
     generation: Option<u64>,
+    workspace_id: String,
 }
 
 pub(super) struct MobileSwitchGesture {
@@ -13,11 +14,13 @@ pub(super) struct MobileSwitchGesture {
     selected: MobileSelection,
     origin: Option<(u16, u16)>,
     horizontal_origin: (u16, u16),
+    last_point: Option<(u16, u16)>,
     effective: bool,
 }
 
 impl ClientShellState {
     pub(super) fn arm_mobile_gesture(&mut self) {
+        self.prepare_mobile_pane_order();
         self.mobile_drag = None;
         self.mobile_hold = self.focused_navigation_target().and_then(|target| {
             let selected = self.mobile_selection(ClientMobileTarget::Workspace {
@@ -29,6 +32,7 @@ impl ClientShellState {
                 selected,
                 origin: None,
                 horizontal_origin: (0, 0),
+                last_point: None,
                 effective: false,
             })
         });
@@ -37,29 +41,64 @@ impl ClientShellState {
     fn mobile_selection(&self, target: ClientMobileTarget) -> Option<MobileSelection> {
         let endpoint_id = match &target {
             ClientMobileTarget::Workspace { endpoint_id, .. }
-            | ClientMobileTarget::Tab { endpoint_id, .. } => endpoint_id,
+            | ClientMobileTarget::Tab { endpoint_id, .. }
+            | ClientMobileTarget::Pane { endpoint_id, .. } => endpoint_id,
             _ => return None,
         };
         let endpoint = self
             .endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)?;
+        if endpoint.status != ClientEndpointStatus::Online {
+            return None;
+        }
         let snapshot = endpoint.snapshot.as_deref()?;
-        let exists = match &target {
-            ClientMobileTarget::Workspace { workspace_id, .. } => snapshot
-                .workspaces
+        let workspace_id = match &target {
+            ClientMobileTarget::Workspace { workspace_id, .. } => workspace_id.clone(),
+            ClientMobileTarget::Tab { tab_id, .. } => snapshot
+                .tabs
                 .iter()
-                .any(|workspace| &workspace.workspace_id == workspace_id),
-            ClientMobileTarget::Tab { tab_id, .. } => {
-                snapshot.tabs.iter().any(|tab| &tab.tab_id == tab_id)
+                .find(|tab| &tab.tab_id == tab_id)?
+                .workspace_id
+                .clone(),
+            ClientMobileTarget::Pane { pane_id, .. } => {
+                let pane = snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| &pane.pane_id == pane_id)?;
+                let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == pane.tab_id)?;
+                if tab.workspace_id != pane.workspace_id {
+                    return None;
+                }
+                pane.workspace_id.clone()
             }
-            _ => false,
+            _ => return None,
         };
-        exists.then(|| MobileSelection {
-            target,
-            boot_id: snapshot.boot_id.clone(),
-            generation: endpoint.snapshot_generation,
-        })
+        snapshot
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == workspace_id)
+            .then(|| MobileSelection {
+                target,
+                boot_id: snapshot.boot_id.clone(),
+                generation: endpoint.snapshot_generation,
+                workspace_id,
+            })
+    }
+
+    pub(super) fn reconcile_mobile_gesture(&mut self) {
+        if self.mobile_hold.as_ref().is_some_and(|gesture| {
+            self.mobile_selection(gesture.anchor.target.clone())
+                .as_ref()
+                != Some(&gesture.anchor)
+                || self
+                    .mobile_selection(gesture.selected.target.clone())
+                    .as_ref()
+                    != Some(&gesture.selected)
+        }) {
+            self.mobile_hold = None;
+            self.mobile_drag = None;
+        }
     }
 
     fn mobile_parent(&self, target: &ClientMobileTarget) -> Option<(ClientEndpointId, String)> {
@@ -80,6 +119,10 @@ impl ClientShellState {
                     .as_deref()?;
                 let tab = snapshot.tabs.iter().find(|tab| &tab.tab_id == tab_id)?;
                 Some((endpoint_id.clone(), tab.workspace_id.clone()))
+            }
+            ClientMobileTarget::Pane { endpoint_id, .. } => {
+                let selected = self.mobile_selection(target.clone())?;
+                Some((endpoint_id.clone(), selected.workspace_id))
             }
             _ => None,
         }
@@ -102,17 +145,14 @@ impl ClientShellState {
                 .mobile_expanded_groups
                 .contains(&(endpoint.endpoint_id.clone(), target.workspace_id.clone()))
             {
-                targets.extend(
-                    endpoint
-                        .snapshot
-                        .tabs
-                        .iter()
-                        .filter(|tab| tab.workspace_id == target.workspace_id)
-                        .map(|tab| ClientMobileTarget::Tab {
-                            endpoint_id: endpoint.endpoint_id.clone(),
-                            tab_id: tab.tab_id.clone(),
-                        }),
-                );
+                if let Some(panes) = self.mobile_pane_order.as_ref().and_then(|order| {
+                    order.get(&(endpoint.endpoint_id.clone(), target.workspace_id.clone()))
+                }) {
+                    targets.extend(panes.iter().map(|pane| ClientMobileTarget::Pane {
+                        endpoint_id: pane.endpoint_id.clone(),
+                        pane_id: pane.pane_id.clone(),
+                    }));
+                }
             }
         }
         targets
@@ -160,7 +200,12 @@ impl ClientShellState {
                 {
                     let group = (endpoint_id.clone(), workspace_id.clone());
                     if dx > 0 {
-                        self.mobile_expanded_groups.insert(group);
+                        if matches!(
+                            gesture.selected.target,
+                            ClientMobileTarget::Workspace { .. }
+                        ) {
+                            self.mobile_expanded_groups.insert(group);
+                        }
                     } else {
                         self.mobile_expanded_groups.remove(&group);
                         if let Some(parent) = self.mobile_selection(ClientMobileTarget::Workspace {
@@ -175,7 +220,11 @@ impl ClientShellState {
                     gesture.horizontal_origin = point;
                     gesture.effective = true;
                 }
-            } else {
+            } else if gesture.last_point.is_none_or(|last| {
+                (i32::from(point.1) - i32::from(origin.1)) / 2
+                    != (i32::from(last.1) - i32::from(origin.1)) / 2
+            }) {
+                // A refresh must not turn an unchanged release position into another pane.
                 let targets = self.mobile_navigation_targets();
                 if let Some(index) = targets
                     .iter()
@@ -193,6 +242,10 @@ impl ClientShellState {
                             gesture.selected = selected;
                             gesture.effective = true;
                             gesture.horizontal_origin = point;
+                        } else {
+                            self.mobile_drag = None;
+                            outcome.repaint = true;
+                            return true;
                         }
                     }
                 }
@@ -201,6 +254,7 @@ impl ClientShellState {
             gesture.origin = Some(point);
             gesture.horizontal_origin = point;
         }
+        gesture.last_point = Some(point);
         if gesture.effective {
             self.mobile_drag = Some(gesture.selected.target.clone());
             if let Some((endpoint_id, workspace_id)) = self.mobile_parent(&gesture.selected.target)

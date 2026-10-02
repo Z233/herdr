@@ -391,6 +391,7 @@ pub(super) struct MobileSwitcherView<'a> {
     pub(super) workspace_targets: &'a [WorkspaceNavigationTarget],
     pub(super) workspace: Option<&'a WorkspaceNavigationTarget>,
     pub(super) target: Option<&'a ClientMobileTarget>,
+    pub(super) pane_order: Option<&'a super::mobile_panes::MobilePaneOrder>,
 }
 
 pub(super) fn render_mobile_switcher(
@@ -410,6 +411,7 @@ pub(super) fn render_mobile_switcher(
         workspace_targets,
         workspace: selected_workspace_id,
         target: selected_target,
+        pane_order,
     } = view;
     if area.is_empty() {
         return;
@@ -481,8 +483,12 @@ pub(super) fn render_mobile_switcher(
         workspace_targets,
         active_endpoint_id,
         config,
-        selected_workspace_id,
+        selected_workspace_id.filter(|_| {
+            selected_target
+                .is_none_or(|target| matches!(target, ClientMobileTarget::Workspace { .. }))
+        }),
         expanded_groups,
+        pane_order,
         viewport.width.saturating_sub(1),
     );
     let total_rows = items.iter().map(|item| item.lines.len()).sum::<usize>();
@@ -616,6 +622,157 @@ fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
     }
 }
 
+fn mobile_pane_items(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    expanded_groups: &HashSet<(ClientEndpointId, String)>,
+    order: Option<&super::mobile_panes::MobilePaneOrder>,
+    content_width: u16,
+) -> HashMap<(ClientEndpointId, String), Vec<MobileItem>> {
+    let mut groups = HashMap::new();
+    let Some(order) = order else { return groups };
+    let palette = &config.palette;
+    for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
+        if !expanded_groups
+            .iter()
+            .any(|(id, _)| id == endpoint.endpoint_id)
+        {
+            continue;
+        }
+        let snapshot = endpoint.snapshot;
+        let workspaces = snapshot
+            .workspaces
+            .iter()
+            .map(|workspace| (workspace.workspace_id.as_str(), workspace))
+            .collect::<HashMap<_, _>>();
+        let tabs = snapshot
+            .tabs
+            .iter()
+            .map(|tab| (tab.tab_id.as_str(), tab))
+            .collect::<HashMap<_, _>>();
+        let agents = snapshot
+            .agents
+            .iter()
+            .map(|agent| (agent.pane_id.as_str(), agent))
+            .collect::<HashMap<_, _>>();
+        let mut tab_counts = HashMap::new();
+        for tab in &snapshot.tabs {
+            *tab_counts
+                .entry(tab.workspace_id.as_str())
+                .or_insert(0usize) += 1;
+        }
+        let mut panes_by_tab = HashMap::new();
+        for pane in &snapshot.panes {
+            panes_by_tab
+                .entry(pane.tab_id.as_str())
+                .or_insert_with(Vec::new)
+                .push(pane);
+        }
+        let panes = panes_by_tab
+            .values()
+            .flat_map(|panes| {
+                panes
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, pane)| (pane.pane_id.as_str(), (*pane, index, panes.len())))
+            })
+            .collect::<HashMap<_, _>>();
+        for group in expanded_groups
+            .iter()
+            .filter(|(id, _)| id == endpoint.endpoint_id)
+        {
+            let (Some(targets), Some(workspace)) =
+                (order.get(group), workspaces.get(group.1.as_str()))
+            else {
+                continue;
+            };
+            let mut children = Vec::with_capacity(targets.len());
+            for target in targets {
+                let Some((pane, index, count)) = panes.get(target.pane_id.as_str()) else {
+                    continue;
+                };
+                let Some(tab) = tabs.get(pane.tab_id.as_str()) else {
+                    continue;
+                };
+                let agent = agents.get(target.pane_id.as_str()).copied();
+                let label = super::aggregate_navigation::navigator_pane_label(
+                    workspace,
+                    tab,
+                    pane,
+                    agent,
+                    tab_counts
+                        .get(group.1.as_str())
+                        .copied()
+                        .unwrap_or_default()
+                        > 1,
+                    *count,
+                    *index,
+                );
+                let background = if endpoint.endpoint_id == active_endpoint_id
+                    && snapshot.focused_pane_id.as_deref() == Some(&pane.pane_id)
+                {
+                    palette.surface_dim
+                } else {
+                    palette.panel_bg
+                };
+                let foreground = if endpoint.stale() {
+                    palette.overlay0
+                } else {
+                    palette.text
+                };
+                let dim = if endpoint.stale() {
+                    Modifier::DIM
+                } else {
+                    Modifier::empty()
+                };
+                let detail = pane
+                    .foreground_cwd
+                    .as_deref()
+                    .or(pane.cwd.as_deref())
+                    .unwrap_or_default();
+                children.push(MobileItem {
+                    lines: vec![
+                        Line::from(Span::styled(
+                            format!(
+                                "     └─ {}",
+                                crate::ui::truncate_end(
+                                    &label,
+                                    usize::from(content_width.saturating_sub(8))
+                                )
+                            ),
+                            Style::default()
+                                .fg(foreground)
+                                .bg(background)
+                                .add_modifier(dim),
+                        )),
+                        Line::from(Span::styled(
+                            format!(
+                                "        {}",
+                                crate::ui::truncate_end(
+                                    detail,
+                                    usize::from(content_width.saturating_sub(8))
+                                )
+                            ),
+                            Style::default()
+                                .fg(palette.overlay0)
+                                .bg(background)
+                                .add_modifier(dim),
+                        )),
+                    ],
+                    background,
+                    target: Some(ClientMobileTarget::Pane {
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        pane_id: pane.pane_id.clone(),
+                    }),
+                });
+            }
+            groups.insert(group.clone(), children);
+        }
+    }
+    groups
+}
+
 fn mobile_items(
     snapshot: &ClientShellSnapshot,
     endpoints: &[ClientShellEndpoint],
@@ -624,10 +781,19 @@ fn mobile_items(
     config: &ClientShellConfig,
     selected_workspace_id: Option<&WorkspaceNavigationTarget>,
     expanded_groups: &HashSet<(ClientEndpointId, String)>,
+    pane_order: Option<&super::mobile_panes::MobilePaneOrder>,
     content_width: u16,
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
     let mut items = Vec::new();
+    let mut pane_items = mobile_pane_items(
+        endpoints,
+        active_endpoint_id,
+        config,
+        expanded_groups,
+        pane_order,
+        content_width,
+    );
     if endpoints.len() > 1 {
         items.push(MobileItem::section("machines", palette));
         for endpoint in endpoints {
@@ -910,32 +1076,10 @@ fn mobile_items(
                 workspace_id: workspace.workspace_id.clone(),
             }),
         });
-        if expanded_groups.contains(&(endpoint.endpoint_id.clone(), workspace.workspace_id.clone()))
+        if let Some(children) =
+            pane_items.remove(&(endpoint.endpoint_id.clone(), workspace.workspace_id.clone()))
         {
-            for tab in endpoint
-                .snapshot
-                .tabs
-                .iter()
-                .filter(|tab| tab.workspace_id == workspace.workspace_id)
-            {
-                items.push(MobileItem {
-                    lines: vec![Line::from(Span::styled(
-                        format!(
-                            "     └─ {}",
-                            crate::ui::truncate_end(
-                                &tab.label,
-                                usize::from(content_width.saturating_sub(8))
-                            )
-                        ),
-                        Style::default().fg(foreground).bg(palette.panel_bg),
-                    ))],
-                    background: palette.panel_bg,
-                    target: Some(ClientMobileTarget::Tab {
-                        endpoint_id: endpoint.endpoint_id.clone(),
-                        tab_id: tab.tab_id.clone(),
-                    }),
-                });
-            }
+            items.extend(children);
         }
     }
 
@@ -1125,6 +1269,10 @@ impl ClientShellState {
                 }
             }
             Some(ClientMobileTarget::Agent {
+                endpoint_id,
+                pane_id,
+            })
+            | Some(ClientMobileTarget::Pane {
                 endpoint_id,
                 pane_id,
             }) => {
