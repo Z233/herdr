@@ -69,6 +69,222 @@ fn open(state: &mut ClientShellState) {
     event(state, MouseEventKind::Drag(MouseButton::Left), 5, 20);
 }
 
+fn edge_scroll_state() -> ClientShellState {
+    let mut state = state();
+    let mut projected = projection();
+    let workspace = projected.workspaces[0].clone();
+    for number in 2..=20 {
+        projected.workspaces.push(ClientShellWorkspace {
+            workspace_id: format!("ws_{number}"),
+            label: format!("workspace-{number}"),
+            number,
+            focused: false,
+            ..workspace.clone()
+        });
+    }
+    state.set_snapshot(Box::new(projected));
+    state.compose(45, 14).unwrap();
+    let button = state.hits.mobile_switch;
+    event(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        button.x,
+        button.y,
+    );
+    state.compose(45, 14).unwrap();
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 7);
+    state
+}
+
+fn edge_frame(state: &mut ClientShellState, name: &str) {
+    let frame = state.compose(45, 14).unwrap();
+    if let Ok(directory) = std::env::var("HERDR_MOBILE_ARTIFACT_DIR") {
+        std::fs::write(
+            std::path::Path::new(&directory).join(format!("{name}.txt")),
+            frame_rows(&frame).join("\n"),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn mobile_edge_scroll_down_then_up_same_hold_and_exact_release() {
+    let mut state = edge_scroll_state();
+    edge_frame(&mut state, "edge-before");
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 13);
+    let start = std::time::Instant::now();
+    assert!(!state.tick_mobile_gesture(start));
+    for step in 1..=24 {
+        state.tick_mobile_gesture(start + std::time::Duration::from_millis(step * 200));
+        edge_frame(&mut state, "edge-bottom");
+    }
+    assert!(state.mobile_switcher_scroll > 0);
+    assert!(
+        matches!(state.mobile_drag.as_ref(), Some(ClientMobileTarget::Workspace { workspace_id, .. }) if workspace_id == "ws_20")
+    );
+    let bottom_scroll = state.mobile_switcher_scroll;
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_secs(6)));
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 3);
+    let up_start = start + std::time::Duration::from_secs(7);
+    for step in 1..=24 {
+        state.tick_mobile_gesture(up_start + std::time::Duration::from_millis(step * 200));
+        edge_frame(&mut state, "edge-top");
+    }
+    assert!(state.mobile_switcher_scroll < bottom_scroll);
+    assert!(!state.tick_mobile_gesture(up_start + std::time::Duration::from_secs(6)));
+    let selected = state.mobile_drag.clone().expect("held selection");
+    assert!(
+        matches!(&selected, ClientMobileTarget::Workspace { workspace_id, .. } if workspace_id == "ws_1")
+    );
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(_, target)| target == &selected));
+    let released = event(&mut state, MouseEventKind::Up(MouseButton::Left), 5, 3);
+    assert!(released.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { endpoint_id: ClientEndpointId::Local, request, .. }
+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == "ws_1")
+    )));
+    assert!(!state.tick_mobile_gesture(up_start + std::time::Duration::from_secs(10)));
+}
+
+#[test]
+fn mobile_edge_scroll_stops_in_middle_and_release_keeps_selection() {
+    let mut state = edge_scroll_state();
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 13);
+    let start = std::time::Instant::now();
+    assert!(state.tick_mobile_gesture(start + std::time::Duration::from_millis(200)));
+    edge_frame(&mut state, "edge-one-step");
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_millis(201)));
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 7);
+    edge_frame(&mut state, "edge-middle");
+    let selected = state.mobile_drag.clone().unwrap();
+    let scroll = state.mobile_switcher_scroll;
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_secs(10)));
+    assert_eq!(state.mobile_drag.as_ref(), Some(&selected));
+    assert_eq!(state.mobile_switcher_scroll, scroll);
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(_, target)| target == &selected));
+    let released = event(&mut state, MouseEventKind::Up(MouseButton::Left), 5, 7);
+    let ClientMobileTarget::Workspace { workspace_id, .. } = selected else {
+        panic!("workspace selection")
+    };
+    assert!(released.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { endpoint_id: ClientEndpointId::Local, request, .. }
+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target) if target.workspace_id == workspace_id)
+    )));
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_secs(11)));
+}
+
+#[test]
+fn mobile_edge_scroll_rejects_restarted_endpoint_and_preserves_pane_expansion() {
+    let mut state = edge_scroll_state();
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 9, 7);
+    edge_frame(&mut state, "edge-expanded");
+    assert_eq!(leaves(&mut state, "edge-expanded-leaves"), labels());
+    state.compose(45, 14).unwrap();
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 13, 13);
+    let start = std::time::Instant::now();
+    assert!(state.tick_mobile_gesture(start + std::time::Duration::from_millis(200)));
+    let mut projected = state.snapshot.as_deref().unwrap().clone();
+    projected.boot_id = "restarted".into();
+    refresh(&mut state, projected);
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_secs(1)));
+    let released = event(&mut state, MouseEventKind::Up(MouseButton::Left), 13, 13);
+    assert!(released.actions.is_empty());
+}
+
+#[test]
+fn mobile_edge_scroll_skips_cached_offline_workspace_in_both_directions() {
+    use crate::client::endpoint::{ProfileId, SavedSshEndpoint};
+
+    let (mut state, offline) = super::fork_navigator::two_endpoints();
+    let profiles = [
+        SavedSshEndpoint {
+            id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "Offline".into(),
+            target: "offline@localhost".into(),
+            session: "test".into(),
+            enabled: true,
+        },
+        SavedSshEndpoint {
+            id: ProfileId::parse("1123456789abcdef0123456789abcdef").unwrap(),
+            label: "Online".into(),
+            target: "online@localhost".into(),
+            session: "test".into(),
+            enabled: true,
+        },
+    ];
+    let online = ClientEndpointId::Ssh(profiles[1].id.clone());
+    state.set_endpoint_catalog(&profiles);
+    state.set_endpoint_status(&offline, ClientEndpointStatus::Reconnecting);
+    state.set_endpoint_status(&online, ClientEndpointStatus::Online);
+    let mut projected = snapshot();
+    projected.boot_id = "third-boot".into();
+    state.set_endpoint_snapshot(&online, Box::new(projected));
+    state.compose(45, 60).unwrap();
+    let button = state.hits.mobile_switch;
+    event(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        button.x,
+        button.y,
+    );
+    state.compose(45, 60).unwrap();
+    let displayed_endpoints: Vec<_> = state
+        .hits
+        .mobile_targets
+        .iter()
+        .filter_map(|(_, target)| match target {
+            ClientMobileTarget::Workspace { endpoint_id, .. } => Some(endpoint_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        displayed_endpoints,
+        [ClientEndpointId::Local, offline, online.clone()]
+    );
+    state.compose(45, 6).unwrap();
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 5);
+    let start = std::time::Instant::now();
+    assert!(state.tick_mobile_gesture(start + std::time::Duration::from_millis(200)));
+    state.compose(45, 6).unwrap();
+    let remote_target = ClientMobileTarget::Workspace {
+        endpoint_id: online,
+        workspace_id: "ws_1".into(),
+    };
+    assert_eq!(state.mobile_drag.as_ref(), Some(&remote_target));
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(_, target)| target == &remote_target));
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_millis(400)));
+    // One row avoids a direct vertical step while moving into the top edge band.
+    event(&mut state, MouseEventKind::Drag(MouseButton::Left), 5, 4);
+    assert!(state.tick_mobile_gesture(start + std::time::Duration::from_millis(600)));
+    state.compose(45, 6).unwrap();
+    let local_target = ClientMobileTarget::Workspace {
+        endpoint_id: ClientEndpointId::Local,
+        workspace_id: "ws_1".into(),
+    };
+    assert_eq!(state.mobile_drag.as_ref(), Some(&local_target));
+    assert!(state
+        .hits
+        .mobile_targets
+        .iter()
+        .any(|(_, target)| target == &local_target));
+    assert!(!state.tick_mobile_gesture(start + std::time::Duration::from_millis(800)));
+    let released = event(&mut state, MouseEventKind::Up(MouseButton::Left), 5, 4);
+    assert!(released.actions.iter().any(|action| matches!(action,
+        ClientShellAction::ActivateEndpoint { endpoint_id: ClientEndpointId::Local, target: Some(ClientEndpointFocusTarget::Workspace(id)) } if id == "ws_1"
+    )));
+}
+
 fn expand(state: &mut ClientShellState) {
     event(state, MouseEventKind::Drag(MouseButton::Left), 9, 20);
 }

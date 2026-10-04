@@ -1,5 +1,8 @@
 use super::*;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use std::time::{Duration, Instant};
+
+const MOBILE_EDGE_INTERVAL: Duration = Duration::from_millis(150);
 
 #[derive(Clone, PartialEq, Eq)]
 struct MobileSelection {
@@ -16,9 +19,97 @@ pub(super) struct MobileSwitchGesture {
     horizontal_origin: (u16, u16),
     last_point: Option<(u16, u16)>,
     effective: bool,
+    edge: Option<(isize, Instant)>,
 }
 
 impl ClientShellState {
+    fn mobile_edge_direction(&self, point: (u16, u16)) -> Option<isize> {
+        if self.overlay.is_some()
+            || self.hits.mobile_close.is_empty()
+            || self.hits.mobile_max_scroll == 0
+        {
+            return None;
+        }
+        let top = self.hits.mobile_close.bottom().saturating_add(1);
+        let bottom = self
+            .hits
+            .mobile_targets
+            .iter()
+            .map(|(rect, _)| rect.bottom())
+            .max()?;
+        let (content, _) = self.hits.mobile_targets.first()?;
+        if point.0 < content.x || point.0 >= content.right() || point.1 < top || point.1 >= bottom {
+            return None;
+        }
+        if point.1 <= top.saturating_add(1) {
+            Some(-1)
+        } else if point.1 >= bottom.saturating_sub(2) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    fn project_mobile_gesture(&mut self, gesture: &MobileSwitchGesture) {
+        if gesture.effective {
+            self.mobile_drag = Some(gesture.selected.target.clone());
+            if let Some((endpoint_id, workspace_id)) = self.mobile_parent(&gesture.selected.target)
+            {
+                self.navigate_workspace_id = self.navigation_target(&endpoint_id, &workspace_id);
+                self.reveal_mobile_workspace = true;
+            }
+        }
+    }
+
+    pub(crate) fn tick_mobile_gesture(&mut self, now: Instant) -> bool {
+        let Some((direction, deadline)) =
+            self.mobile_hold.as_ref().and_then(|gesture| gesture.edge)
+        else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.reconcile_mobile_gesture();
+        let Some(mut gesture) = self.mobile_hold.take() else {
+            return true;
+        };
+        if gesture
+            .last_point
+            .and_then(|point| self.mobile_edge_direction(point))
+            != Some(direction)
+        {
+            gesture.edge = None;
+            self.mobile_hold = Some(gesture);
+            return false;
+        }
+        gesture.edge = Some((direction, now + MOBILE_EDGE_INTERVAL));
+        let targets = self.mobile_navigation_targets();
+        let selected = targets
+            .iter()
+            .position(|target| *target == gesture.selected.target)
+            .and_then(|mut index| loop {
+                index = index.checked_add_signed(direction)?;
+                let target = targets.get(index)?;
+                if let Some(selected) = self.mobile_selection(target.clone()) {
+                    break Some(selected);
+                }
+            });
+        let changed = selected.is_some();
+        if let Some(selected) = selected {
+            gesture.selected = selected;
+            gesture.anchor = gesture.selected.clone();
+            gesture.origin = gesture.last_point;
+            if let Some(point) = gesture.last_point {
+                gesture.horizontal_origin = point;
+            }
+            gesture.effective = true;
+            self.project_mobile_gesture(&gesture);
+        }
+        self.mobile_hold = Some(gesture);
+        changed
+    }
+
     pub(super) fn arm_mobile_gesture(&mut self) {
         self.prepare_mobile_pane_order();
         self.mobile_drag = None;
@@ -34,6 +125,7 @@ impl ClientShellState {
                 horizontal_origin: (0, 0),
                 last_point: None,
                 effective: false,
+                edge: None,
             })
         });
     }
@@ -255,20 +347,20 @@ impl ClientShellState {
             gesture.horizontal_origin = point;
         }
         gesture.last_point = Some(point);
-        if gesture.effective {
-            self.mobile_drag = Some(gesture.selected.target.clone());
-            if let Some((endpoint_id, workspace_id)) = self.mobile_parent(&gesture.selected.target)
-            {
-                self.navigate_workspace_id = self.navigation_target(&endpoint_id, &workspace_id);
-                self.reveal_mobile_workspace = true;
-            }
-        }
+        self.project_mobile_gesture(&gesture);
         if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
             self.mobile_drag = None;
             if gesture.effective {
                 self.activate_mobile_target(Some(gesture.selected.target), outcome);
             }
         } else {
+            let direction = gesture
+                .origin
+                .and_then(|_| self.mobile_edge_direction(point));
+            if gesture.edge.map(|(direction, _)| direction) != direction {
+                gesture.edge =
+                    direction.map(|direction| (direction, Instant::now() + MOBILE_EDGE_INTERVAL));
+            }
             self.mobile_hold = Some(gesture);
         }
         outcome.repaint = true;
