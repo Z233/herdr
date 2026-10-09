@@ -1653,12 +1653,9 @@ impl ClientShellState {
                             }
                         }
                     } else if super::contains(self.hits.navigator_search, point) {
-                        if let Some(ClientShellOverlay::Navigator(navigator)) =
-                            self.overlay.as_mut()
-                        {
-                            navigator.search_focused = true;
-                            navigator.filter = None;
-                        }
+                        // Same transition as keyboard entry: latches release
+                        // acceptance off for this opening.
+                        self.enter_switcher_search();
                         outcome.repaint = true;
                     } else if let Some((_, target)) = row_hit {
                         if let Some(ClientShellOverlay::Navigator(navigator)) =

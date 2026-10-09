@@ -9,6 +9,47 @@ pub(super) struct NavigatorState {
     pub(super) quick_switch: bool,
     pub(super) scopes: HashMap<ClientEndpointId, (String, Option<u64>)>,
     pub(super) directory: NavigatorDirectory,
+    pub(super) switcher_search: Option<SwitcherSearch>,
+}
+
+/// Per-open Workspace Switcher search on the shared Navigator controller. Its
+/// presence permanently latches modifier-release acceptance off for the
+/// opening; `active` distinguishes the search phase from the desktop
+/// restored-list phase. Mobile search removes the controller on first Esc.
+#[derive(Debug)]
+pub(super) struct SwitcherSearch {
+    pub(super) origin: SwitcherOrigin,
+    pub(super) active: bool,
+}
+
+#[derive(Debug)]
+pub(super) enum SwitcherOrigin {
+    Desktop(DesktopSwitcherSearch),
+    Mobile(MobileSwitcherSearch),
+}
+
+/// Desktop hold-opening return state: list identity retained separately from
+/// release acceptance, which stays latched off until the overlay closes.
+#[derive(Debug)]
+pub(super) struct DesktopSwitcherSearch {
+    pub(super) saved_selected: Option<ClientNavigatorTarget>,
+    /// Saved row's workspace ancestor at search entry; survives the row's own
+    /// removal from later snapshots.
+    pub(super) saved_parent: Option<ClientNavigatorTarget>,
+    pub(super) saved_expanded: HashSet<(ClientEndpointId, String)>,
+    pub(super) saved_scroll: usize,
+    pub(super) saved_filter: Option<ClientNavigatorFilter>,
+    pub(super) hold_targets: Vec<WorkspaceNavigationTarget>,
+    pub(super) hold_modifiers: KeyModifiers,
+}
+
+/// Mobile switcher return state captured at search entry.
+#[derive(Debug)]
+pub(super) struct MobileSwitcherSearch {
+    pub(super) saved_workspace: Option<WorkspaceNavigationTarget>,
+    pub(super) saved_expanded: HashSet<(ClientEndpointId, String)>,
+    pub(super) saved_scroll: usize,
+    pub(super) mru_targets: Vec<WorkspaceNavigationTarget>,
 }
 
 #[derive(Debug)]
@@ -150,25 +191,33 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
             return;
         };
-        let Some(hold) = navigator.fork.hold.as_ref() else {
+        let targets: &[WorkspaceNavigationTarget] = if let Some(hold) = navigator.fork.hold.as_ref()
+        {
+            &hold.targets
+        } else if let Some(SwitcherSearch {
+            origin: SwitcherOrigin::Desktop(desktop),
+            active: false,
+        }) = navigator.fork.switcher_search.as_ref()
+        {
+            &desktop.hold_targets
+        } else {
             return;
         };
-        if hold.targets.is_empty() {
+        if targets.is_empty() {
             return;
         }
         let parent = navigator
             .selected
             .as_ref()
             .and_then(|target| navigator_workspace(&self.endpoints, target));
-        let current = hold
-            .targets
+        let current = targets
             .iter()
             .position(|target| {
                 parent.as_ref() == Some(&(target.endpoint_id.clone(), target.workspace_id.clone()))
             })
             .unwrap_or_default();
-        let index = (current as isize + delta).rem_euclid(hold.targets.len() as isize) as usize;
-        let target = &hold.targets[index];
+        let index = (current as isize + delta).rem_euclid(targets.len() as isize) as usize;
+        let target = &targets[index];
         navigator.selected = Some(ClientNavigatorTarget::Workspace {
             endpoint_id: target.endpoint_id.clone(),
             workspace_id: target.workspace_id.clone(),
@@ -205,8 +254,16 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_ref() else {
             return false;
         };
-        let Some(hold) = navigator.fork.hold.as_ref() else {
-            return false;
+        let (modifiers, release_armed) = match navigator.fork.hold.as_ref() {
+            Some(hold) => (hold.modifiers, true),
+            // Desktop latched restored list: hold keys without release acceptance.
+            None => match navigator.fork.switcher_search.as_ref() {
+                Some(SwitcherSearch {
+                    origin: SwitcherOrigin::Desktop(desktop),
+                    active: false,
+                }) => (desktop.hold_modifiers, false),
+                _ => return false,
+            },
         };
         if key.kind == KeyEventKind::Release {
             let released = match key.code {
@@ -230,16 +287,16 @@ impl ClientShellState {
                 }
                 _ => KeyModifiers::empty(),
             };
-            if !hold.modifiers.is_empty()
-                && (!key.modifiers.contains(hold.modifiers) || released.intersects(hold.modifiers))
+            if release_armed
+                && !modifiers.is_empty()
+                && (!key.modifiers.contains(modifiers) || released.intersects(modifiers))
             {
                 self.accept_navigator_selection(outcome);
-                return true;
             }
             return true;
         }
-        let command = key.modifiers.is_empty()
-            || !hold.modifiers.is_empty() && key.modifiers.contains(hold.modifiers);
+        let command =
+            key.modifiers.is_empty() || !modifiers.is_empty() && key.modifiers.contains(modifiers);
         if key.code == KeyCode::Esc
             || key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL
         {
@@ -286,14 +343,7 @@ impl ClientShellState {
         } else if key.code == KeyCode::End {
             self.move_navigator_selection(isize::MAX / 2);
         } else if command && matches!(key.code, KeyCode::Char('/' | 's' | 'S')) {
-            if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
-                navigator.fork.directory.endpoint_id = navigator
-                    .selected
-                    .as_ref()
-                    .map(|target| target.endpoint_id().clone());
-                navigator.fork.hold = None;
-                navigator.search_focused = true;
-            }
+            self.enter_switcher_search();
         } else {
             return true;
         }
@@ -319,19 +369,19 @@ impl ClientShellState {
         let changed = navigator.fork.directory.query != query
             || navigator.fork.directory.endpoint_id.as_ref() != Some(&endpoint_id);
         if changed {
+            let generation = self.next_request_id;
             let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
                 return;
             };
             let directory = &mut navigator.fork.directory;
             directory.query = query.clone();
             directory.endpoint_id = Some(endpoint_id.clone());
-            directory.generation = self.next_request_id;
+            directory.generation = generation;
             directory.candidates.clear();
             directory.preview = None;
             directory.preview_path = None;
             directory.error = None;
             directory.loading = !query.trim().is_empty();
-            let generation = directory.generation;
             self.pending_requests.retain(|_, pending| !matches!(&pending.kind,
                 PendingEndpointKind::Navigator(request) if !matches!(request.kind, NavigatorRequestKind::Create)
             ));
@@ -581,6 +631,127 @@ impl ClientShellState {
                 _ => false,
             })
     }
+
+    /// One search-entry transition for every desktop route (`/`, `s`, `S`,
+    /// search-row click). The opening permanently latches release acceptance
+    /// off; hold identity is retained separately for the restored list.
+    pub(super) fn enter_switcher_search(&mut self) {
+        let saved_parent = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Navigator(navigator)) => navigator
+                .selected
+                .as_ref()
+                .and_then(|target| navigator_workspace(&self.endpoints, target))
+                .map(
+                    |(endpoint_id, workspace_id)| ClientNavigatorTarget::Workspace {
+                        endpoint_id,
+                        workspace_id,
+                    },
+                ),
+            _ => None,
+        };
+        let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
+            return;
+        };
+        if !navigator.fork.quick_switch {
+            // Direct Go To keeps its plain search focus.
+            navigator.search_focused = true;
+            navigator.filter = None;
+            return;
+        }
+        let hold = navigator.fork.hold.take();
+        match navigator.fork.switcher_search.as_mut() {
+            Some(search) => {
+                // Capture return state only on transition into search; a click
+                // on the search input while search is active never recaptures.
+                if !search.active {
+                    search.active = true;
+                    if let SwitcherOrigin::Desktop(desktop) = &mut search.origin {
+                        desktop.saved_selected = navigator.selected.clone();
+                        desktop.saved_parent = saved_parent;
+                        desktop.saved_expanded = navigator.expanded_workspaces.clone();
+                        desktop.saved_scroll = navigator.scroll;
+                        desktop.saved_filter = navigator.filter;
+                    }
+                }
+            }
+            None => {
+                navigator.fork.switcher_search = Some(SwitcherSearch {
+                    origin: SwitcherOrigin::Desktop(DesktopSwitcherSearch {
+                        saved_selected: navigator.selected.clone(),
+                        saved_parent,
+                        saved_expanded: navigator.expanded_workspaces.clone(),
+                        saved_scroll: navigator.scroll,
+                        saved_filter: navigator.filter,
+                        hold_targets: hold
+                            .as_ref()
+                            .map(|hold| hold.targets.clone())
+                            .unwrap_or_default(),
+                        hold_modifiers: hold
+                            .map(|hold| hold.modifiers)
+                            .unwrap_or_else(KeyModifiers::empty),
+                    }),
+                    active: true,
+                });
+            }
+        }
+        navigator.fork.directory.endpoint_id = navigator
+            .selected
+            .as_ref()
+            .map(|target| target.endpoint_id().clone());
+        navigator.search_focused = true;
+        navigator.filter = None;
+    }
+
+    /// First Esc from desktop search: restore the original list, selection,
+    /// expansion and scroll; invalidate pending search/preview/create effects.
+    pub(super) fn exit_switcher_search(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() else {
+            return;
+        };
+        let Some(search) = navigator.fork.switcher_search.as_mut() else {
+            return;
+        };
+        search.active = false;
+        navigator.search_focused = false;
+        navigator.query.clear();
+        let SwitcherOrigin::Desktop(desktop) = &search.origin else {
+            return;
+        };
+        navigator.filter = desktop.saved_filter;
+        navigator.expanded_workspaces = desktop.saved_expanded.clone();
+        navigator.scroll = desktop.saved_scroll;
+        let saved = desktop.saved_selected.clone();
+        let saved_parent = desktop.saved_parent.clone();
+        let remembered = navigator.fork.directory.endpoint_id.take();
+        navigator.fork.directory = NavigatorDirectory {
+            endpoint_id: remembered,
+            ..Default::default()
+        };
+        navigator.fork.preview = Default::default();
+        self.pending_requests.retain(|_, pending| {
+            !matches!(
+                pending.kind,
+                PendingEndpointKind::Navigator(_) | PendingEndpointKind::NavigatorPreview(_)
+            )
+        });
+        let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_ref() else {
+            return;
+        };
+        let rows = super::aggregate_navigation::navigator_rows(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            navigator,
+        );
+        let restored = super::switcher_search::restored_selection(
+            &rows,
+            saved.as_ref(),
+            saved_parent.as_ref(),
+        );
+        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+            navigator.selected = restored;
+        }
+        outcome.repaint = true;
+    }
 }
 
 pub(super) fn hold_rows(
@@ -588,8 +759,18 @@ pub(super) fn hold_rows(
     navigator: &ClientNavigatorOverlay,
 ) -> Option<Vec<ClientNavigatorRow>> {
     let hold = navigator.fork.hold.as_ref()?;
+    Some(hold_rows_for(endpoints, navigator, &hold.targets))
+}
+
+/// Switcher list rows for captured hold targets: MRU workspace order plus
+/// expanded tabs. Used by live hold mode and by the latched restored list.
+pub(super) fn hold_rows_for(
+    endpoints: &[ClientShellEndpoint],
+    navigator: &ClientNavigatorOverlay,
+    targets: &[WorkspaceNavigationTarget],
+) -> Vec<ClientNavigatorRow> {
     let mut rows = Vec::new();
-    for target in &hold.targets {
+    for target in targets {
         let Some(endpoint) = endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == target.endpoint_id)
@@ -618,6 +799,7 @@ pub(super) fn hold_rows(
             status: Some(workspace.agent_status),
             stale,
             current: false,
+            match_rank: None,
             target: ClientNavigatorTarget::Workspace {
                 endpoint_id: target.endpoint_id.clone(),
                 workspace_id: target.workspace_id.clone(),
@@ -641,6 +823,7 @@ pub(super) fn hold_rows(
                         status: Some(tab.agent_status),
                         stale,
                         current: false,
+                        match_rank: None,
                         target: ClientNavigatorTarget::Tab {
                             endpoint_id: endpoint.endpoint_id.clone(),
                             tab_id: tab.tab_id.clone(),
@@ -649,7 +832,7 @@ pub(super) fn hold_rows(
             );
         }
     }
-    Some(rows)
+    rows
 }
 
 fn navigator_workspace(
@@ -677,9 +860,8 @@ fn navigator_workspace(
 
 pub(super) fn append_directory_rows(
     rows: &mut Vec<ClientNavigatorRow>,
-    navigator: &ClientNavigatorOverlay,
+    directory: &NavigatorDirectory,
 ) {
-    let directory = &navigator.fork.directory;
     let Some(endpoint_id) = directory.endpoint_id.as_ref() else {
         return;
     };
@@ -696,6 +878,7 @@ pub(super) fn append_directory_rows(
                 status: None,
                 stale: false,
                 current: false,
+                match_rank: None,
                 target: ClientNavigatorTarget::Directory {
                     endpoint_id: endpoint_id.clone(),
                     shown_path: candidate.shown_path.clone(),

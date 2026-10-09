@@ -372,6 +372,9 @@ pub(super) struct ClientNavigatorRow {
     pub(super) stale: bool,
     pub(super) current: bool,
     pub(super) target: ClientNavigatorTarget,
+    /// Switcher search rank: `Some` marks directly qualifying targets; context
+    /// rows and non-search rows carry `None`.
+    pub(super) match_rank: Option<(u8, usize)>,
 }
 
 #[derive(Debug)]

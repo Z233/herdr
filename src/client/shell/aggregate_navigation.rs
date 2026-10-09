@@ -322,8 +322,47 @@ pub(super) fn navigator_rows(
     active_endpoint_id: &ClientEndpointId,
     navigator: &ClientNavigatorOverlay,
 ) -> Vec<ClientNavigatorRow> {
+    // One projection dispatcher for render, selection, scrollbar, acceptance,
+    // directory endpoint selection, and previews. Go To never carries
+    // switcher state and keeps the ordinary semantics below.
+    if let Some(search) = navigator
+        .fork
+        .switcher_search
+        .as_ref()
+        .filter(|search| search.active)
+    {
+        if navigator.query.trim().is_empty() {
+            return match &search.origin {
+                super::navigator::SwitcherOrigin::Desktop(desktop) => {
+                    super::navigator::hold_rows_for(endpoints, navigator, &desktop.hold_targets)
+                }
+                // The blank mobile list is the mobile switcher itself, not rows.
+                super::navigator::SwitcherOrigin::Mobile(_) => Vec::new(),
+            };
+        }
+        let mru_targets = match &search.origin {
+            super::navigator::SwitcherOrigin::Desktop(desktop) => &desktop.hold_targets,
+            super::navigator::SwitcherOrigin::Mobile(mobile) => &mobile.mru_targets,
+        };
+        return super::switcher_search::switcher_search_rows(
+            endpoints,
+            active_endpoint_id,
+            &navigator.query,
+            &navigator.fork.directory,
+            mru_targets,
+        );
+    }
     if let Some(rows) = super::navigator::hold_rows(endpoints, navigator) {
         return rows;
+    }
+    // Desktop latched restored list: original switcher rows without release
+    // acceptance.
+    if let Some(super::navigator::SwitcherSearch {
+        origin: super::navigator::SwitcherOrigin::Desktop(desktop),
+        ..
+    }) = navigator.fork.switcher_search.as_ref()
+    {
+        return super::navigator::hold_rows_for(endpoints, navigator, &desktop.hold_targets);
     }
     let query = navigator.query.trim().to_lowercase();
     let filter = |status| match navigator.filter {
@@ -443,6 +482,7 @@ pub(super) fn navigator_rows(
                                 stale,
                                 current: endpoint.endpoint_id == *active_endpoint_id
                                     && snapshot.focused_pane_id.as_deref() == Some(&pane.pane_id),
+                                match_rank: None,
                                 target: ClientNavigatorTarget::Pane {
                                     endpoint_id: endpoint.endpoint_id.clone(),
                                     pane_id: pane.pane_id.clone(),
@@ -464,6 +504,7 @@ pub(super) fn navigator_rows(
                         status: None,
                         stale,
                         current: false,
+                        match_rank: None,
                         target: ClientNavigatorTarget::Workspace {
                             endpoint_id: endpoint.endpoint_id.clone(),
                             workspace_id: workspace.workspace_id.clone(),
@@ -484,6 +525,7 @@ pub(super) fn navigator_rows(
                     status: None,
                     stale,
                     current: false,
+                    match_rank: None,
                     target: ClientNavigatorTarget::Machine {
                         endpoint_id: endpoint.endpoint_id.clone(),
                     },
@@ -492,7 +534,7 @@ pub(super) fn navigator_rows(
             rows.extend(endpoint_rows);
         }
     }
-    super::navigator::append_directory_rows(&mut rows, navigator);
+    super::navigator::append_directory_rows(&mut rows, &navigator.fork.directory);
     rows
 }
 

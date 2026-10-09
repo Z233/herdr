@@ -618,34 +618,90 @@ impl ClientShellState {
                 });
             }
         }
+        // Mobile Switcher search runs on the shared Navigator controller in
+        // Navigate mode; it draws the full Switcher surface instead of the
+        // desktop popup.
+        let mobile_switcher_overlay = !layout.mobile_header.is_empty()
+            && matches!(&self.overlay,
+            Some(ClientShellOverlay::Navigator(navigator))
+                if matches!(&navigator.fork.switcher_search,
+                    Some(super::navigator::SwitcherSearch {
+                        origin: super::navigator::SwitcherOrigin::Mobile(_),
+                        ..
+                    })));
         if !layout.mobile_header.is_empty()
             && self.mode == ClientShellMode::Navigate
-            && self.overlay.is_none()
+            && (self.overlay.is_none() || mobile_switcher_overlay)
         {
             let mut composed = frame.to_ratatui_buffer()?;
             occlusion.cover(composed.area);
             let workspace_targets = self.mobile_ordered_workspace_targets();
-            super::mobile::render_mobile_switcher(
-                &mut composed,
-                Rect::new(0, 0, cols, rows),
-                snapshot,
-                &self.endpoints,
-                &self.active_endpoint_id,
-                &self.config,
-                super::mobile::MobileSwitcherView {
-                    workspace_targets: &workspace_targets,
-                    workspace: self
-                        .navigate_workspace_id
-                        .as_ref()
-                        .filter(|_| valid_navigation_target),
-                    target: self.mobile_drag.as_ref(),
-                    pane_order: self.mobile_pane_order.as_ref(),
-                },
-                &self.mobile_expanded_groups,
-                &mut self.mobile_switcher_scroll,
-                &mut self.reveal_mobile_workspace,
-                &mut self.hits,
-            );
+            let overlay_search = match self.overlay.as_ref() {
+                Some(ClientShellOverlay::Navigator(navigator)) => {
+                    let search_rows = if navigator.query.trim().is_empty() {
+                        None
+                    } else {
+                        Some(render::client_navigator_rows(
+                            &self.endpoints,
+                            &self.active_endpoint_id,
+                            navigator,
+                        ))
+                    };
+                    let directory = super::mobile::MobileDirectoryStatus {
+                        error: navigator.fork.directory.error.clone(),
+                        loading: navigator.fork.directory.loading,
+                        creating: navigator.fork.directory.creating,
+                    };
+                    Some((
+                        navigator.query.clone(),
+                        navigator.selected.clone(),
+                        navigator.scroll,
+                        search_rows,
+                        directory,
+                    ))
+                }
+                _ => None,
+            };
+            let mobile_cursor = match overlay_search {
+                Some((query, selected, scroll, Some(search_rows), directory)) => {
+                    super::mobile::render_mobile_search_results(
+                        &mut composed,
+                        Rect::new(0, 0, cols, rows),
+                        &query,
+                        selected.as_ref(),
+                        scroll,
+                        &search_rows,
+                        &directory,
+                        &self.config,
+                        &mut self.hits,
+                    )
+                }
+                other => {
+                    let query = other.map(|(query, ..)| query);
+                    super::mobile::render_mobile_switcher(
+                        &mut composed,
+                        Rect::new(0, 0, cols, rows),
+                        snapshot,
+                        &self.endpoints,
+                        &self.active_endpoint_id,
+                        &self.config,
+                        super::mobile::MobileSwitcherView {
+                            workspace_targets: &workspace_targets,
+                            workspace: self
+                                .navigate_workspace_id
+                                .as_ref()
+                                .filter(|_| valid_navigation_target),
+                            target: self.mobile_drag.as_ref(),
+                            pane_order: self.mobile_pane_order.as_ref(),
+                            query: query.as_ref(),
+                        },
+                        &self.mobile_expanded_groups,
+                        &mut self.mobile_switcher_scroll,
+                        &mut self.reveal_mobile_workspace,
+                        &mut self.hits,
+                    )
+                }
+            };
             if let Some((label, status)) = active_lifecycle.as_ref() {
                 let _ = endpoint_notices::render_lifecycle_banner(
                     &mut composed,
@@ -665,7 +721,15 @@ impl ClientShellState {
                     &self.config.palette,
                 );
             }
-            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            frame.replace_from_ratatui_buffer_preserving_effects(
+                &composed,
+                mobile_cursor.map(|(x, y)| crate::protocol::CursorState {
+                    x,
+                    y,
+                    visible: true,
+                    shape: 0,
+                }),
+            );
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
@@ -674,7 +738,7 @@ impl ClientShellState {
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
         }
-        if let Some(overlay) = self.overlay.as_ref() {
+        if let Some(overlay) = self.overlay.as_ref().filter(|_| !mobile_switcher_overlay) {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
                 let rendered =

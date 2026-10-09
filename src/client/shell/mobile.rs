@@ -392,6 +392,15 @@ pub(super) struct MobileSwitcherView<'a> {
     pub(super) workspace: Option<&'a WorkspaceNavigationTarget>,
     pub(super) target: Option<&'a ClientMobileTarget>,
     pub(super) pane_order: Option<&'a super::mobile_panes::MobilePaneOrder>,
+    /// Active Switcher-search editor chrome; `Some` keeps the caret visible.
+    pub(super) query: Option<&'a super::text_editor::TextEditor>,
+}
+
+/// Read-only directory query/create state for the mobile search surface.
+pub(super) struct MobileDirectoryStatus {
+    pub(super) error: Option<String>,
+    pub(super) loading: bool,
+    pub(super) creating: bool,
 }
 
 pub(super) fn render_mobile_switcher(
@@ -406,15 +415,16 @@ pub(super) fn render_mobile_switcher(
     scroll: &mut usize,
     reveal_workspace: &mut bool,
     hits: &mut ShellHitMap,
-) {
+) -> Option<(u16, u16)> {
     let MobileSwitcherView {
         workspace_targets,
         workspace: selected_workspace_id,
         target: selected_target,
         pane_order,
+        query,
     } = view;
     if area.is_empty() {
-        return;
+        return None;
     }
     let palette = &config.palette;
     Clear.render(area, buffer);
@@ -432,7 +442,7 @@ pub(super) fn render_mobile_switcher(
                 .fg(palette.surface_dim)
                 .bg(palette.panel_bg),
         );
-        return;
+        return None;
     }
     let header_height = area.height.min(2);
     let close_width = MOBILE_BUTTON_WIDTH.min(area.width);
@@ -455,6 +465,32 @@ pub(super) fn render_mobile_switcher(
             .add_modifier(Modifier::BOLD),
     );
     render_close_button(buffer, close, palette);
+    // Search chrome (and caret) stays visible while Switcher search is active,
+    // including the blank query that reuses this switcher list.
+    let cursor = if let Some(query) = query {
+        put_text(
+            buffer,
+            area.x,
+            area.y + 1,
+            close.x.saturating_sub(area.x),
+            " / ",
+            Style::default().fg(palette.accent).bg(palette.panel_bg),
+        );
+        super::text_editor::render(
+            buffer,
+            Rect::new(
+                area.x + 3,
+                area.y + 1,
+                close.x.saturating_sub(area.x + 3),
+                1,
+            ),
+            query,
+            Style::default().fg(palette.text).bg(palette.panel_bg),
+        )
+        .map(|cursor| (cursor.x, cursor.y))
+    } else {
+        None
+    };
     let rule_y = area.y + header_height;
     put_text(
         buffer,
@@ -474,7 +510,7 @@ pub(super) fn render_mobile_switcher(
     );
     if viewport.is_empty() {
         *scroll = 0;
-        return;
+        return cursor;
     }
 
     let items = mobile_items(
@@ -535,7 +571,7 @@ pub(super) fn render_mobile_switcher(
         render_left_scrollbar(buffer, viewport, total_rows, *scroll, palette);
     }
     if content.is_empty() {
-        return;
+        return cursor;
     }
 
     let viewport_start = *scroll;
@@ -572,6 +608,183 @@ pub(super) fn render_mobile_switcher(
         }
         document_row = item_end;
     }
+    cursor
+}
+
+/// Draws the mobile full-screen switcher search results from the shared
+/// ranked projection. Enter accepts the highlighted row; Esc restores the
+/// switcher list.
+pub(super) fn render_mobile_search_results(
+    buffer: &mut Buffer,
+    area: Rect,
+    query: &super::text_editor::TextEditor,
+    selected: Option<&ClientNavigatorTarget>,
+    scroll: usize,
+    rows: &[ClientNavigatorRow],
+    directory: &MobileDirectoryStatus,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) -> Option<(u16, u16)> {
+    let palette = &config.palette;
+    Clear.render(area, buffer);
+    buffer.set_style(area, Style::default().bg(palette.panel_bg));
+    hits.mobile_switch = Rect::default();
+    if area.is_empty() {
+        return None;
+    }
+    let header_height = area.height.min(2);
+    let close_width = MOBILE_BUTTON_WIDTH.min(area.width);
+    let close = Rect::new(
+        area.right().saturating_sub(close_width),
+        area.y,
+        close_width,
+        header_height,
+    );
+    hits.mobile_close = close;
+    put_text(
+        buffer,
+        area.x,
+        area.y,
+        close.x.saturating_sub(area.x),
+        " switch",
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    render_close_button(buffer, close, palette);
+    put_text(
+        buffer,
+        area.x,
+        area.y + 1,
+        close.x.saturating_sub(area.x),
+        " / ",
+        Style::default().fg(palette.accent).bg(palette.panel_bg),
+    );
+    let cursor = super::text_editor::render(
+        buffer,
+        Rect::new(
+            area.x + 3,
+            area.y + 1,
+            close.x.saturating_sub(area.x + 3),
+            1,
+        ),
+        query,
+        Style::default().fg(palette.text).bg(palette.panel_bg),
+    )
+    .map(|cursor| (cursor.x, cursor.y));
+    // Scoped directory query/create outcomes stay visible on the Switcher.
+    let directory_detail = directory.error.clone().or_else(|| {
+        if directory.creating {
+            Some("Creating workspace on selected endpoint…".into())
+        } else if directory.loading {
+            Some("Searching directories on selected endpoint…".into())
+        } else {
+            None
+        }
+    });
+    if let Some(detail) = directory_detail {
+        put_text(
+            buffer,
+            area.x,
+            area.y + 2,
+            area.width,
+            &detail,
+            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+        );
+    }
+    if area.height <= 3 {
+        return cursor;
+    }
+    if rows.is_empty() {
+        put_text(
+            buffer,
+            area.x,
+            area.y + 3,
+            area.width,
+            " No matching workspaces, tabs, or panes",
+            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+        );
+        return cursor;
+    }
+    let list_top = area.y + 3;
+    let visible = usize::from(area.height.saturating_sub(3));
+    let selected_index = selected
+        .and_then(|selected| rows.iter().position(|row| &row.target == selected))
+        .unwrap_or_default();
+    let mut scroll = scroll.min(selected_index);
+    if selected_index >= scroll + visible {
+        scroll = selected_index + 1 - visible;
+    }
+    for (index, row) in rows.iter().enumerate().skip(scroll).take(visible) {
+        let y = list_top + u16::try_from(index - scroll).unwrap_or(u16::MAX);
+        let row_selected = selected == Some(&row.target);
+        let dim = if row.stale && !row_selected {
+            Modifier::DIM
+        } else {
+            Modifier::empty()
+        };
+        let style = if row_selected {
+            Style::default().fg(palette.panel_bg).bg(palette.accent)
+        } else {
+            Style::default().fg(palette.text).bg(palette.panel_bg)
+        }
+        .add_modifier(dim);
+        buffer.set_style(Rect::new(area.x, y, area.width, 1), style);
+        let indent = "  ".repeat(usize::from(row.depth));
+        let mut label = indent.clone();
+        let mut icon_width = 0u16;
+        if let Some(status) = row.status {
+            let icon = status_icon(status, config.status_indicators);
+            let icon_style = style.fg(if row.stale {
+                palette.overlay0
+            } else {
+                status_color(status, palette)
+            });
+            put_text(
+                buffer,
+                area.x + super::render::display_width(&indent),
+                y,
+                super::render::display_width(icon),
+                icon,
+                icon_style,
+            );
+            icon_width = super::render::display_width(icon) + 1;
+        }
+        label.push_str(&row.label);
+        if !row.detail.is_empty() {
+            label.push_str(" · ");
+            label.push_str(&row.detail);
+        }
+        // Meta ("create workspace", endpoint label) keeps its own tail space,
+        // matching the desktop right-aligned convention on narrow screens.
+        let meta_suffix = if row.meta.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", row.meta)
+        };
+        let meta_width = super::render::display_width(&meta_suffix);
+        let label_width = area.width.saturating_sub(meta_width + icon_width);
+        put_text(buffer, area.x + icon_width, y, label_width, &label, style);
+        if !meta_suffix.is_empty() {
+            let meta_style = if row_selected {
+                style
+            } else {
+                Style::default().fg(palette.overlay0).bg(palette.panel_bg)
+            };
+            put_text(
+                buffer,
+                area.x + label_width,
+                y,
+                area.width.saturating_sub(label_width),
+                &meta_suffix,
+                meta_style,
+            );
+        }
+        hits.navigator_rows
+            .push((Rect::new(area.x, y, area.width, 1), row.target.clone()));
+    }
+    cursor
 }
 
 fn render_close_button(buffer: &mut Buffer, area: Rect, palette: &Palette) {
@@ -1164,7 +1377,19 @@ impl ClientShellState {
         let mobile = self
             .last_composed_size
             .is_some_and(|(cols, rows)| !self.layout(cols, rows).mobile_header.is_empty());
-        if !mobile || self.overlay.is_some() {
+        if !mobile {
+            return false;
+        }
+        // Mobile Switcher search keeps its hits on the Switcher surface; the
+        // generic Navigator popup/outside-click path never sees them.
+        let search_overlay = matches!(&self.overlay,
+        Some(ClientShellOverlay::Navigator(navigator))
+            if matches!(&navigator.fork.switcher_search,
+                Some(super::navigator::SwitcherSearch {
+                    origin: super::navigator::SwitcherOrigin::Mobile(_),
+                    ..
+                })));
+        if self.overlay.is_some() && !search_overlay {
             return false;
         }
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -1204,7 +1429,60 @@ impl ClientShellState {
             return false;
         }
 
-        if self.handle_mobile_gesture(mouse, outcome) {
+        if search_overlay {
+            let blank_query = matches!(&self.overlay,
+                Some(ClientShellOverlay::Navigator(navigator))
+                    if navigator.query.trim().is_empty());
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if blank_query {
+                        self.mobile_switcher_scroll = self.mobile_switcher_scroll.saturating_sub(2);
+                    } else {
+                        self.move_navigator_selection(-3);
+                    }
+                    outcome.repaint = true;
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    if blank_query {
+                        self.mobile_switcher_scroll = self
+                            .mobile_switcher_scroll
+                            .saturating_add(2)
+                            .min(self.hits.mobile_max_scroll);
+                    } else {
+                        self.move_navigator_selection(3);
+                    }
+                    outcome.repaint = true;
+                    return true;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {}
+                _ => return true,
+            }
+            if super::contains(self.hits.mobile_close, point) {
+                self.overlay = None;
+                self.mode = ClientShellMode::Terminal;
+                self.navigate_workspace_id = None;
+                outcome.repaint = true;
+                return true;
+            }
+            if !blank_query {
+                if let Some((_, target)) = self
+                    .hits
+                    .navigator_rows
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                        navigator.selected = Some(target);
+                    }
+                    self.accept_navigator_selection(outcome);
+                }
+                return true;
+            }
+            // Blank query keeps the original switcher list hits below.
+        }
+        if !search_overlay && self.handle_mobile_gesture(mouse, outcome) {
             return true;
         }
         match mouse.kind {

@@ -57,11 +57,12 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 - **Fuzzy search** with a live preview of every pane in the selected tab on wide terminals
 - **MRU quick-switch** — hold `ctrl+tab` to cycle through recent workspaces, release to select (like `cmd+tab`)
 - **Shift reverses direction**; during hold, `j/k` navigates, `s` searches, `l/h` expands/collapses
+- **Switcher search stays in the switcher** — entering search from the quick-switch ranks workspaces, tabs, and panes by match quality, MRU, then snapshot order, with directory candidates last. Search latches release-acceptance off for that opening: the first `Esc` restores the original list, selection, expansion, and scroll; the second `Esc` closes. Direct Go To (`prefix+g`) search is unchanged.
 - **Agent state dots** next to workspace names
 - **Repository names** shown for worktree switcher items, with structured labels (git branch names for grouped child worktrees)
 - **Zoxide integration** — search any directory by path and open it as a workspace (see below)
 - **Mobile support** — switcher auto-opens in empty state on narrow terminals
-- **Mobile search** — type or paste while the mobile switcher is open to focus Navigator search. `s` is query text. Press `Esc` twice to return.
+- **Mobile search** — type or paste while the mobile switcher is open to search it inline; the full-screen switcher shows ranked results with directory creation. `s` is query text. The first `Esc` restores the switcher list, the second returns to the terminal.
 - **Mobile Quick Switch gesture** — hold `switch`, drag vertically to highlight an item, swipe right to show all panes across a workspace's tabs, and release to focus the selected workspace or pane. Swipe left on a pane to collapse its workspace; a tap leaves the switcher open.
 - **Mobile pane order** — panes use this client's in-memory, successfully presented focus history. Pane order stays fixed while the switcher is open, including collapse/re-expand; new panes append, removed panes disappear, and the next opening uses the latest history.
 - Full keyboard **and** mouse support (hover, click, scroll)

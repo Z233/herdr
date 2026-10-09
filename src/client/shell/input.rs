@@ -153,10 +153,32 @@ impl ClientShellState {
         {
             return false;
         }
-        self.open_navigator_overlay();
-        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
-            navigator.search_focused = true;
-        }
+        // Mobile Switcher search stays on the shared Navigator controller in
+        // Navigate mode; composition draws the full Switcher surface for it.
+        let mut navigator = ClientNavigatorOverlay {
+            fork: Default::default(),
+            query: TextEditor::default(),
+            search_focused: true,
+            selected: None,
+            scroll: 0,
+            filter: None,
+            expanded_workspaces: HashSet::new(),
+        };
+        navigator.fork.scopes = self.capture_navigator_scopes();
+        navigator.fork.quick_switch = true;
+        navigator.fork.directory.endpoint_id = Some(self.active_endpoint_id.clone());
+        navigator.fork.switcher_search = Some(super::navigator::SwitcherSearch {
+            origin: super::navigator::SwitcherOrigin::Mobile(
+                super::navigator::MobileSwitcherSearch {
+                    saved_workspace: self.navigate_workspace_id.clone(),
+                    saved_expanded: self.mobile_expanded_groups.clone(),
+                    saved_scroll: self.mobile_switcher_scroll,
+                    mru_targets: self.mobile_ordered_workspace_targets(),
+                },
+            ),
+            active: true,
+        });
+        self.overlay = Some(ClientShellOverlay::Navigator(navigator));
         self.insert_overlay_text(text)
     }
 

@@ -530,7 +530,9 @@ fn fork_merge_hold_shift_press_collapse_and_search_keep_endpoint_identity() {
     };
     assert!(navigator.search_focused);
     assert!(navigator.fork.hold.is_none());
-    let typed = state.handle_input_bytes(b"project");
+    // Directory queries stay scoped to the selected endpoint: the reconciled
+    // selection keeps the matching remote workspace.
+    let typed = state.handle_input_bytes(b"remote");
     assert!(typed.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { endpoint_id, request, .. }
         if endpoint_id == &remote && matches!(request.method, crate::api::schema::Method::WorkspaceSearch(_)))));
 }

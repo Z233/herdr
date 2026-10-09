@@ -729,6 +729,7 @@ impl ClientShellState {
         if endpoint_id == &self.active_endpoint_id {
             self.apply_active_snapshot(snapshot, generation);
         }
+        self.reconcile_active_search();
     }
 }
 

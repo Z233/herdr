@@ -268,3 +268,4 @@ mod startup_overlays;
 mod fork_easymotion;
 mod fork_input;
 mod fork_navigator;
+mod switcher_search;

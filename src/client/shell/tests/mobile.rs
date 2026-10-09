@@ -96,11 +96,10 @@ fn mobile_type_search_two_escapes_return_to_rendered_switcher() {
     let mut state = mobile_search_shell();
     mobile_search_press(&mut state, KeyCode::Char('s'), KeyModifiers::NONE);
     let frame = state.compose(44, 20).expect("focused Navigator");
-    assert!(frame_rows(&frame).join("\n").contains("search"));
+    // Mobile Switcher search stays inside the full-screen Switcher surface.
+    assert!(frame_rows(&frame).join("\n").contains("switch"));
     assert!(frame.cursor.as_ref().is_some_and(|cursor| cursor.visible));
     let first = mobile_search_press(&mut state, KeyCode::Esc, KeyModifiers::NONE);
-    assert_eq!(mobile_search_query(&state), ("s", false));
-    let second = mobile_search_press(&mut state, KeyCode::Esc, KeyModifiers::NONE);
     assert!(state.overlay.is_none());
     assert_eq!(state.mode, ClientShellMode::Navigate);
     let frame = state.compose(44, 20).expect("restored switcher");
@@ -108,7 +107,9 @@ fn mobile_type_search_two_escapes_return_to_rendered_switcher() {
     assert!(text.contains("+ new workspace") && text.contains("+ new tab"));
     assert!(!state.hits.mobile_close.is_empty());
     assert!(first.actions.is_empty() && first.requests.is_empty());
+    let second = mobile_search_press(&mut state, KeyCode::Esc, KeyModifiers::NONE);
     assert!(second.actions.is_empty() && second.requests.is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
 }
 
 #[test]
@@ -119,11 +120,12 @@ fn mobile_type_search_acceptance_focuses_result_and_enters_terminal() {
     let frame = state.compose(44, 20).expect("matching destination");
     assert!(frame_rows(&frame).join("\n").contains("client-shell"));
     let result = mobile_search_press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
+    // The ranked Switcher selection is the matching workspace row.
     assert!(result.actions.iter().any(|action| matches!(
         action,
         ClientShellAction::Endpoint { request, .. }
-            if matches!(&request.method, crate::api::schema::Method::PaneFocus(params)
-                if params.pane_id == "pane_1")
+            if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(params)
+                if params.workspace_id == "ws_1")
     )));
     assert!(result.requests.is_empty());
     assert!(state.overlay.is_none());

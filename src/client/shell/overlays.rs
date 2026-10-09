@@ -726,7 +726,11 @@ fn render_navigator_overlay(
         q.x + 2,
         q.y,
         q.width.saturating_sub(4),
-        " Go to ",
+        if n.fork.quick_switch {
+            " Workspace Switcher "
+        } else {
+            " Go to "
+        },
         Style::default().fg(p.accent).bg(p.panel_bg),
     );
     let rows = super::aggregate_navigation::navigator_rows(endpoints, active_endpoint_id, n);
@@ -743,22 +747,34 @@ fn render_navigator_overlay(
             }
         )
     } else if n.query.is_empty() {
-        " / search agents and terminals".to_owned()
+        if n.fork.quick_switch {
+            " / search workspaces, tabs, panes, directories".to_owned()
+        } else {
+            " / search agents and terminals".to_owned()
+        }
     } else {
         format!(" / {}", n.query)
     };
-    let terminal_count = rows
-        .iter()
-        .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
-        .count();
-    let count = format!(
-        "{terminal_count} {}",
-        if terminal_count == 1 {
-            "terminal"
-        } else {
-            "terminals"
-        }
-    );
+    let count = if n.fork.quick_switch {
+        format!(
+            "{} {}",
+            rows.len(),
+            if rows.len() == 1 { "item" } else { "items" }
+        )
+    } else {
+        let terminal_count = rows
+            .iter()
+            .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+            .count();
+        format!(
+            "{terminal_count} {}",
+            if terminal_count == 1 {
+                "terminal"
+            } else {
+                "terminals"
+            }
+        )
+    };
     put_text(
         b,
         i.x,
@@ -829,7 +845,11 @@ fn render_navigator_overlay(
             body.x,
             body.y,
             body.width,
-            " No matching agents or terminals",
+            if n.fork.quick_switch {
+                " No matching workspaces, tabs, or panes"
+            } else {
+                " No matching agents or terminals"
+            },
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
@@ -1061,6 +1081,8 @@ fn render_navigator_overlay(
         i.width,
         if n.fork.hold.is_some() {
             " hold modifier · cycle shortcut · release to open · cancel esc · search /"
+        } else if n.fork.switcher_search.is_some() {
+            " hold modifier · cycle shortcut · enter open · cancel esc · search /"
         } else if n.search_focused {
             " search type · move ↑↓/ctrl+n/p · open enter · back esc"
         } else {

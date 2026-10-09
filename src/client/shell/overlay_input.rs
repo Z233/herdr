@@ -210,6 +210,66 @@ impl ClientShellState {
         self.overlay = Some(ClientShellOverlay::Navigator(navigator));
     }
 
+    fn navigator_mobile_blank_search(&self) -> bool {
+        matches!(&self.overlay,
+            Some(ClientShellOverlay::Navigator(navigator))
+                if matches!(&navigator.fork.switcher_search,
+                    Some(super::navigator::SwitcherSearch {
+                        origin: super::navigator::SwitcherOrigin::Mobile(_),
+                        ..
+                    }))
+                    && navigator.query.trim().is_empty())
+    }
+
+    /// Mobile first Esc: remove the search controller and restore the saved
+    /// mobile switcher list state; pending search effects are invalidated.
+    pub(super) fn exit_mobile_switcher_search(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.take() else {
+            return;
+        };
+        let Some(super::navigator::SwitcherSearch {
+            origin: super::navigator::SwitcherOrigin::Mobile(mobile),
+            ..
+        }) = navigator.fork.switcher_search
+        else {
+            self.overlay = Some(ClientShellOverlay::Navigator(navigator));
+            return;
+        };
+        self.navigate_workspace_id = mobile
+            .saved_workspace
+            .filter(|target| self.navigation_target_valid(target))
+            .or_else(|| self.mobile_ordered_workspace_targets().into_iter().next());
+        self.mobile_switcher_scroll = mobile.saved_scroll;
+        self.mobile_expanded_groups = mobile.saved_expanded;
+        self.pending_requests.retain(|_, pending| {
+            !matches!(
+                pending.kind,
+                PendingEndpointKind::Navigator(_) | PendingEndpointKind::NavigatorPreview(_)
+            )
+        });
+        outcome.repaint = true;
+    }
+
+    /// Selection reconciliation for active Switcher search on snapshot updates:
+    /// a removed or non-qualifying selection falls to the best-ranked target.
+    pub(super) fn reconcile_active_search(&mut self) {
+        let active = matches!(&self.overlay,
+            Some(ClientShellOverlay::Navigator(navigator))
+                if navigator.fork.switcher_search.as_ref().is_some_and(|search| search.active)
+                    && !navigator.query.trim().is_empty());
+        if !active {
+            return;
+        }
+        let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_ref() else {
+            return;
+        };
+        let rows =
+            render::client_navigator_rows(&self.endpoints, &self.active_endpoint_id, navigator);
+        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+            super::switcher_search::reconcile_search_selection(&rows, &mut navigator.selected);
+        }
+    }
+
     pub(super) fn close_activated_navigator(&mut self) {
         self.overlay = None;
         if self.mode == ClientShellMode::Navigate && self.mobile_layout_active() {
@@ -484,7 +544,8 @@ impl ClientShellState {
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
-        match self.overlay.as_mut() {
+        let mut reconcile = false;
+        let inserted = match self.overlay.as_mut() {
             Some(ClientShellOverlay::Rename(rename)) => {
                 rename.input.insert(text);
                 true
@@ -499,14 +560,35 @@ impl ClientShellState {
                 if let Some(selected) = navigator.selected.as_ref() {
                     navigator.fork.directory.endpoint_id = Some(selected.endpoint_id().clone());
                 }
-                if navigator.query.insert(text) {
+                let switcher = navigator.fork.switcher_search.is_some();
+                let inserted = navigator.query.insert(text);
+                if inserted {
                     navigator.filter = None;
-                    navigator.selected = None;
+                    if !switcher {
+                        navigator.selected = None;
+                    }
                 }
+                reconcile = inserted && switcher;
                 true
             }
             _ => false,
+        };
+        if reconcile {
+            if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_ref() {
+                let rows = render::client_navigator_rows(
+                    &self.endpoints,
+                    &self.active_endpoint_id,
+                    navigator,
+                );
+                if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                    super::switcher_search::reconcile_search_selection(
+                        &rows,
+                        &mut navigator.selected,
+                    );
+                }
+            }
         }
+        inserted
     }
 
     pub(super) fn route_overlay_key(
@@ -678,7 +760,27 @@ impl ClientShellState {
             );
             if code == KeyCode::Esc {
                 if search_focused {
-                    if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                    let switcher_mobile = matches!(&self.overlay,
+                    Some(ClientShellOverlay::Navigator(navigator))
+                        if matches!(&navigator.fork.switcher_search,
+                            Some(super::navigator::SwitcherSearch {
+                                origin: super::navigator::SwitcherOrigin::Mobile(_),
+                                ..
+                            })));
+                    let switcher_desktop = !switcher_mobile
+                        && matches!(&self.overlay,
+                        Some(ClientShellOverlay::Navigator(navigator))
+                            if navigator.fork.switcher_search.is_some());
+                    if switcher_mobile {
+                        // Mobile first Esc: restore the original switcher list.
+                        self.exit_mobile_switcher_search(outcome);
+                    } else if switcher_desktop {
+                        // Desktop first Esc: restore the latched original list.
+                        self.exit_switcher_search(outcome);
+                    } else if let Some(ClientShellOverlay::Navigator(navigator)) =
+                        self.overlay.as_mut()
+                    {
+                        // Direct Go To: unfocus only.
                         navigator.search_focused = false;
                     }
                 } else {
@@ -688,34 +790,71 @@ impl ClientShellState {
                 return;
             }
             if code == KeyCode::Enter {
+                if self.navigator_mobile_blank_search() {
+                    self.overlay = None;
+                    self.accept_navigate_workspace(outcome);
+                    return;
+                }
                 self.accept_navigator_selection(outcome);
                 return;
             }
             if search_focused {
+                let mut edited: Option<(bool, bool)> = None;
                 if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
                     if let Some(selected) = navigator.selected.as_ref() {
                         navigator.fork.directory.endpoint_id = Some(selected.endpoint_id().clone());
                     }
                     if let Some(content_changed) = navigator.query.handle_key(key) {
-                        if content_changed {
-                            navigator.filter = None;
-                            navigator.selected = None;
-                        }
-                        outcome.repaint = true;
-                        return;
+                        edited = Some((content_changed, navigator.fork.switcher_search.is_some()));
                     }
+                }
+                if let Some((content_changed, switcher)) = edited {
+                    if content_changed {
+                        if let Some(ClientShellOverlay::Navigator(navigator)) =
+                            self.overlay.as_ref()
+                        {
+                            let rows = render::client_navigator_rows(
+                                &self.endpoints,
+                                &self.active_endpoint_id,
+                                navigator,
+                            );
+                            if let Some(ClientShellOverlay::Navigator(navigator)) =
+                                self.overlay.as_mut()
+                            {
+                                navigator.filter = None;
+                                if switcher {
+                                    super::switcher_search::reconcile_search_selection(
+                                        &rows,
+                                        &mut navigator.selected,
+                                    );
+                                } else {
+                                    navigator.selected = None;
+                                }
+                            }
+                        }
+                    }
+                    outcome.repaint = true;
+                    return;
                 }
                 if code == KeyCode::Up
                     || code == KeyCode::Char('p') && modifiers == KeyModifiers::CONTROL
                 {
-                    self.move_navigator_selection(-1);
+                    if self.navigator_mobile_blank_search() {
+                        self.move_navigate_workspace(-1);
+                    } else {
+                        self.move_navigator_selection(-1);
+                    }
                     outcome.repaint = true;
                     return;
                 }
                 if code == KeyCode::Down
                     || code == KeyCode::Char('n') && modifiers == KeyModifiers::CONTROL
                 {
-                    self.move_navigator_selection(1);
+                    if self.navigator_mobile_blank_search() {
+                        self.move_navigate_workspace(1);
+                    } else {
+                        self.move_navigator_selection(1);
+                    }
                     outcome.repaint = true;
                     return;
                 }
@@ -761,10 +900,7 @@ impl ClientShellState {
                 return;
             }
             if code == KeyCode::Char('/') && modifiers.is_empty() {
-                if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
-                    navigator.search_focused = true;
-                    navigator.filter = None;
-                }
+                self.enter_switcher_search();
                 outcome.repaint = true;
                 return;
             }
