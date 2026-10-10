@@ -4829,6 +4829,7 @@ async fn pane_death_reconciles_each_client_view_and_focus() {
     assert!(server.focus_shell_client_on_tab(72, &second_tab_id));
     server.clients.get_mut(&71).unwrap().outer_terminal_focus = Some(true);
     server.clients.get_mut(&72).unwrap().outer_terminal_focus = Some(false);
+    assert!(server.promote_client_to_foreground(71));
 
     assert!(
         server.handle_internal_event_with_forwarding(AppEvent::PaneDied {

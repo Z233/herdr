@@ -7,6 +7,8 @@ mod fork_live_merge;
 #[path = "client_mode/kitty_zlib.rs"]
 mod kitty_zlib;
 pub mod support;
+#[path = "client_mode/tab_geometry.rs"]
+mod tab_geometry;
 #[path = "support/terminal_screen.rs"]
 mod terminal_screen;
 

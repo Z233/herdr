@@ -656,7 +656,11 @@ impl HeadlessServer {
                 .get(&tab_id)
                 .is_some_and(|controller| viewers.contains(controller));
             if !controller_is_viewing {
-                self.tab_geometry_controllers.insert(tab_id, viewers[0]);
+                let controller = self
+                    .foreground_client_id
+                    .filter(|client_id| viewers.contains(client_id))
+                    .unwrap_or(viewers[0]);
+                self.tab_geometry_controllers.insert(tab_id, controller);
             }
         }
 
