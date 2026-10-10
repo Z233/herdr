@@ -355,7 +355,10 @@ impl ClientShellState {
         let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_ref() else {
             return;
         };
-        if navigator.fork.hold.is_some() || navigator.fork.directory.creating {
+        // Switcher search invalidates a pending create on an accepted query
+        // edit; direct Go To keeps its create/cancellation behavior.
+        let switcher = navigator.fork.switcher_search.is_some();
+        if navigator.fork.hold.is_some() || (navigator.fork.directory.creating && !switcher) {
             return;
         }
         let query = navigator.query.as_str().to_owned();
@@ -382,8 +385,14 @@ impl ClientShellState {
             directory.preview_path = None;
             directory.error = None;
             directory.loading = !query.trim().is_empty();
+            // Switcher-only: an accepted edit while creating drops the old
+            // create's authority; the bumped generation also rejects its
+            // response even if the text later reverts.
+            let invalidate_create = directory.creating;
+            directory.creating = false;
             self.pending_requests.retain(|_, pending| !matches!(&pending.kind,
-                PendingEndpointKind::Navigator(request) if !matches!(request.kind, NavigatorRequestKind::Create)
+                PendingEndpointKind::Navigator(request)
+                    if !matches!(request.kind, NavigatorRequestKind::Create) || invalidate_create
             ));
             if query.trim().is_empty() {
                 return;

@@ -1034,19 +1034,27 @@ fn switcher_search_live_acceptance_corrections() {
     input.write_all(b"\x1b[27u").unwrap();
     save_frame(&evidence, "03-missing-tab-restored", &output, 120, 36);
     input.write_all(b"\r").unwrap();
-    thread::sleep(Duration::from_millis(400));
-    let workspaces = send_json_request(
-        &api,
-        r#"{"id":"accept-focus-1","method":"workspace.list","params":{}}"#,
-    );
-    let focused = workspaces["result"]["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["focused"] == true)
-        .and_then(|item| item["workspace_id"].as_str())
-        .unwrap()
-        .to_owned();
+    let focused_workspace = |request_id: &str| -> String {
+        send_json_request(
+            &api,
+            &serde_json::json!({
+                "id":request_id, "method":"workspace.list", "params":{}
+            })
+            .to_string(),
+        )["result"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["focused"] == true)
+            .and_then(|item| item["workspace_id"].as_str())
+            .unwrap()
+            .to_owned()
+    };
+    let mut focused = String::new();
+    wait_until(Duration::from_secs(10), Duration::from_millis(100), || {
+        focused = focused_workspace("accept-focus-1");
+        focused == second_workspace
+    });
     checks.insert(
         "removed_tab_restores_parent".into(),
         (focused == second_workspace).into(),
@@ -1078,19 +1086,11 @@ fn switcher_search_live_acceptance_corrections() {
     input.write_all(b"\x1b[27u").unwrap();
     save_frame(&evidence, "04-input-click-restored", &output, 120, 36);
     input.write_all(b"\r").unwrap();
-    thread::sleep(Duration::from_millis(400));
-    let workspaces = send_json_request(
-        &api,
-        r#"{"id":"accept-focus-2","method":"workspace.list","params":{}}"#,
-    );
-    let focused = workspaces["result"]["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["focused"] == true)
-        .and_then(|item| item["workspace_id"].as_str())
-        .unwrap()
-        .to_owned();
+    let mut focused = String::new();
+    wait_until(Duration::from_secs(10), Duration::from_millis(100), || {
+        focused = focused_workspace("accept-focus-2");
+        focused == second_workspace
+    });
     checks.insert(
         "input_click_preserves_return_selection".into(),
         (focused == second_workspace).into(),
@@ -1319,6 +1319,112 @@ fn switcher_search_live_acceptance_corrections() {
         "mobile_configured_agent_icon_visible".into(),
         agent_rows.contains("◐").into(),
     );
+    // An accepted query edit while a Directory create is pending rejects the
+    // stale create result: the Switcher stays open with the new query.
+    struct ContGuard(libc::pid_t);
+    impl Drop for ContGuard {
+        fn drop(&mut self) {
+            unsafe { libc::kill(self.0, libc::SIGCONT) };
+        }
+    }
+    let race_directory = base.join(format!("kzxv987q{}", std::process::id() % 1000));
+    fs::create_dir_all(&race_directory).unwrap();
+    fs::write(
+        &zoxide,
+        format!("#!/bin/sh\nprintf '10 {}\\n'\n", race_directory.display()),
+    )
+    .unwrap();
+    input.write_all(b"\x1b[27u\x1b[27u").unwrap();
+    assert!(wait_until(
+        Duration::from_secs(12),
+        Duration::from_millis(40),
+        || {
+            let rows: Vec<String> = screen(&output, 45, 60)
+                .lines()
+                .take(2)
+                .map(str::to_owned)
+                .collect();
+            rows.iter().any(|line| line.contains("switch"))
+                && !rows.iter().any(|line| line.contains("close"))
+        },
+    ));
+    let switch: Vec<(usize, usize)> = screen(&output, 45, 60)
+        .lines()
+        .take(2)
+        .enumerate()
+        .filter_map(|(row, line)| line.find("switch").map(|col| (row, col)))
+        .collect();
+    if let Some((row, col)) = switch.first() {
+        input
+            .write_all(
+                format!(
+                    "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+                    col + 1,
+                    row + 1,
+                    col + 1,
+                    row + 1
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    wait_screen(&output, 45, 60, "+ new workspace");
+    input.write_all(b"\x1b[200~kzxv987q\x1b[201~").unwrap();
+    wait_screen(&output, 45, 60, "create workspace");
+    let directory_row = screen(&output, 45, 60)
+        .lines()
+        .position(|line| line.contains("create workspace"))
+        .unwrap()
+        + 1;
+    let server_pid = server.child.process_id().expect("server pid") as libc::pid_t;
+    let guard = ContGuard(server_pid);
+    unsafe { libc::kill(server_pid, libc::SIGSTOP) };
+    input
+        .write_all(format!("\x1b[<0;8;{directory_row}M\x1b[<0;8;{directory_row}m").as_bytes())
+        .unwrap();
+    input
+        .write_all(b"\x1b[200~query-after-create\x1b[201~")
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    checks.insert(
+        "query_accepted_before_create_response".into(),
+        screen(&output, 45, 60)
+            .lines()
+            .take(3)
+            .any(|line| line.contains("query-after-create"))
+            .into(),
+    );
+    save_frame(&evidence, "09-stale-create-paused", &output, 45, 60);
+    unsafe { libc::kill(server_pid, libc::SIGCONT) };
+    assert!(wait_until(
+        Duration::from_secs(12),
+        Duration::from_millis(100),
+        || {
+            send_json_request(
+                &api,
+                r#"{"id":"race-list","method":"workspace.list","params":{}}"#,
+            )["result"]["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| {
+                    item["label"]
+                        .as_str()
+                        .is_some_and(|label| label.contains("kzxv987q"))
+                })
+        },
+    ));
+    thread::sleep(Duration::from_millis(500));
+    save_frame(&evidence, "10-stale-create-resumed", &output, 45, 60);
+    checks.insert(
+        "query_change_during_create_keeps_switcher".into(),
+        screen(&output, 45, 60)
+            .lines()
+            .take(3)
+            .any(|line| line.contains("query-after-create"))
+            .into(),
+    );
+    drop(guard);
     fs::write(
         evidence.join("acceptance-result.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
