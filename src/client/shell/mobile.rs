@@ -731,9 +731,9 @@ pub(super) fn render_mobile_search_results(
         }
         .add_modifier(dim);
         buffer.set_style(Rect::new(area.x, y, area.width, 1), style);
-        let indent = "  ".repeat(usize::from(row.depth));
-        let mut label = indent.clone();
-        let mut icon_width = 0u16;
+        // One non-overlapping row layout: indent, status icon, label, then a
+        // bounded right-aligned metadata tail.
+        let mut content_x = area.x + 2 * u16::from(row.depth);
         if let Some(status) = row.status {
             let icon = status_icon(status, config.status_indicators);
             let icon_style = style.fg(if row.stale {
@@ -743,30 +743,36 @@ pub(super) fn render_mobile_search_results(
             });
             put_text(
                 buffer,
-                area.x + super::render::display_width(&indent),
+                content_x,
                 y,
                 super::render::display_width(icon),
                 icon,
                 icon_style,
             );
-            icon_width = super::render::display_width(icon) + 1;
+            content_x += super::render::display_width(icon) + 1;
         }
-        label.push_str(&row.label);
+        let mut label = row.label.clone();
         if !row.detail.is_empty() {
             label.push_str(" · ");
             label.push_str(&row.detail);
         }
-        // Meta ("create workspace", endpoint label) keeps its own tail space,
-        // matching the desktop right-aligned convention on narrow screens.
+        // The metadata tail ("create workspace" hint, endpoint label, path)
+        // keeps the row tail but never starves the target name: it yields the
+        // label's natural width up to half the remaining row, matching the
+        // desktop right-aligned convention on narrow screens.
         let meta_suffix = if row.meta.is_empty() {
             String::new()
         } else {
             format!(" · {}", row.meta)
         };
-        let meta_width = super::render::display_width(&meta_suffix);
-        let label_width = area.width.saturating_sub(meta_width + icon_width);
-        put_text(buffer, area.x + icon_width, y, label_width, &label, style);
-        if !meta_suffix.is_empty() {
+        let content_width = area.right().saturating_sub(content_x);
+        let meta_width = super::render::display_width(&meta_suffix).min(
+            content_width
+                .saturating_sub(super::render::display_width(&label).min(content_width / 2)),
+        );
+        let label_width = content_width.saturating_sub(meta_width);
+        put_text(buffer, content_x, y, label_width, &label, style);
+        if meta_width > 0 {
             let meta_style = if row_selected {
                 style
             } else {
@@ -774,9 +780,9 @@ pub(super) fn render_mobile_search_results(
             };
             put_text(
                 buffer,
-                area.x + label_width,
+                area.right().saturating_sub(meta_width),
                 y,
-                area.width.saturating_sub(label_width),
+                meta_width,
                 &meta_suffix,
                 meta_style,
             );

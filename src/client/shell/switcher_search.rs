@@ -87,8 +87,10 @@ pub(super) fn switcher_search_rows(
             if let Some(branch) = workspace.branch.as_deref() {
                 ws_fields.push(branch);
             }
-            // Workspace creation cwd is a canonical match field even after the
-            // shell moved elsewhere; display meta keeps its own precedence.
+            // The projected workspace launch directory is a canonical match
+            // field; it follows the current launch policy/foreground path and
+            // is not immutable creation history. Display meta keeps its own
+            // precedence.
             ws_fields.push(workspace.new_workspace_cwd.as_str());
             let ws_context = ws_fields.join(" ");
             ws_fields.push(&ws_context);

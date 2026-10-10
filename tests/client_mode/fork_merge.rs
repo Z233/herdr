@@ -868,7 +868,7 @@ fn switcher_search_live_acceptance_corrections() {
         &config,
         &runtime,
         &api,
-        "onboarding = false\n[keys]\nworkspace_switcher = 'alt+tab'\n",
+        "onboarding = false\n[ui]\nstatus_indicators = 'symbols'\n[keys]\nworkspace_switcher = 'alt+tab'\n",
         &[("PATH", path_env.as_str())],
     );
     wait_for_socket(&api, Duration::from_secs(10));
@@ -1263,6 +1263,62 @@ fn switcher_search_live_acceptance_corrections() {
         (!frame.contains("/ needle") && !frame.contains("+ new workspace")).into(),
     );
     save_frame(&evidence, "07-mobile-close", &output, 45, 60);
+    // Agent status icon and pane label stay visible with a long path meta.
+    let agent_pane = first_pane_id_in_workspace(&api, &workspace);
+    send_json_request(
+        &api,
+        &serde_json::json!({
+            "id":"agent-rename", "method":"pane.rename",
+            "params":{"pane_id":agent_pane,"label":"IconProbe"}
+        })
+        .to_string(),
+    );
+    send_json_request(
+        &api,
+        &serde_json::json!({
+            "id":"agent-report", "method":"pane.report_agent",
+            "params":{"pane_id":agent_pane,"source":"acceptance-proof","agent":"pi","state":"working","seq":1}
+        })
+        .to_string(),
+    );
+    let switch: Vec<(usize, usize)> = screen(&output, 45, 60)
+        .lines()
+        .take(2)
+        .enumerate()
+        .filter_map(|(row, line)| line.find("switch").map(|col| (row, col)))
+        .collect();
+    if let Some((row, col)) = switch.first() {
+        input
+            .write_all(
+                format!(
+                    "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+                    col + 1,
+                    row + 1,
+                    col + 1,
+                    row + 1
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    wait_screen(&output, 45, 60, "+ new workspace");
+    input.write_all(b"\x1b[200~IconProbe\x1b[201~").unwrap();
+    wait_screen(&output, 45, 60, "/ IconProbe");
+    thread::sleep(Duration::from_millis(500));
+    save_frame(&evidence, "08-mobile-agent-icon-long-path", &output, 45, 60);
+    let agent_rows = screen(&output, 45, 60)
+        .lines()
+        .skip(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    checks.insert(
+        "mobile_long_path_preserves_pane_name".into(),
+        agent_rows.contains("IconProbe").into(),
+    );
+    checks.insert(
+        "mobile_configured_agent_icon_visible".into(),
+        agent_rows.contains("◐").into(),
+    );
     fs::write(
         evidence.join("acceptance-result.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
