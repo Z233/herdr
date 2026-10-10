@@ -1,21 +1,59 @@
-# Herdr Fork (z233) — 功能与合并边界
+# Herdr Fork (z233) — 功能、修复与合并记录
 
-本次合并固定采用上游 v0.9.3（`7b116c05bfda646af39d2524c54e70c751f57ee8`）。用户说明集中在根目录 `README.md`；本文记录维护边界、实现入口和验证路线。下方历史记录只说明当时的实现，不是当前架构约束。
+本文是 fork 差异的维护清单，供后续合并上游时逐项核对。使用说明见根目录 [`README.md`](../README.md)；上游产品文档保持上游版本。
 
-## v0.9.3 架构边界
+- 最近合入的上游稳定版：v0.9.3（`7b116c05bfda646af39d2524c54e70c751f57ee8`），合并提交 `1d58f1aa`。
+- 本次盘点截至 fork 提交：`a9948c18`。这不是“远端上游最新版本”的声明。
+- 状态：**保留**表示当前仍需保护；**已替代**表示只保留行为；**已撤销**表示不恢复该实现。
+- 提交用于追溯意图，不是待逐个 cherry-pick 的补丁清单。下方历史合并记录不约束当前实现。
 
-| 能力 | 所属层 | 当前实现与约束 |
+## 功能清单（当前均保留）
+
+MRU（Most Recently Used）指最近使用顺序；endpoint 指本地或 SSH 服务器端点。通用 Navigator 是上游能力，下面记录 fork 对它的扩展。
+
+| ID / 能力 | 所属层 | 合并后必须保留的行为 | 关键提交 |
+|---|---|---|---|
+| F01 多步 prefix chord | input primitive + client controller | prefix 后最多三步，较长的重叠绑定优先；超时与完整 chord 使用同一 action gateway，兼容上游多 prefix。 | `088de543`、`201c8cd7`、`1d58f1aa` |
+| F02 四向创建 pane | runtime/API | 支持 left/down/up/right；left/up 插在目标前，ratio 是第一个 child 的比例；保留显式 target 和 caller target。旧 endpoint 未广告 `pane.split.directional` 时不发送 left/up。 | `088de543`、`5dd9a2a7`、`1d58f1aa` |
+| F03 MRU hold-to-switch | client shell | 按住可配置修饰键循环，Shift 反向，释放修饰键确认；j/k 导航、h/l 展开/折叠。workspace/tab/pane 目标带 endpoint 身份；MRU 每客户端独立，仅在激活实际呈现后更新。 | `693bca67`、`3f87cb27`、`b8d02dc2`、`5dd9a2a7` |
+| F04 switcher 内独立搜索 | client shell | 搜索留在 switcher，按匹配质量、MRU、snapshot 顺序排名，目录候选置后。进入搜索后，本次打开不再释放确认；第一次 Esc 恢复列表、选择、展开和滚动，第二次关闭。直接 Go To 不变。 | `8d79fde7` |
+| F05 Zoxide 目录搜索与创建 | endpoint API/runtime | `workspace.search`、`workspace.directory_preview`、`workspace.create` 在所选 endpoint 执行；客户端不读取远端路径。错误和超时可见，响应校验请求、boot 与连接 generation。 | `71833771`、`bc52f25d`、`8688d43d`、`5dd9a2a7` |
+| F06 完整 tab 预览与结构化标签 | client shell + 中立读取 API | 宽屏预览整个选中 tab，保留 ANSI 样式；读取使用明确目标且不改变其他客户端焦点或尺寸。worktree 标签显示仓库与分支；render 只绘制解码后的缓存。 | `6a6b7c81`、`9fe1d558`、`f449792e`、`5dd9a2a7` |
+| F07 移动端 switcher | client shell | 全屏列表支持输入/粘贴搜索；`s` 是查询文本。tap 保持打开，hold/竖拖选择，右划展开 workspace 的全部 pane，左划折叠，释放确认。workspace 使用跨 endpoint MRU；pane 使用本客户端已呈现的焦点历史，打开期间顺序固定，新 pane 追加、删除项移除。 | `682fac82`、`7ccec3cf`、`ad0069d7`、`55e333c6`、`8d79fde7` |
+| F08 移动端 zoom map | client shell | 展示完整 tab 布局、隐藏邻居及其 agent 状态；点击可换焦点。`pane.layout` 使用明确 pane ID；状态按 endpoint + pane ID 关联，不增加 mobile 专属 wire 字段。 | `0bfe5a04`、`a91b936e`、`0b6309e7`、`5dd9a2a7` |
+| F09 EasyMotion 与 copy initial action | normal client copy mode | 两字符搜索后按标签跳转，支持 smart case、宽字符及 selection anchor；保留进入 copy mode 后启动 EasyMotion 或上滚半页的入口。 | `e97a050a`、`2b7484ec`、`5dd9a2a7` |
+| F10 IME associated text | input primitive | 解析并转发 Kitty keyboard associated text，保留 modifier press/release 语义；共享 TextEditor 在光标处插入，跨读取分片只展开一次。 | `0df99265`、`7a1b143d`、`1d58f1aa` |
+| F11 Spaces-only sidebar | client configuration/presentation | `ui.sidebar.agents.visible = false` 隐藏所有 machine group 的 Agents 区并回收几何和命中区域；检测、通知与 runtime agent API 不受影响。 | `2e92522f`、`5dd9a2a7` |
+| F12 Kitty RGB/RGBA zlib 输出 | client-to-terminal output | inline 原始像素压缩后小于原始字节数的 90% 才使用标准 `o=z`；否则回退原始输出。PNG、local file 路径、像素和 placement 不变；不承诺上传期间输入响应。 | `ff704290`、`80e3639c` |
+
+## Bug 修复清单（当前均保留）
+
+这里记录问题和回归约束，不把历史实现当成必须保留的代码。测试名是可运行的 filter；fixture 与真实终端测试的证据不同。
+
+| ID / 范围 | 原问题 → 必须保留的结果 | 关键提交 | 回归入口 |
+|---|---|---|---|
+| B01 F03 输入释放 | Tab release 或单独修饰键可能误确认/干扰 prefix → 只在 hold 修饰键 release 确认，重复 ID 按 endpoint 区分。 | `71a8d58f`、`7fa9c983` | `fork_merge_hold_switcher_qualifies_duplicate_ids_and_selects_only_on_modifier_release` |
+| B02 F05 过期响应 | 关闭重开或改 query 后，旧搜索/创建响应可能影响新界面 → generation 不复用；switcher 查询编辑使旧 create 失效，响应不得关闭界面或激活目标。 | `bc52f25d`、`5dd9a2a7`、`2590b96f` | `fork_merge_reopened_navigator_rejects_a_previous_creation_result`；`switcher_search_live_acceptance_corrections` |
+| B03 F06 预览刷新 | metadata/surface 刷新暂时清空预览 → 身份未变时保留内容；endpoint、boot、generation 或目标变化时丢弃。 | `72e1b3d3` | `fork_merge_navigator_preview_keeps_remote_content_during_metadata_refresh`；`fork_merge_navigator_preview_discards_retained_content_when_identity_changes` |
+| B04 F03/F06 桌面外观 | quick-switch popup 几何退化、预览默认背景与 panel 不一致 → hold 保留 inset 几何，Go To 保留自己的几何，预览保留程序背景并隐藏 pane ID。 | `1357e77f`、`4433352f`、`ec0f6d28` | `fork_merge_quick_switch_restores_desktop_inset_geometry`；`fork_merge_navigator_remote_preview_uses_first_row_and_panel_background` |
+| B05 F07 列表顺序 | 移动端顺序退化为 endpoint 分组 → 恢复全局 workspace MRU，未知项稳定回退，pane 顺序在本次打开期间不重排。 | `ad0069d7`、`55e333c6` | `mobile_order_is_flat_global_mru_with_stable_unknown_fallback`；`mobile_panes_recency_is_presented_focus_only_and_order_is_frozen_until_reopen` |
+| B06 F07 边缘滚动 | 同一次 hold 中不能反向滚动 → 下滚后可上滚，中部停止，释放仍选择当前项。 | `34e30872` | `mobile_edge_scroll_down_then_up_same_hold_and_exact_release` |
+| B07 F04/F07 标签与状态 | 展开 pane 缺少状态，窄屏搜索丢失标签/状态图标 → 状态遵循配置，保留 workspace/tab/pane 标签及已有状态图标。 | `02532b92`、`2f8e75e9` | `mobile_panes_status_icons_follow_config_and_survive_narrow_stale_rows`；`switcher_search_live_acceptance_corrections` |
+| B08 F07 手势与失效目标 | 背景客户端 render 取消手势，删除目标后可能误激活 → 无关刷新保留锚点；目标移除或 endpoint 身份变化后取消释放确认。 | `b84fc097`、`0a912163`、`b56fcf2b` | `fork_merge_mobile_hold_and_drag_survives_an_unrelated_snapshot_refresh`；`mobile_panes_deleted_selected_or_anchor_and_endpoint_identity_changes_cancel_release` |
+| B09 F07 自动打开 | 正常移动端状态也强制打开列表 → 仅空状态自动打开；按钮默认选择当前 workspace。 | `13de15c5`、`7abf3e73` | `fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile` |
+| B10 F08 旧命中目标 | zoom map 保留已删除邻居或错误后不刷新 → 移除 pane 立即清除旧 hit，最多每秒刷新一次，错误可重试。 | `0b6309e7`、`5dd9a2a7` | `fork_merge_zoom_map_retires_removed_neighbors_before_refresh`；`fork_merge_zoom_map_retries_and_refreshes_without_a_projection_change` |
+| B11 F03/F09 copy mode | copy mode 无法打开 switcher，布局/content 变化留下旧 EasyMotion 标签 → switcher 可打开，copy bounds 稳定；resize/content/session 变化取消旧匹配。 | `78735ff7`、`1aed0024`、`5dd9a2a7` | `fork_merge_easymotion_discards_labels_after_resize_or_content_change`；`fork_merge_live_navigator_two_clients_preview_release_search_copy_and_mobile` |
+| B12 多客户端 geometry | 无有效 controller 的 tab 取首个 viewer 尺寸，而不是 foreground viewer → 优先当前仍查看该 tab 的 foreground；保留现有有效 controller；foreground 离开时回退其他 viewer。 | `a9948c18` | `public_editor_tab_focus_uses_foreground_viewer`；`public_focused_tab_create_uses_foreground_viewer`；`geometry_reapply_uses_a_viewer_when_foreground_leaves` |
+
+## 已替代与已撤销
+
+| 状态 | 历史能力/实现 | 当前处理 |
 |---|---|---|
-| Navigator 与 MRU | client shell | 一个 Navigator 同时支持搜索与按住修饰键切换；目标包含 endpoint 与明确的 workspace/tab/pane 类型。MRU 每客户端独立，仅在激活结果实际呈现后更新。 |
-| 普通入口与 hold 入口 | client configuration/input | 普通搜索入口为 `keys.goto`（默认 `prefix+g`）；hold 入口保留 `workspace_switcher` 和 `workspace_switcher_backward`，保留显式禁用、快捷键冲突诊断与派生反向键。`workspace_picker` 已移除，不得恢复。 |
-| 目录搜索与创建 | endpoint API/runtime | `workspace.search`、`workspace.directory_preview` 与 `workspace.create` 在所选 endpoint 执行；客户端不读取远端路径。响应绑定请求、endpoint、boot 与连接 generation。 |
-| 终端预览 | client shell + 中立读取 API | 宽屏预览整个选中 tab；已有本地 surface 可直接复用，其他目标通过显式 `pane.layout`、`pane.read` 读取。ANSI 解码在响应处理阶段完成，render 只绘制缓存。 |
-| Mobile gesture | client shell | tap、hold/drag、展开/折叠均为客户端状态；背景刷新不改变手势锚点，目标移除或 endpoint 更换时取消。 |
-| Zoom map | client shell | `pane.layout` 返回完整布局及独立 zoom 标记；状态按 endpoint + pane ID 关联。不新增 `ZoomMapSlot` wire 字段。 |
-| EasyMotion | normal client copy mode | 使用 `ClientCopyModeState` 的 selection、surface、content revision 和 geometry 检查，保留两个 initial action；不再使用服务端 FrozenCopyView/ForkFeatureState。 |
-| Prefix chord/IME | 中立 input primitive + client controller | 最多三步 prefix chord；超时短绑定和完整 chord 走同一 action gateway。modifier release 与 kitty associated text 保持原语义，共享 TextEditor 在光标处插入。 |
-| 四向 split | runtime/API | `pane.split` 使用四向 `PaneDirection`；结构树仍用 canonical right/down。left/up 插在前，ratio 表示第一个 child 的比例；显式 target 与 caller target 均保留。 |
-| Sidebar visibility | client configuration/presentation | `ui.sidebar.agents.visible = false` 对全部 machine group 生效，并回收几何与命中区域；不影响检测、通知与 runtime agent API。 |
+| 已替代 | 独立 `workspace_picker` 入口 | `44a95b03` 移除。旧 key 静默忽略；`prefix+w` 仅作为方向 chord leader，timeout/Esc 不打开界面。普通搜索使用 `keys.goto`，hold 使用 `workspace_switcher`。 |
+| 已替代 | 服务端 FrozenCopyView / ForkFeatureState、旧 picker/switcher overlay | v0.9.1 合并 `5dd9a2a7` 后由 client shell 和正常 copy mode 实现；保护 F03/F09 行为，不恢复旧模块。 |
+| 已撤销 | ACK 驱动的异步图像上传工作线程 | `761058bc` 等实现曾随 v0.9.3 合入，但 `21c44c43` 已撤销。当前仅保留 F12 压缩；不得把“上传不阻塞输入”当成现有能力。 |
+
+## 当前架构边界
 
 ### Production
 
@@ -29,43 +67,36 @@ Host input
             → Client projection and cached rendering
 ```
 
-终端 wire protocol 保持 22（上游 v0.9.2 的新能力经协商字段扩展，未再升版本）；endpoint generation 1 envelope 保持不变。新增读取能力通过 advertised method list 发现。`pane.read.expected_size`、`pane.layout.panes[].terminal_size` 为可选 JSON 字段；读取返回实际 content revision，尺寸或内容在捕获期间变化时返回明确错误。被动预览不得抢占 foreground、focus 或其他客户端的 geometry。客户端仅在 endpoint 广告 `pane.split.directional` 后发送 left/up；该中立 API 与 `pane.split` 共用四向实现。旧客户端的 right/down 请求形状保持不变，公开 `pane.split` API 仍支持四向。上游 v0.9.2 移除自定义 `pane.graphics` API，图像经标准 Kitty 协议传输；fork 保留 ACK 驱动的有界输出工作线程（按写确认推进、不阻塞输入循环）。
+截至本次盘点，终端 wire protocol 为 22，endpoint generation 1 envelope 保持不变。新增读取能力通过 advertised method list 发现。`pane.read.expected_size`、`pane.layout.panes[].terminal_size` 为可选 JSON 字段；读取返回实际 content revision，尺寸或内容在捕获期间变化时返回明确错误。被动预览不得抢占 foreground、focus 或其他客户端的 geometry。旧客户端的 right/down 请求形状保持不变，公开 `pane.split` API 仍支持四向。上游 v0.9.2 已移除自定义 `pane.graphics` API，图像经标准 Kitty 协议传输。
 
-## 配置与行为
+## 配置与请求约束
 
-| 配置项 | 默认值 | 行为 |
-|---|---|---|
-| `prefix` | `"ctrl+b"` | 可为数组（上游 v0.9.2）；每个 prefix 进入同一 prefix mode 与 chord gateway，prefix 集合内所有键均为保留键。 |
-| `keys.goto` | `"prefix+g"` | 普通 Navigator 搜索入口。 |
-| `keys.workspace_switcher` | `"ctrl+tab"` | MRU hold-to-switch，释放打开时使用的修饰键后确认。 |
-| `keys.workspace_switcher_backward` | 未设置时自动推导 | 显式空字符串或空列表禁用反向键，不再自动补回。 |
-| `keys.chord_timeout_ms` | `500` | 最多三步 prefix chord；`0` 禁用等待。 |
-| `keys.open_pane_left/down/up/right` | `prefix+w+h/j/k/l` | 指定方向创建 pane。 |
-| `keys.copy_mode_easymotion` | 未设置 | 进入 copy mode 后启动两字符匹配。 |
-| `keys.copy_mode_scroll_up` | 未设置 | 进入 copy mode 后上滚半页。 |
-| `ui.sidebar.agents.visible` | `true` | 显示所有机器的 agent 区域。 |
+配置示例和默认值见 [`README.md` 的 Configuration](../README.md#configuration)，实际字段见 `src/config/model.rs`。合并时额外核对：
 
-旧的 `quick_switch_workspace` / `quick_switch_workspace_backward` 名称继续作为过时配置诊断，不是当前配置字段。`workspace_picker` 已于 `44a95b03` 移除：作为静默忽略的旧 key（无诊断、无绑定），不得恢复；`prefix+w` 仅作为方向 split chord 的前缀，等待 timeout 或 Esc 时不打开任何界面。
-
-Hold 模式支持修饰键+Tab 循环、Shift 反向、j/k 导航、h/l 折叠/展开、s 或 / 转为搜索，Esc 取消。切换尚未完成时显式本地选择可取消远端目标。目标的 boot 或连接 generation 变化后不得接受旧选择。
+- 保留显式禁用、快捷键冲突诊断与派生反向键。`workspace_switcher_backward` 的空字符串/空列表表示禁用，不能自动补回。
+- 上游 `prefix` 可以是数组；每个 prefix 进入同一 chord 控制器，全部 prefix 键均为保留键。`chord_timeout_ms = 0` 禁用等待。
+- 旧 `quick_switch_workspace` / `quick_switch_workspace_backward` 保留过时配置诊断，不恢复为当前字段。
+- 切换尚未完成时，显式本地选择可取消远端目标。boot 或连接 generation 变化后拒绝旧选择。
 
 Zoxide 子进程输出有上限，查询与路径规范化共享截止时间；目录预览最多保留 200 条条目，文件系统后台任务并发有界。进程不可用、非零退出、超时、目录错误和创建错误都保留在客户端状态中。
 
-Navigator 的查询 generation 在重开后不复用；旧创建响应不得改变新 overlay，已替换的目录预览及时移除 pending scope。Zoom map 每秒最多刷新一次，错误后可重试；pane 集合、zoom 或焦点变化会清除旧布局和命中目标，agent 状态仍从当前 endpoint snapshot 读取。
+已替换的目录预览及时移除 pending scope。switcher 搜索编辑 query 时取消旧 create 的客户端接受权限；这不撤销服务器上可能已经完成的 workspace 创建，也不改变直接 Go To 的 create/cancel 行为。
 
 ## 当前文件入口
 
 | 范围 | 入口 |
 |---|---|
-| Navigator/MRU/search | `src/client/shell/navigator.rs`、`aggregate_navigation.rs`、`overlay_input.rs` |
+| Navigator/MRU/search | `src/client/shell/navigator.rs`、`src/client/shell/switcher_search.rs`、`src/client/shell/aggregate_navigation.rs`、`src/client/shell/overlay_input.rs` |
 | Cached terminal preview | `src/client/shell/navigator_preview.rs`、`src/pane/terminal/ansi_snapshot.rs` |
 | Endpoint search provider | `src/app/workspace_search_provider.rs`、`src/app/api/workspace_search.rs` |
-| Passive endpoint commands | `src/client/endpoint_commands.rs`、`src/server/headless/endpoint_requests.rs`、`client_views.rs` |
-| Mobile/zoom | `src/client/shell/mobile.rs`、`mobile_gesture.rs`、`zoom_map.rs` |
-| Copy/EasyMotion | `src/client/shell/copy_mode.rs`、`easymotion.rs`、`surface_patch.rs` |
+| Passive endpoint commands | `src/client/endpoint_commands.rs`、`src/server/headless/endpoint_requests.rs`、`src/server/headless/client_views.rs` |
+| Mobile/zoom | `src/client/shell/mobile.rs`、`src/client/shell/mobile_gesture.rs`、`src/client/shell/mobile_panes.rs`、`src/client/shell/zoom_map.rs` |
+| Copy/EasyMotion | `src/client/shell/copy_mode.rs`、`src/client/shell/easymotion.rs`、`src/client/shell/surface_patch.rs` |
 | Chords/raw input | `src/client/shell/prefix_chord.rs`、`src/input/keybindings.rs`、`src/raw_input.rs` |
 | Split semantics | `src/app/api/panes.rs`、`src/layout.rs`、`src/workspace.rs`、`src/workspace/tab.rs` |
-| Config/sidebar | `src/config/{model,keybinds,io}.rs`、`src/client/shell/sidebar.rs`、`endpoint_sidebar.rs` |
+| Config/sidebar | `src/config/model.rs`、`src/config/keybinds.rs`、`src/config/io.rs`、`src/client/shell/sidebar.rs`、`src/client/shell/endpoint_sidebar.rs` |
+| Kitty 压缩 | `src/client/frame_output.rs`、`src/client/frame_output_tests.rs` |
+| Tab geometry controller | `src/server/headless/client_views.rs`、`tests/client_mode/tab_geometry.rs` |
 
 旧的 `src/ui/workspace_picker.rs`、`src/ui/workspace_switcher.rs`、`src/fork_features.rs` 和服务端 fork overlay adapter 已不作为实现入口；不得恢复它们来绕过 client shell。
 
@@ -80,15 +111,46 @@ Fork characterization + upstream regression cases
       → JSON assertions and captured terminal frames
 ```
 
-先运行 `just test-one fork_merge` 与相应 feature filter，再运行 `just check`。`tests/fork_merge.rs` 为 Unix 上可实际执行的 CLI 黑盒入口，不将 macOS 上零匹配的 CLI target 视为通过。client shell 的 fixture tests 与真实终端 E2E、跨版本 handoff 是不同证据，不得互相替代。真实终端 E2E 额外记录 escape-prefixed 词移动（`AB Z_CD`）与 kitty associated-text（`你好`）的按键证据帧。
+先运行 `just test-one fork_merge` 与改动范围的 filter，再运行 `just check`。`tests/fork_merge.rs` 为 Unix 上可实际执行的 CLI 黑盒入口，不将 macOS 上零匹配的 CLI target 视为通过。测试文件按范围查找：
+
+| 范围 | Fixture / 黑盒入口 |
+|---|---|
+| F01/F02/F10 | `src/client/shell/tests/fork_input.rs`；`tests/cli/fork_merge.rs`；`src/raw_input.rs` |
+| F03/F04/F05 | `src/client/shell/tests/fork_navigator.rs`、`src/client/shell/tests/switcher_search.rs`；`tests/client_mode/fork_merge.rs` |
+| F06 | `src/client/shell/tests/fork_preview.rs`；`tests/client_mode/fork_merge.rs` |
+| F07/F08/F11 | `src/client/shell/tests/fork_mobile.rs`、`src/client/shell/tests/mobile_order.rs`、`src/client/shell/tests/mobile_panes.rs`；`tests/client_mode/fork_merge.rs` |
+| F09 | `src/client/shell/tests/fork_easymotion.rs`；`tests/client_mode/fork_merge.rs` |
+| F12 | `src/client/frame_output_tests.rs`；`tests/client_mode/kitty_zlib.rs`（SSH 测试为 opt-in） |
+| B12 | `tests/client_mode/tab_geometry.rs` |
+
+client shell fixture、真实终端 E2E 和跨版本 handoff 是不同证据，不得互相替代。E2E 产物包括终端帧和 JSON；可用 `HERDR_MERGE_EVIDENCE_DIR` 指定 fork E2E 目录，`HERDR_TAB_GEOMETRY_ARTIFACT_DIR` 指定 geometry 目录。真实终端 E2E 额外记录 escape-prefixed 词移动（`AB Z_CD`）与 kitty associated-text（`你好`）的按键证据帧。
+
+F12 使用 `just test-kitty-zlib-ssh <host>` 验证 RGB/RGBA 像素与不可压缩回退；终端流、像素 hash、字节数和计时保存在命令打印的 `/var/tmp/herdr-kitty-zlib-ssh-*` 目录。它测量 client-to-terminal SSH relay，不证明 server-to-client 流量减少或上传时输入可响应。
 
 必须保留的 upstream regression：`foreign_preview_survives_local_updates_and_rejects_stale_enter`、`clicking_local_can_cancel_a_remote_switch_while_local_is_still_displayed`、`navigator_foreign_tab_selection_keeps_the_tab_target`、`api_pane_layout_returns_public_ids_rects_and_splits`、`same_tab_geometry_follows_meaningful_client_activity`、`text_delivery_paths_insert_at_the_cursor`、`keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe`。
 
 渲染相关修改需执行 `just bench-render-scale` 并记录 1/15 pane 对比。protocol 20→22 迁移和 live handoff 要分别验证。最终验证结果记录在合并证据目录中；本节仅列验证要求，不代替执行结果。
 
+## 维护与合并核对
+
+### 新增功能或修复时
+
+1. 在对应清单新增稳定 ID，或更新已有行；写明用户可见行为、关键提交和回归入口。
+2. 若能力被撤销或实现被替代，移到对应状态表；保留原提交及替代关系，不把旧实现继续列为有效能力。
+3. 更新受影响的文件入口和盘点截止提交；本文不复制上游 changelog，不记录无行为影响的逐次重构。
+
+### 合并上游时
+
+1. 确认目标稳定 tag。结合本文和 `git diff <tag> HEAD` 核对差异；仅凭提交标题不能判断能力是否仍存在。
+2. 为每个 F/B ID 标明本次结果：fork 保留、上游等价覆盖、适配后保留或经用户确认撤销。只有回归行为验证通过，才将补丁记为上游覆盖。
+3. 发生冲突时，先保护清单行为和 endpoint 兼容边界，再选择实现；已撤销项保持撤销。具体流程见 [merge-herdr-upstream](../.agents/skills/merge-herdr-upstream/SKILL.md)。
+4. 执行受影响的回归入口及完整检查，记录失败、跳过和产物路径。更新基线、截止提交和历史合并结果后，才算完成盘点。
+
 ## 历史合并记录（非当前架构）
 
 ### Merge v0.9.3 (7b116c05, 2026-09-30)
+
+注意：下方 ACK 输出工作线程及对应测试仅描述合并当时的结果；后续 `21c44c43` 已撤销该方案。
 
 冲突文件 (37)：构建/文档 18（`Cargo.toml`、`Cargo.lock`、`justfile`、`skills/herdr/SKILL.md`、`CHANGELOG.md`、`docs/next` 多语言文档），运行时 19（`src/api/schema/panes.rs`、`src/client/mod.rs`、`src/client/state.rs`、`src/client/terminal_geometry.rs`、`src/client/terminal_setup.rs`、`src/client/shell/{actions,aggregate_navigation,composition,graphics,input,overlays,render}.rs`、`src/client/shell/tests/{endpoints,graphics,input}.rs`、`src/config/{keybinds,model}.rs`、`src/kitty_graphics/surface.rs`、`src/layout.rs`、`src/platform/windows.rs`、`src/server/client_commands.rs`）。
 
