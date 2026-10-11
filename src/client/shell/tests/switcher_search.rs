@@ -639,7 +639,13 @@ fn switcher_search_auto_selection_prefers_best_match_and_skips_context_ancestors
     state.handle_input_bytes(b"herdr logs");
     assert_eq!(selected(&state), Some(pane_target("pane_2")));
     state.handle_input_bytes(b"\x7f\x7f\x7f\x7f\x7f");
-    assert_eq!(selected(&state), Some(pane_target("pane_2")));
+    assert_eq!(
+        selected(&state),
+        Some(ClientNavigatorTarget::Workspace {
+            endpoint_id: ClientEndpointId::Local,
+            workspace_id: "ws_1".into()
+        })
+    );
     state.handle_input_bytes(b"\x7f\x7f\x7f\x7f\x7f");
     assert_eq!(selected(&state), None);
     state.handle_input_bytes(b"docs");
@@ -650,6 +656,83 @@ fn switcher_search_auto_selection_prefers_best_match_and_skips_context_ancestors
             tab_id: "tab_2".into()
         })
     );
+}
+
+#[test]
+fn switcher_search_query_edits_reset_selection_on_desktop_and_mobile() {
+    for mobile in [false, true] {
+        for edit in [
+            RawInputEvent::Text(crate::input::TextCommit::new(" ")),
+            RawInputEvent::Paste(" ".into()),
+            RawInputEvent::Key(crate::input::TerminalKey::new(
+                KeyCode::Backspace,
+                KeyModifiers::empty(),
+            )),
+        ] {
+            let mut state = if mobile {
+                mobile_shell()
+            } else {
+                let (mut state, _) = search_endpoints();
+                open_switcher(&mut state);
+                key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
+                state
+            };
+            state.handle_input_bytes(b"client-shell ");
+            let first = selected(&state);
+            assert_eq!(
+                first,
+                Some(ClientNavigatorTarget::Workspace {
+                    endpoint_id: ClientEndpointId::Local,
+                    workspace_id: "ws_1".into()
+                })
+            );
+            key(&mut state, KeyCode::Down, KeyModifiers::empty());
+            key(&mut state, KeyCode::Down, KeyModifiers::empty());
+            assert_eq!(selected(&state), Some(pane_target("pane_1")));
+            let description = format!("mobile={mobile}, edit={edit:?}");
+            state.handle_raw_events(vec![edit]);
+            assert_eq!(selected(&state), first, "{description}");
+        }
+    }
+}
+
+#[test]
+fn switcher_search_refresh_and_cursor_motion_preserve_manual_selection() {
+    let (mut state, _) = search_endpoints();
+    open_switcher(&mut state);
+    key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
+    let typed = state.handle_input_bytes(b"client-shell");
+    let query = directory_query_id(&typed);
+    key(&mut state, KeyCode::Down, KeyModifiers::empty());
+    key(&mut state, KeyCode::Down, KeyModifiers::empty());
+    let manual = Some(pane_target("pane_1"));
+    assert_eq!(selected(&state), manual);
+    for code in [
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::Backspace,
+    ] {
+        key(&mut state, code, KeyModifiers::empty());
+        assert_eq!(selected(&state), manual, "{code:?}");
+    }
+    state.handle_endpoint_result(
+        "boot-1",
+        &query,
+        Ok(directory_candidates(&["/home/u/client-shell"])),
+    );
+    assert_eq!(selected(&state), manual);
+    let mut refreshed = search_snapshot();
+    refreshed.revision += 1;
+    refreshed.agents[0].state_change_seq += 1;
+    state.set_snapshot(Box::new(refreshed));
+    assert_eq!(selected(&state), manual);
+    let mut refreshed_surface = surface();
+    refreshed_surface.projection_revision += 1;
+    refreshed_surface.surface_revision += 1;
+    state.set_pane_surface(refreshed_surface);
+    state.compose(120, 36).unwrap();
+    assert!(targets(&mut state).contains(manual.as_ref().unwrap()));
 }
 
 #[test]

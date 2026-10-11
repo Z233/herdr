@@ -564,9 +564,7 @@ impl ClientShellState {
                 let inserted = navigator.query.insert(text);
                 if inserted {
                     navigator.filter = None;
-                    if !switcher {
-                        navigator.selected = None;
-                    }
+                    navigator.selected = None;
                 }
                 reconcile = inserted && switcher;
                 true
@@ -822,13 +820,12 @@ impl ClientShellState {
                                 self.overlay.as_mut()
                             {
                                 navigator.filter = None;
+                                navigator.selected = None;
                                 if switcher {
                                     super::switcher_search::reconcile_search_selection(
                                         &rows,
                                         &mut navigator.selected,
                                     );
-                                } else {
-                                    navigator.selected = None;
                                 }
                             }
                         }
