@@ -451,23 +451,6 @@ impl ClientState {
             .map(|key| self.image_id(key))
             .collect::<Vec<_>>();
         self.stale_images.extend(stale);
-        // A wanted asset cancels its pending deletion only when the host holds nothing
-        // conflicting: with deferred cleanup a stale entry can outlive a scroll off/on
-        // cycle and must not delete the restored image, but a same-ID replacement whose
-        // pixels differ must still delete the outdated frame.
-        let desired_signatures = desired
-            .iter()
-            .map(|key| (self.image_id(key), image_signature_from_asset(key)))
-            .collect::<Vec<_>>();
-        let host_images = &self.host.images;
-        self.stale_images.retain(|id| {
-            !desired_signatures.iter().any(|(desired_id, signature)| {
-                desired_id == id
-                    && host_images
-                        .get(id)
-                        .is_none_or(|current| current == signature)
-            })
-        });
         let owned = self
             .scene
             .placements

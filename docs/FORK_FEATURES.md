@@ -52,6 +52,7 @@ MRU（Most Recently Used）指最近使用顺序；endpoint 指本地或 SSH 服
 | 已替代 | 独立 `workspace_picker` 入口 | `44a95b03` 移除。旧 key 静默忽略；`prefix+w` 仅作为方向 chord leader，timeout/Esc 不打开界面。普通搜索使用 `keys.goto`，hold 使用 `workspace_switcher`。 |
 | 已替代 | 服务端 FrozenCopyView / ForkFeatureState、旧 picker/switcher overlay | v0.9.1 合并 `5dd9a2a7` 后由 client shell 和正常 copy mode 实现；保护 F03/F09 行为，不恢复旧模块。 |
 | 已撤销 | ACK 驱动的异步图像上传工作线程 | `761058bc` 等实现曾随 v0.9.3 合入，但 `21c44c43` 已撤销。当前仅保留 F12 压缩；不得把“上传不阻塞输入”当成现有能力。 |
+| 已撤销 | 图片待删除项的恢复取消逻辑 | 移除 `1d58f1aa` 合并时引入的 fork 差异，图片场景清理遵循上游 v0.9.3；F12 压缩及手机 Switcher 等其他 fork 功能保留。此撤销不代表已证实 RootShell 残留图片的原因。 |
 
 ## 当前架构边界
 
