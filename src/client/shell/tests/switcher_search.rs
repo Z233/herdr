@@ -516,6 +516,8 @@ fn switcher_search_group_order_uses_rank_then_mru_then_snapshot() {
     fuzzy.focused = false;
     projected.workspaces.push(fuzzy);
     projected.focused_workspace_id = Some("ws_1".into());
+    state.retire_endpoint(&ClientEndpointId::Local);
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
     state.set_snapshot(Box::new(projected));
     state.record_presented_workspace();
     let mut projected = state.snapshot.as_deref().unwrap().clone();

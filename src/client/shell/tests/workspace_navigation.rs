@@ -28,6 +28,10 @@ fn grouped_workspaces() -> ClientShellSnapshot {
 
 fn navigation_state(mut projected: ClientShellSnapshot) -> (ClientShellState, ClientEndpointId) {
     let (mut state, remote) = state_with_remote();
+    for endpoint in [&ClientEndpointId::Local, &remote] {
+        state.retire_endpoint(endpoint);
+        state.set_endpoint_status(endpoint, ClientEndpointStatus::Online);
+    }
     state.set_snapshot(Box::new(projected.clone()));
     projected.boot_id = "remote-boot".into();
     state.set_endpoint_snapshot(&remote, Box::new(projected));
@@ -556,6 +560,8 @@ fn aggregate_navigation_reveals_overflow_and_preserves_order() {
         let (mut state, remote_id) = state_with_remote();
         let mut remote = workspaces(15);
         remote.boot_id = "remote-boot".into();
+        state.retire_endpoint(&remote_id);
+        state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
         state.set_endpoint_snapshot(&remote_id, Box::new(remote));
         state.sidebar_collapsed = compact;
         state.collapsed_endpoints.insert(remote_id.clone());

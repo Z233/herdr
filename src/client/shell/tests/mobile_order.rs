@@ -108,6 +108,10 @@ fn present(state: &mut ClientShellState, endpoint: &ClientEndpointId, workspace:
 
 fn federated() -> (ClientShellState, ClientEndpointId) {
     let (mut state, remote) = super::fork_navigator::two_endpoints();
+    for endpoint in [&ClientEndpointId::Local, &remote] {
+        state.retire_endpoint(endpoint);
+        state.set_endpoint_status(endpoint, ClientEndpointStatus::Online);
+    }
     state.set_snapshot(Box::new(projection()));
     let mut projected = projection();
     projected.boot_id = "remote-boot".into();
@@ -162,6 +166,12 @@ fn visible_order(state: &mut ClientShellState) -> Vec<(ClientEndpointId, String)
             _ => None,
         })
         .collect()
+}
+
+fn reopened_order(state: &mut ClientShellState) -> Vec<(ClientEndpointId, String)> {
+    state.mode = ClientShellMode::Terminal;
+    state.compose(45, 60).unwrap();
+    visible_order(state)
 }
 
 fn workspace_rect(state: &ClientShellState, endpoint: &ClientEndpointId, workspace: &str) -> Rect {
@@ -334,7 +344,7 @@ fn mobile_order_changes_only_after_presentation_and_rejects_old_identity_recency
     presented.projection_revision = state.snapshot.as_deref().unwrap().revision;
     state.set_pane_surface(presented);
     assert_eq!(
-        visible_order(&mut state)[0],
+        reopened_order(&mut state)[0],
         (remote.clone(), "ws_3".into())
     );
     present(&mut state, &ClientEndpointId::Local, "ws_1");
@@ -342,7 +352,7 @@ fn mobile_order_changes_only_after_presentation_and_rejects_old_identity_recency
         let mut replacement = projection();
         replacement.boot_id = boot.into();
         state.set_endpoint_snapshot_for_generation(&remote, generation, Box::new(replacement));
-        let order = visible_order(&mut state);
+        let order = reopened_order(&mut state);
         assert_eq!(
             &order[3..],
             &[
@@ -440,4 +450,110 @@ fn mobile_order_does_not_change_desktop_grouping_or_endpoint_order() {
         state.navigate_workspace_id,
         state.navigation_target(&ClientEndpointId::Local, "ws_3")
     );
+}
+
+#[test]
+fn workspace_recency_batch_admission_preserves_order_and_ignores_output() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let local = ClientEndpointId::Local;
+    state.set_snapshot(Box::new(projection()));
+    present(&mut state, &local, "ws_1");
+    let baseline = visible_order(&mut state);
+    let mut added = state.snapshot.as_deref().unwrap().clone();
+    added.revision += 1;
+    for number in 4..=5 {
+        added.workspaces.push(ClientShellWorkspace {
+            workspace_id: format!("ws_{number}"),
+            number,
+            label: format!("space-{number}"),
+            focused: false,
+            ..added.workspaces[0].clone()
+        });
+    }
+    state.set_snapshot(Box::new(added));
+    present(&mut state, &local, "ws_1");
+    assert_eq!(visible_order(&mut state), baseline);
+    let expected = ["ws_4", "ws_5", "ws_1", "ws_2", "ws_3"].map(|id| (local.clone(), id.into()));
+    assert_eq!(reopened_order(&mut state), expected);
+    present(&mut state, &local, "ws_1");
+    assert_eq!(reopened_order(&mut state), expected);
+    let unchanged = state.snapshot.as_ref().unwrap().clone();
+    state.set_snapshot(unchanged);
+    assert_eq!(reopened_order(&mut state), expected);
+    present(&mut state, &local, "ws_2");
+    assert_eq!(visible_order(&mut state), expected);
+    assert_eq!(
+        reopened_order(&mut state),
+        ["ws_2", "ws_4", "ws_5", "ws_1", "ws_3"].map(|id| (local.clone(), id.into()))
+    );
+    let mut removed = state.snapshot.as_deref().unwrap().clone();
+    removed.revision += 1;
+    removed
+        .workspaces
+        .retain(|workspace| workspace.workspace_id != "ws_4");
+    state.set_snapshot(Box::new(removed));
+    present(&mut state, &local, "ws_2");
+    assert_eq!(
+        visible_order(&mut state),
+        ["ws_2", "ws_5", "ws_1", "ws_3"].map(|id| (local.clone(), id.into()))
+    );
+}
+
+#[test]
+fn workspace_recency_reconnect_and_boot_snapshots_are_baselines() {
+    let (mut state, remote) = federated();
+    let local = ClientEndpointId::Local;
+    let baseline = visible_order(&mut state);
+    let mut reconnected = projection();
+    reconnected.boot_id = "remote-boot".into();
+    reconnected.revision += 10;
+    reconnected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_4".into(),
+        number: 4,
+        label: "remote-existing".into(),
+        focused: false,
+        ..reconnected.workspaces[0].clone()
+    });
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+    state.set_endpoint_snapshot_for_generation(&remote, 1, Box::new(reconnected.clone()));
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    let expected = [
+        (local.clone(), "ws_1"),
+        (local.clone(), "ws_3"),
+        (local.clone(), "ws_2"),
+        (remote.clone(), "ws_1"),
+        (remote.clone(), "ws_2"),
+        (remote.clone(), "ws_3"),
+        (remote.clone(), "ws_4"),
+    ]
+    .map(|(endpoint, id)| (endpoint, id.into()));
+    assert_ne!(baseline, expected);
+    assert_eq!(reopened_order(&mut state), expected);
+    reconnected.revision += 1;
+    reconnected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_5".into(),
+        number: 5,
+        label: "remote-new".into(),
+        focused: false,
+        ..reconnected.workspaces[0].clone()
+    });
+    state.set_endpoint_snapshot_for_generation(&remote, 1, Box::new(reconnected.clone()));
+    assert_eq!(visible_order(&mut state), expected);
+    assert_eq!(
+        reopened_order(&mut state)[0],
+        (remote.clone(), "ws_5".into())
+    );
+    reconnected.boot_id = "replacement-boot".into();
+    reconnected.revision = 1;
+    reconnected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_6".into(),
+        number: 6,
+        label: "replacement-existing".into(),
+        focused: false,
+        ..reconnected.workspaces[0].clone()
+    });
+    state.set_endpoint_snapshot_for_generation(&remote, 1, Box::new(reconnected));
+    let order = reopened_order(&mut state);
+    assert_eq!(order[0], (local, "ws_1".into()));
+    assert_eq!(order.last(), Some(&(remote, "ws_6".into())));
 }

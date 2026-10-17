@@ -23,7 +23,71 @@ impl WorkspaceNavigationTarget {
 }
 
 impl ClientShellState {
+    pub(super) fn reconcile_workspace_snapshot(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: Option<u64>,
+        snapshot: &ClientShellSnapshot,
+    ) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        let previous_ids = endpoint
+            .snapshot
+            .as_deref()
+            .filter(|previous| {
+                endpoint.status == ClientEndpointStatus::Online
+                    && endpoint.snapshot_generation == generation
+                    && previous.boot_id == snapshot.boot_id
+            })
+            .map(|previous| {
+                previous
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.workspace_id.as_str())
+                    .collect::<HashSet<_>>()
+            });
+        let live_ids = snapshot
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.workspace_id.as_str())
+            .collect::<HashSet<_>>();
+        let retained = |target: &WorkspaceNavigationTarget| {
+            &target.endpoint_id != endpoint_id
+                || (target.boot_id == snapshot.boot_id
+                    && target.generation == generation
+                    && live_ids.contains(target.workspace_id.as_str()))
+        };
+        self.workspace_mru.retain(retained);
+        if let Some(order) = self.mobile_workspace_order.as_mut() {
+            order.retain(retained);
+        }
+        if let Some(previous_ids) = previous_ids {
+            for workspace in snapshot
+                .workspaces
+                .iter()
+                .rev()
+                .filter(|workspace| !previous_ids.contains(workspace.workspace_id.as_str()))
+            {
+                self.workspace_mru.push_front(WorkspaceNavigationTarget {
+                    endpoint_id: endpoint_id.clone(),
+                    workspace_id: workspace.workspace_id.clone(),
+                    boot_id: snapshot.boot_id.clone(),
+                    generation,
+                });
+            }
+            self.workspace_mru.truncate(256);
+        }
+    }
+
     pub(super) fn mobile_ordered_workspace_targets(&self) -> Vec<WorkspaceNavigationTarget> {
+        if let Some(order) = self.mobile_workspace_order.as_ref() {
+            return order.clone();
+        }
         let mut targets = Vec::new();
         for endpoint in &self.endpoints {
             let Some(snapshot) = endpoint.snapshot.as_deref() else {

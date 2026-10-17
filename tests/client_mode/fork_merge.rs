@@ -1,6 +1,9 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 
+#[path = "workspace_recency.rs"]
+mod workspace_recency;
+
 #[test]
 fn fork_merge_mobile_panes_live_hold_focus_fold_and_reopen_recency() {
     let _lock = test_lock();
@@ -1019,10 +1022,12 @@ fn switcher_search_live_acceptance_corrections() {
         .unwrap()
         .to_owned();
     wait_screen(&output, 120, 36, "RestoreParent");
-    input
-        .write_all(b"\x1b[9;3u\x1b[108;3u\x1b[106;3u\x1b[106;3u")
-        .unwrap();
+    input.write_all(b"\x1b[9;3u\x1b[108;3u").unwrap();
+    wait_screen(&output, 120, 36, "RestoreTab");
+    input.write_all(b"\x1b[106;3u\x1b[106;3u").unwrap();
+    save_frame(&evidence, "03-selected-tab-before-search", &output, 120, 36);
     input.write_all(b"\x1b[115;3umissing-query-accept").unwrap();
+    wait_screen(&output, 120, 36, "/ missing-query-accept");
     send_json_request(
         &api,
         &serde_json::json!({
@@ -1032,6 +1037,12 @@ fn switcher_search_live_acceptance_corrections() {
     );
     thread::sleep(Duration::from_millis(400));
     input.write_all(b"\x1b[27u").unwrap();
+    wait_screen(
+        &output,
+        120,
+        36,
+        "search workspaces, tabs, panes, directories",
+    );
     save_frame(&evidence, "03-missing-tab-restored", &output, 120, 36);
     input.write_all(b"\r").unwrap();
     let focused_workspace = |request_id: &str| -> String {
@@ -1058,6 +1069,10 @@ fn switcher_search_live_acceptance_corrections() {
     checks.insert(
         "removed_tab_restores_parent".into(),
         (focused == second_workspace).into(),
+    );
+    checks.insert(
+        "removed_tab_focus".into(),
+        serde_json::json!({"actual":focused,"expected":second_workspace}),
     );
     // Clicking the search input while search is active must not recapture the
     // return selection.

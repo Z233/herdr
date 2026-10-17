@@ -589,6 +589,7 @@ impl ClientShellState {
         if boot_changed {
             self.retire_endpoint_notifications(endpoint_id);
         }
+        self.reconcile_workspace_snapshot(endpoint_id, generation, &snapshot);
         self.endpoints[index]
             .agent_presentation
             .project_snapshot_for_generation(&mut snapshot, generation);

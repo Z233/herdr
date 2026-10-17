@@ -15,11 +15,11 @@ MRU（Most Recently Used）指最近使用顺序；endpoint 指本地或 SSH 服
 |---|---|---|---|
 | F01 多步 prefix chord | input primitive + client controller | prefix 后最多三步，较长的重叠绑定优先；超时与完整 chord 使用同一 action gateway，兼容上游多 prefix。 | `088de543`、`201c8cd7`、`1d58f1aa` |
 | F02 四向创建 pane | runtime/API | 支持 left/down/up/right；left/up 插在目标前，ratio 是第一个 child 的比例；保留显式 target 和 caller target。旧 endpoint 未广告 `pane.split.directional` 时不发送 left/up。 | `088de543`、`5dd9a2a7`、`1d58f1aa` |
-| F03 MRU hold-to-switch | client shell | 按住可配置修饰键循环，Shift 反向，释放修饰键确认；j/k 导航、h/l 展开/折叠。workspace/tab/pane 目标带 endpoint 身份；MRU 每客户端独立，仅在激活实际呈现后更新。 | `693bca67`、`3f87cb27`、`b8d02dc2`、`5dd9a2a7` |
+| F03 MRU hold-to-switch | client shell | 按住可配置修饰键循环，Shift 反向，释放修饰键确认；j/k 导航、h/l 展开/折叠。workspace/tab/pane 目标带 endpoint 身份；MRU 每客户端独立，连续连接期间新增 workspace 首次入列即置顶，同批保留 snapshot 顺序。首次连接及重连快照不算新增；普通输出不更新使用顺序，成功呈现真实切换后才更新。桌面正向初选最新的非当前项，反向初选最旧的非当前项。 | `693bca67`、`3f87cb27`、`b8d02dc2`、`5dd9a2a7` |
 | F04 switcher 内独立搜索 | client shell | 搜索留在 switcher，按匹配质量、MRU、snapshot 顺序排名，目录候选置后。进入搜索后，本次打开不再释放确认；第一次 Esc 恢复列表、选择、展开和滚动，第二次关闭。直接 Go To 不变。 | `8d79fde7` |
 | F05 Zoxide 目录搜索与创建 | endpoint API/runtime | `workspace.search`、`workspace.directory_preview`、`workspace.create` 在所选 endpoint 执行；客户端不读取远端路径。错误和超时可见，响应校验请求、boot 与连接 generation。 | `71833771`、`bc52f25d`、`8688d43d`、`5dd9a2a7` |
 | F06 完整 tab 预览与结构化标签 | client shell + 中立读取 API | 宽屏预览整个选中 tab，保留 ANSI 样式；读取使用明确目标且不改变其他客户端焦点或尺寸。worktree 标签显示仓库与分支；render 只绘制解码后的缓存。 | `6a6b7c81`、`9fe1d558`、`f449792e`、`5dd9a2a7` |
-| F07 移动端 switcher | client shell | 全屏列表支持输入/粘贴搜索；`s` 是查询文本。tap 保持打开，hold/竖拖选择，右划展开 workspace 的全部 pane，左划折叠，释放确认。workspace 使用跨 endpoint MRU；pane 使用本客户端已呈现的焦点历史，打开期间顺序固定，新 pane 追加、删除项移除。 | `682fac82`、`7ccec3cf`、`ad0069d7`、`55e333c6`、`8d79fde7` |
+| F07 移动端 switcher | client shell | 全屏列表支持输入/粘贴搜索；`s` 是查询文本。tap 保持打开，hold/竖拖选择，右划展开 workspace 的全部 pane，左划折叠，释放确认。workspace 使用跨 endpoint MRU，初选仍为当前项；打开期间顺序固定，新 workspace 等下次打开才入列。pane 使用本客户端已呈现的焦点历史，打开期间顺序固定，新 pane 追加、删除项移除。 | `682fac82`、`7ccec3cf`、`ad0069d7`、`55e333c6`、`8d79fde7` |
 | F08 移动端 zoom map | client shell | 展示完整 tab 布局、隐藏邻居及其 agent 状态；点击可换焦点。`pane.layout` 使用明确 pane ID；状态按 endpoint + pane ID 关联，不增加 mobile 专属 wire 字段。 | `0bfe5a04`、`a91b936e`、`0b6309e7`、`5dd9a2a7` |
 | F09 EasyMotion 与 copy initial action | normal client copy mode | 两字符搜索后按标签跳转，支持 smart case、宽字符及 selection anchor；保留进入 copy mode 后启动 EasyMotion 或上滚半页的入口。 | `e97a050a`、`2b7484ec`、`5dd9a2a7` |
 | F10 IME associated text | input primitive | 解析并转发 Kitty keyboard associated text，保留 modifier press/release 语义；共享 TextEditor 在光标处插入，跨读取分片只展开一次。 | `0df99265`、`7a1b143d`、`1d58f1aa` |
@@ -36,7 +36,7 @@ MRU（Most Recently Used）指最近使用顺序；endpoint 指本地或 SSH 服
 | B02 F05 过期响应 | 关闭重开或改 query 后，旧搜索/创建响应可能影响新界面 → generation 不复用；switcher 查询编辑使旧 create 失效，响应不得关闭界面或激活目标。 | `bc52f25d`、`5dd9a2a7`、`2590b96f` | `fork_merge_reopened_navigator_rejects_a_previous_creation_result`；`switcher_search_live_acceptance_corrections` |
 | B03 F06 预览刷新 | metadata/surface 刷新暂时清空预览 → 身份未变时保留内容；endpoint、boot、generation 或目标变化时丢弃。 | `72e1b3d3` | `fork_merge_navigator_preview_keeps_remote_content_during_metadata_refresh`；`fork_merge_navigator_preview_discards_retained_content_when_identity_changes` |
 | B04 F03/F06 桌面外观 | quick-switch popup 几何退化、预览默认背景与 panel 不一致 → hold 保留 inset 几何，Go To 保留自己的几何，预览保留程序背景并隐藏 pane ID。 | `1357e77f`、`4433352f`、`ec0f6d28` | `fork_merge_quick_switch_restores_desktop_inset_geometry`；`fork_merge_navigator_remote_preview_uses_first_row_and_panel_background` |
-| B05 F07 列表顺序 | 移动端顺序退化为 endpoint 分组 → 恢复全局 workspace MRU，未知项稳定回退，pane 顺序在本次打开期间不重排。 | `ad0069d7`、`55e333c6` | `mobile_order_is_flat_global_mru_with_stable_unknown_fallback`；`mobile_panes_recency_is_presented_focus_only_and_order_is_frozen_until_reopen` |
+| B05 F03/F07 列表顺序 | 移动端顺序退化为 endpoint 分组、新 workspace 排在末尾 → 保留全局 workspace MRU 和初始未知项稳定回退，新增项首次入列置顶；workspace 与 pane 顺序在本次打开期间不重排。 | `ad0069d7`、`55e333c6` | `mobile_order_is_flat_global_mru_with_stable_unknown_fallback`；`mobile_panes_recency_is_presented_focus_only_and_order_is_frozen_until_reopen`；`workspace_recency_live_admission_refresh_selection_and_frozen_openings`；`workspace_recency_reconnect_and_boot_snapshots_are_baselines` |
 | B06 F07 边缘滚动 | 同一次 hold 中不能反向滚动 → 下滚后可上滚，中部停止，释放仍选择当前项。 | `34e30872` | `mobile_edge_scroll_down_then_up_same_hold_and_exact_release` |
 | B07 F04/F07 标签与状态 | 展开 pane 缺少状态，窄屏搜索丢失标签/状态图标 → 状态遵循配置，保留 workspace/tab/pane 标签及已有状态图标。 | `02532b92`、`2f8e75e9` | `mobile_panes_status_icons_follow_config_and_survive_narrow_stale_rows`；`switcher_search_live_acceptance_corrections` |
 | B08 F07 手势与失效目标 | 背景客户端 render 取消手势，删除目标后可能误激活 → 无关刷新保留锚点；目标移除或 endpoint 身份变化后取消释放确认。 | `b84fc097`、`0a912163`、`b56fcf2b` | `fork_merge_mobile_hold_and_drag_survives_an_unrelated_snapshot_refresh`；`mobile_panes_deleted_selected_or_anchor_and_endpoint_identity_changes_cancel_release` |
@@ -117,7 +117,7 @@ Fork characterization + upstream regression cases
 | 范围 | Fixture / 黑盒入口 |
 |---|---|
 | F01/F02/F10 | `src/client/shell/tests/fork_input.rs`；`tests/cli/fork_merge.rs`；`src/raw_input.rs` |
-| F03/F04/F05 | `src/client/shell/tests/fork_navigator.rs`、`src/client/shell/tests/switcher_search.rs`；`tests/client_mode/fork_merge.rs` |
+| F03/F04/F05 | `src/client/shell/tests/fork_navigator.rs`、`src/client/shell/tests/switcher_search.rs`；`tests/client_mode/fork_merge.rs`、`tests/client_mode/workspace_recency.rs` |
 | F06 | `src/client/shell/tests/fork_preview.rs`；`tests/client_mode/fork_merge.rs` |
 | F07/F08/F11 | `src/client/shell/tests/fork_mobile.rs`、`src/client/shell/tests/mobile_order.rs`、`src/client/shell/tests/mobile_panes.rs`；`tests/client_mode/fork_merge.rs` |
 | F09 | `src/client/shell/tests/fork_easymotion.rs`；`tests/client_mode/fork_merge.rs` |

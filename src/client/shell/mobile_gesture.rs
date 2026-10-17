@@ -111,7 +111,7 @@ impl ClientShellState {
     }
 
     pub(super) fn arm_mobile_gesture(&mut self) {
-        self.prepare_mobile_pane_order();
+        self.prepare_mobile_switcher_order();
         self.mobile_drag = None;
         self.mobile_hold = self.focused_navigation_target().and_then(|target| {
             let selected = self.mobile_selection(ClientMobileTarget::Workspace {

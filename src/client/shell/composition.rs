@@ -160,7 +160,7 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
-        self.prepare_mobile_pane_order();
+        self.prepare_mobile_switcher_order();
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id

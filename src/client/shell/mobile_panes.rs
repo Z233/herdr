@@ -50,14 +50,20 @@ fn endpoint_panes(endpoint: &ClientShellEndpoint) -> MobilePaneOrder {
 }
 
 impl ClientShellState {
-    pub(super) fn prepare_mobile_pane_order(&mut self) {
+    pub(super) fn prepare_mobile_switcher_order(&mut self) {
         if !self.mobile_layout_active()
             || (self.mode != ClientShellMode::Navigate && !self.mobile_switcher_suspended)
         {
+            self.mobile_workspace_order = None;
             self.mobile_pane_order = None;
             self.mobile_hold = None;
             self.mobile_drag = None;
-        } else if self.mobile_pane_order.is_none() {
+            return;
+        }
+        if self.mobile_workspace_order.is_none() {
+            self.mobile_workspace_order = Some(self.mobile_ordered_workspace_targets());
+        }
+        if self.mobile_pane_order.is_none() {
             let mut groups = self
                 .endpoints
                 .iter()

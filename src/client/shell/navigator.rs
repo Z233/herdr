@@ -101,12 +101,25 @@ impl ClientNavigatorTarget {
 
 impl ClientShellState {
     pub(super) fn record_presented_workspace(&mut self) {
+        let (Some(snapshot), Some(surface)) =
+            (self.snapshot.as_deref(), self.pane_surface.as_ref())
+        else {
+            return;
+        };
+        if surface.boot_id != snapshot.boot_id
+            || surface.projection_revision != snapshot.revision
+            || self.pane_surface_generation != self.active_snapshot_generation
+            || !self.endpoint_is_online(&self.active_endpoint_id)
+        {
+            return;
+        }
         let Some(target) = self.focused_navigation_target() else {
             return;
         };
-        if self.workspace_mru.front() == Some(&target) {
+        if self.last_presented_workspace.as_ref() == Some(&target) {
             return;
         }
+        self.last_presented_workspace = Some(target.clone());
         self.workspace_mru
             .retain(|entry| !entry.matches(&target.endpoint_id, &target.workspace_id));
         self.workspace_mru.push_front(target);
@@ -168,23 +181,29 @@ impl ClientShellState {
                 .position(|recent| recent == target)
                 .unwrap_or(usize::MAX)
         });
+        let focused = self.focused_navigation_target();
+        let selectable = |target: &&WorkspaceNavigationTarget| Some(*target) != focused.as_ref();
+        let selected = if backward {
+            targets.iter().rev().find(selectable)
+        } else {
+            targets.iter().find(selectable)
+        }
+        .or_else(|| targets.first())
+        .cloned();
         self.open_navigator_overlay();
         if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
             navigator.search_focused = false;
             navigator.expanded_workspaces.clear();
             navigator.fork.quick_switch = true;
-            navigator.selected = targets
-                .first()
-                .map(|target| ClientNavigatorTarget::Workspace {
-                    endpoint_id: target.endpoint_id.clone(),
-                    workspace_id: target.workspace_id.clone(),
-                });
+            navigator.selected = selected.map(|target| ClientNavigatorTarget::Workspace {
+                endpoint_id: target.endpoint_id,
+                workspace_id: target.workspace_id,
+            });
             navigator.fork.hold = Some(NavigatorHold {
                 modifiers: KeyModifiers::empty(),
                 targets,
             });
         }
-        self.cycle_hold_navigator(if backward { -1 } else { 1 });
     }
 
     fn cycle_hold_navigator(&mut self, delta: isize) {

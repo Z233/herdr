@@ -56,6 +56,7 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 
 - **Fuzzy search** with a live preview of every pane in the selected tab on wide terminals
 - **MRU quick-switch** — hold `ctrl+tab` to cycle through recent workspaces, release to select (like `cmd+tab`)
+- **New workspaces enter first** — desktop and mobile MRU treat workspaces added during a live connection as newest, without requiring a visit. Initial and reconnect snapshots keep their existing fallback order. New workspaces wait until the next switcher opening; one batch keeps its snapshot order. Ordinary terminal output does not change recency. The desktop's first forward press selects the newest other workspace; reverse selects the oldest other workspace. Mobile still highlights the current workspace.
 - **Shift reverses direction**; during hold, `j/k` navigates, `s` searches, `l/h` expands/collapses
 - **Switcher search stays in the switcher** — entering search from the quick-switch ranks workspaces, tabs, and panes by match quality, MRU, then snapshot order, with directory candidates last. Search latches release-acceptance off for that opening: the first `Esc` restores the original list, selection, expansion, and scroll; the second `Esc` closes. Direct Go To (`prefix+g`) search is unchanged.
 - **Agent state dots** next to workspace names

@@ -70,7 +70,7 @@ fn open(state: &mut ClientShellState) {
 }
 
 fn edge_scroll_state() -> ClientShellState {
-    let mut state = state();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut projected = projection();
     let workspace = projected.workspaces[0].clone();
     for number in 2..=20 {
@@ -83,6 +83,7 @@ fn edge_scroll_state() -> ClientShellState {
         });
     }
     state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
     state.compose(45, 14).unwrap();
     let button = state.hits.mobile_switch;
     event(
