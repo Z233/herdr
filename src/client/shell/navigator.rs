@@ -808,6 +808,17 @@ pub(super) fn hold_rows_for(
     navigator: &ClientNavigatorOverlay,
     targets: &[WorkspaceNavigationTarget],
 ) -> Vec<ClientNavigatorRow> {
+    let workspace_labels = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            endpoint.snapshot.as_deref().map(|snapshot| {
+                (
+                    &endpoint.endpoint_id,
+                    super::sidebar::workspace_labels(snapshot),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
     let mut rows = Vec::new();
     for target in targets {
         let Some(endpoint) = endpoints
@@ -829,10 +840,15 @@ pub(super) fn hold_rows_for(
         let stale = endpoint.status != ClientEndpointStatus::Online
             || navigator.fork.scopes.get(&endpoint.endpoint_id)
                 != Some(&(snapshot.boot_id.clone(), endpoint.snapshot_generation));
+        let label = workspace_labels
+            .get(&target.endpoint_id)
+            .and_then(|labels| labels.get(workspace.workspace_id.as_str()))
+            .copied()
+            .unwrap_or(&workspace.label);
         rows.push(ClientNavigatorRow {
             depth: 0,
-            label: workspace.label.clone(),
-            meta: endpoint.label.clone(),
+            label: label.to_owned(),
+            meta: format!("{} · {}", workspace.label, endpoint.label),
             detail: String::new(),
             agent: None,
             status: Some(workspace.agent_status),

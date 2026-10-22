@@ -887,6 +887,8 @@ fn render_navigator_overlay(
                 .bg(p.panel_bg)
         };
         let is_pane = matches!(r.target, ClientNavigatorTarget::Pane { .. });
+        let is_switcher_workspace =
+            n.fork.quick_switch && matches!(r.target, ClientNavigatorTarget::Workspace { .. });
         let connector = if !is_pane {
             ""
         } else if rows
@@ -910,7 +912,7 @@ fn render_navigator_overlay(
             st
         };
         b.set_style(rect, st);
-        let columns = if r.status.is_some() {
+        let columns = if r.status.is_some() && !is_switcher_workspace {
             if rect.width >= 64 {
                 24
             } else if rect.width >= 36 {
@@ -1015,7 +1017,7 @@ fn render_navigator_overlay(
                     })
             };
             put_right_text(b, rect, rect.y, &signal, signal_style);
-        } else if r.status.is_none() && !r.meta.is_empty() {
+        } else if (r.status.is_none() || is_switcher_workspace) && !r.meta.is_empty() {
             let label_width = display_width(&label).min(rect.width);
             let meta = Rect::new(
                 rect.x.saturating_add(label_width).saturating_add(1),
@@ -1023,7 +1025,12 @@ fn render_navigator_overlay(
                 rect.width.saturating_sub(label_width.saturating_add(1)),
                 1,
             );
-            put_right_text(b, meta, rect.y, &r.meta, st)
+            let meta_style = if is_switcher_workspace && !r.stale && ix != selected {
+                st.fg(p.overlay0).remove_modifier(Modifier::BOLD)
+            } else {
+                st
+            };
+            put_right_text(b, meta, rect.y, &r.meta, meta_style)
         }
     }
     let directory_detail = n.fork.directory.error.clone().or_else(|| {

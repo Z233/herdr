@@ -637,26 +637,44 @@ pub(in crate::client::shell) fn displayed_workspace_status(
         .unwrap_or(workspace.agent_status)
 }
 
+pub(in crate::client::shell) fn workspace_labels(
+    snapshot: &ClientShellSnapshot,
+) -> HashMap<&str, &str> {
+    workspace_entries(snapshot, &HashSet::new())
+        .into_iter()
+        .map(|entry| {
+            let workspace = &snapshot.workspaces[entry.index];
+            (
+                workspace.workspace_id.as_str(),
+                workspace_label(workspace, entry.indented),
+            )
+        })
+        .collect()
+}
+
+fn workspace_label(workspace: &ClientShellWorkspace, indented: bool) -> &str {
+    if indented && !workspace.custom_label {
+        workspace
+            .branch
+            .as_deref()
+            .map(|branch| branch.strip_prefix("worktree/").unwrap_or(branch))
+            .unwrap_or(&workspace.label)
+    } else {
+        &workspace.label
+    }
+}
+
 pub(in crate::client::shell) fn workspace_rows(
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indented: bool,
     config: &SpacesSidebarConfig,
 ) -> Vec<Vec<crate::ui::ResolvedToken>> {
-    let label = if indented && !workspace.custom_label {
-        workspace
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
-            .unwrap_or(&workspace.label)
-    } else {
-        &workspace.label
-    };
     let token_values = workspace.tokens.iter().cloned().collect::<HashMap<_, _>>();
     crate::ui::sidebar_space_rows(
         config,
         crate::ui::SpaceTokenContext {
-            workspace: label,
+            workspace: workspace_label(workspace, indented),
             branch: workspace.branch.as_deref(),
             state_text: status_text(status),
             ahead_behind: workspace.git_ahead_behind,

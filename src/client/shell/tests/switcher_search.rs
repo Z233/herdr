@@ -201,6 +201,206 @@ fn directory_requests(outcome: &ClientShellInput) -> Vec<ClientEndpointId> {
         })
         .collect()
 }
+
+#[test]
+fn switcher_labels_match_sidebar_and_keep_original_label_as_secondary_text() {
+    for (case, custom_label, branch, grouped, expected) in [
+        ("grouped", false, Some("worktree/feature"), true, "feature"),
+        (
+            "branch",
+            false,
+            Some("feature/topic"),
+            true,
+            "feature/topic",
+        ),
+        (
+            "custom",
+            true,
+            Some("worktree/feature"),
+            true,
+            "repo-feature",
+        ),
+        ("missing-branch", false, None, true, "repo-feature"),
+        (
+            "ungrouped",
+            false,
+            Some("worktree/feature"),
+            false,
+            "repo-feature",
+        ),
+    ] {
+        for remote_endpoint in [false, true] {
+            let (mut state, remote) = search_endpoints();
+            let endpoint = if remote_endpoint {
+                remote
+            } else {
+                ClientEndpointId::Local
+            };
+            let mut projected = search_snapshot();
+            projected.workspaces[0]
+                .worktree
+                .as_mut()
+                .unwrap()
+                .is_linked_worktree = false;
+            let child = &mut projected.workspaces[1];
+            child.label = "repo-feature".into();
+            child.custom_label = custom_label;
+            child.branch = branch.map(str::to_owned);
+            child.worktree = Some(ClientShellWorktree {
+                key: if grouped { "repo" } else { "other-repo" }.into(),
+                label: "repo".into(),
+                is_linked_worktree: true,
+            });
+            if remote_endpoint {
+                projected.boot_id = "remote-boot".into();
+            }
+            state.set_endpoint_snapshot(&endpoint, Box::new(projected.clone()));
+            let sidebar = state.compose(160, 44).unwrap();
+            let sidebar_rect = state
+                .hits
+                .workspaces
+                .iter()
+                .find(|hit| hit.endpoint_id == endpoint && hit.workspace_id == "ws_2")
+                .unwrap()
+                .rect;
+            let target = ClientNavigatorTarget::Workspace {
+                endpoint_id: endpoint.clone(),
+                workspace_id: "ws_2".into(),
+            };
+            open_switcher(&mut state);
+            let quick_switch = state.compose(160, 44).unwrap();
+            let quick_rect = state
+                .hits
+                .navigator_rows
+                .iter()
+                .find(|(_, row)| *row == target)
+                .unwrap()
+                .0;
+            key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
+            state.handle_input_bytes(b"feature");
+            let search = state.compose(160, 44).unwrap();
+            let search_rect = state
+                .hits
+                .navigator_rows
+                .iter()
+                .find(|(_, row)| *row == target)
+                .unwrap()
+                .0;
+            let evidence = format!(
+                "SIDEBAR\n{}\nQUICK SWITCH\n{}\nSEARCH\n{}\n",
+                frame_rows(&sidebar).join("\n"),
+                frame_rows(&quick_switch).join("\n"),
+                frame_rows(&search).join("\n"),
+            );
+            if let Ok(directory) = std::env::var("HERDR_SWITCHER_LABEL_ARTIFACT_DIR") {
+                let directory = std::path::Path::new(&directory);
+                std::fs::create_dir_all(directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{case}-{remote_endpoint}.txt")),
+                    &evidence,
+                )
+                .unwrap();
+            }
+            cell_symbol_position(&sidebar, sidebar_rect, expected);
+            for (frame, rect, title_word) in
+                [(&quick_switch, quick_rect, 1), (&search, search_rect, 0)]
+            {
+                let row = frame_rows(frame)[usize::from(rect.y)]
+                    .chars()
+                    .skip(usize::from(rect.x))
+                    .take(usize::from(rect.width))
+                    .collect::<String>();
+                assert_eq!(
+                    row.split_whitespace().nth(title_word),
+                    Some(expected),
+                    "{case}: {evidence}"
+                );
+                assert_eq!(
+                    row.matches("repo-feature").count(),
+                    1 + usize::from(expected == "repo-feature"),
+                    "{case}: {evidence}"
+                );
+                if remote_endpoint {
+                    assert!(row.contains("Remote"), "{case}: {evidence}");
+                }
+            }
+            if case == "grouped" {
+                projected.revision += 1;
+                projected.workspaces[1].branch = Some("worktree/renamed".into());
+                state.set_endpoint_snapshot(&endpoint, Box::new(projected));
+                if endpoint.is_local() {
+                    let mut refreshed_surface = surface();
+                    refreshed_surface.projection_revision = 2;
+                    state.set_pane_surface(refreshed_surface);
+                }
+                let refreshed = state.compose(160, 44).unwrap();
+                let rect = state
+                    .hits
+                    .navigator_rows
+                    .iter()
+                    .find(|(_, row)| *row == target)
+                    .unwrap()
+                    .0;
+                let row = frame_rows(&refreshed)[usize::from(rect.y)]
+                    .chars()
+                    .skip(usize::from(rect.x))
+                    .take(usize::from(rect.width))
+                    .collect::<String>();
+                assert_eq!(row.split_whitespace().next(), Some("renamed"), "{row}");
+                assert!(row.contains("repo-feature"), "{row}");
+                key(&mut state, KeyCode::Esc, KeyModifiers::empty());
+                let restored = state.compose(160, 44).unwrap();
+                let rect = state
+                    .hits
+                    .navigator_rows
+                    .iter()
+                    .find(|(_, row)| *row == target)
+                    .unwrap()
+                    .0;
+                let row = frame_rows(&restored)[usize::from(rect.y)]
+                    .chars()
+                    .skip(usize::from(rect.x))
+                    .take(usize::from(rect.width))
+                    .collect::<String>();
+                assert_eq!(row.split_whitespace().nth(1), Some("renamed"), "{row}");
+                assert!(row.contains("repo-feature"), "{row}");
+            }
+        }
+    }
+}
+
+#[test]
+fn switcher_labels_leave_direct_go_to_workspace_names_unchanged() {
+    let (mut state, _remote) = search_endpoints();
+    let mut projected = search_snapshot();
+    projected.workspaces[0]
+        .worktree
+        .as_mut()
+        .unwrap()
+        .is_linked_worktree = false;
+    projected.workspaces[1].label = "repo-feature".into();
+    projected.workspaces[1].branch = Some("worktree/feature".into());
+    projected.workspaces[1].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    state.set_snapshot(Box::new(projected));
+    state.open_navigator_overlay();
+    let frame = state.compose(160, 44).unwrap();
+    let rect = state.hits.navigator_rows.iter().find(|(_, target)| matches!(target,
+        ClientNavigatorTarget::Workspace { endpoint_id: ClientEndpointId::Local, workspace_id }
+            if workspace_id == "ws_2"
+    )).unwrap().0;
+    let row = frame_rows(&frame)[usize::from(rect.y)]
+        .chars()
+        .skip(usize::from(rect.x))
+        .take(usize::from(rect.width))
+        .collect::<String>();
+    assert_eq!(row.split_whitespace().next(), Some("repo-feature"), "{row}");
+    assert!(row.contains("worktree/feature"), "{row}");
+}
+
 #[test]
 fn switcher_search_slash_s_and_click_entries_latch_off_release_acceptance() {
     for entry in ["slash", "s", "shift-s", "click"] {
