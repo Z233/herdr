@@ -36,6 +36,7 @@ pub(super) fn switcher_search_rows(
         let Some(snapshot) = endpoint.snapshot.as_deref() else {
             continue;
         };
+        let workspace_labels = super::sidebar::workspace_labels(snapshot);
         if let Some(machine_rank) = match_rank(query, &endpoint.label) {
             groups.push(SearchGroup {
                 key: (machine_rank, usize::MAX, endpoint_index, usize::MAX),
@@ -76,11 +77,15 @@ pub(super) fn switcher_search_rows(
                 .push(pane);
         }
         for (workspace_index, workspace) in snapshot.workspaces.iter().enumerate() {
+            let label = workspace_labels
+                .get(workspace.workspace_id.as_str())
+                .copied()
+                .unwrap_or(&workspace.label);
             let repo = workspace
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.label.as_str());
-            let mut ws_fields = vec![endpoint.label.as_str(), workspace.label.as_str()];
+            let mut ws_fields = vec![endpoint.label.as_str(), label, workspace.label.as_str()];
             if let Some(repo) = repo {
                 ws_fields.push(repo);
             }
@@ -204,11 +209,11 @@ pub(super) fn switcher_search_rows(
             };
             let mut rows = vec![ClientNavigatorRow {
                 depth: depth_offset,
-                label: workspace.label.clone(),
+                label: label.to_owned(),
                 meta: if federated {
-                    endpoint.label.clone()
+                    format!("{} · {}", workspace.label, endpoint.label)
                 } else {
-                    workspace.branch.clone().unwrap_or_default()
+                    workspace.label.clone()
                 },
                 detail: workspace.new_workspace_cwd.clone(),
                 agent: None,

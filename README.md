@@ -60,7 +60,7 @@ One client-owned Navigator provides ordinary search and release-to-select switch
 - **Shift reverses direction**; during hold, `j/k` navigates, `s` searches, `l/h` expands/collapses
 - **Switcher search stays in the switcher** — entering search from the quick-switch ranks workspaces, tabs, and panes by match quality, MRU, then snapshot order, with directory candidates last. Search latches release-acceptance off for that opening: the first `Esc` restores the original list, selection, expansion, and scroll; the second `Esc` closes. Direct Go To (`prefix+g`) search is unchanged.
 - **Agent state dots** next to workspace names
-- **Repository names** shown for worktree switcher items, with structured labels (git branch names for grouped child worktrees)
+- **Sidebar-matched workspace names** — desktop quick-switch and Switcher search reuse the sidebar's grouped-worktree names. The original workspace label appears as secondary text alongside the machine name. Direct Go To is unchanged.
 - **Zoxide integration** — search any directory by path and open it as a workspace (see below)
 - **Mobile support** — switcher auto-opens in empty state on narrow terminals
 - **Mobile search** — type or paste while the mobile switcher is open to search it inline; the full-screen switcher shows ranked results with directory creation. `s` is query text. The first `Esc` restores the switcher list, the second returns to the terminal.
