@@ -856,7 +856,7 @@ fn created_result(workspace_id: &str) -> crate::api::schema::ResponseResult {
 }
 
 #[test]
-fn switcher_search_directories_stay_a_separate_final_group() {
+fn switcher_search_directories_rank_with_open_targets() {
     let (mut state, _remote) = search_endpoints();
     open_switcher(&mut state);
     key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
@@ -866,22 +866,33 @@ fn switcher_search_directories_stay_a_separate_final_group() {
         "boot-1",
         &query,
         Ok(directory_candidates(&[
-            "/home/u/client-tools",
+            "/home/u/myclient-tools",
             "/home/u/client",
         ])),
     );
     assert!(repaint && actions.is_empty());
     state.compose(120, 36).unwrap();
     let rows = targets(&mut state);
-    let last_open = rows
+    let first_open = rows
         .iter()
-        .rposition(|target| !matches!(target, ClientNavigatorTarget::Directory { .. }))
+        .position(|target| !matches!(target, ClientNavigatorTarget::Directory { .. }))
         .expect("open rows");
-    let first_directory = rows
+    let exact_directory = rows
         .iter()
-        .position(|target| matches!(target, ClientNavigatorTarget::Directory { .. }))
+        .position(|target| matches!(target, ClientNavigatorTarget::Directory { shown_path, .. } if shown_path == "/home/u/client"))
         .expect("directory rows");
-    assert!(first_directory > last_open);
+    let weak_directory = rows
+        .iter()
+        .position(|target| matches!(target, ClientNavigatorTarget::Directory { shown_path, .. } if shown_path == "/home/u/myclient-tools"))
+        .expect("weak directory");
+    assert!(
+        first_open < exact_directory,
+        "equal ranks prefer an open target"
+    );
+    assert!(
+        exact_directory < weak_directory,
+        "match quality beats provider order"
+    );
     assert_eq!(
         rows.iter()
             .filter(|target| matches!(target, ClientNavigatorTarget::Directory { .. }))
@@ -890,6 +901,138 @@ fn switcher_search_directories_stay_a_separate_final_group() {
     );
     let frame = frame_rows(&state.compose(120, 36).unwrap()).join("\n");
     assert!(frame.contains("create workspace"), "{frame}");
+}
+
+#[test]
+fn switcher_search_directory_reply_updates_only_automatic_selection() {
+    for mobile in [false, true] {
+        for manual in ["none", "keyboard", "hover"] {
+            if mobile && manual == "hover" {
+                continue;
+            }
+            let mut state = if mobile {
+                mobile_shell()
+            } else {
+                let (mut state, _) = search_endpoints();
+                open_switcher(&mut state);
+                key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
+                state
+            };
+            let mut projection = state.snapshot.as_deref().unwrap().clone();
+            projection.workspaces[0].label = "existing-session".into();
+            projection.panes[0].label = Some("working on alpha".into());
+            state.set_snapshot(Box::new(projection));
+            let typed = state.handle_input_bytes(b"alpha");
+            let query = directory_query_id(&typed);
+            assert_eq!(selected(&state), Some(pane_target("pane_1")));
+            if manual == "keyboard" {
+                key(&mut state, KeyCode::Up, KeyModifiers::empty());
+                key(&mut state, KeyCode::Down, KeyModifiers::empty());
+            } else if manual == "hover" {
+                state.compose(120, 36).unwrap();
+                let (rect, _) = state
+                    .hits
+                    .navigator_rows
+                    .iter()
+                    .find(|(_, target)| target == &pane_target("pane_1"))
+                    .unwrap();
+                state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::empty(),
+                })]);
+            }
+            let previous = selected(&state);
+            state.handle_endpoint_result(
+                "boot-1",
+                &query,
+                Ok(directory_candidates(&[
+                    "~/projects/alpha-tools",
+                    "~/notes/alpha/personal",
+                    "~/worktrees/plugin-alpha/feature",
+                    "~/worktrees/plugin-alpha/feature/package",
+                ])),
+            );
+            state.compose(if mobile { 45 } else { 120 }, 60).unwrap();
+            let first = targets(&mut state).first().cloned().unwrap();
+            assert!(
+                matches!(&first, ClientNavigatorTarget::Directory { shown_path, .. }
+                if shown_path == "~/projects/alpha-tools"),
+                "mobile={mobile}, {manual}: {first:?}"
+            );
+            let expected = if manual == "none" {
+                Some(first)
+            } else {
+                previous
+            };
+            assert_eq!(selected(&state), expected, "mobile={mobile}, {manual}");
+            let mut refreshed = state.snapshot.as_deref().unwrap().clone();
+            refreshed.revision += 1;
+            state.set_snapshot(Box::new(refreshed));
+            assert_eq!(
+                selected(&state),
+                expected,
+                "refresh: mobile={mobile}, {manual}"
+            );
+        }
+    }
+}
+
+#[test]
+fn switcher_search_directory_path_matches_and_ties_keep_provider_order() {
+    for (query_text, shown, canonical) in [
+        (
+            "alpha",
+            "~/projects/alpha-tools",
+            "/home/tester/projects/alpha-tools",
+        ),
+        (
+            "/home/tester/projects",
+            "~/projects/alpha-tools",
+            "/home/tester/projects/alpha-tools",
+        ),
+        (
+            "alpha",
+            r"C:\Projects\alpha-tools",
+            r"C:\Projects\alpha-tools",
+        ),
+    ] {
+        let (mut state, _) = search_endpoints();
+        open_switcher(&mut state);
+        key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
+        let typed = state.handle_input_bytes(query_text.as_bytes());
+        let query = directory_query_id(&typed);
+        state.handle_endpoint_result(
+            "boot-1",
+            &query,
+            Ok(crate::api::schema::ResponseResult::WorkspaceSearch {
+                candidates: vec![
+                    crate::api::schema::WorkspaceSearchCandidate {
+                        shown_path: shown.into(),
+                        canonical_path: canonical.into(),
+                        score: 10.0,
+                    },
+                    crate::api::schema::WorkspaceSearchCandidate {
+                        shown_path: format!("{shown}-other"),
+                        canonical_path: format!("{canonical}-other"),
+                        score: 1.0,
+                    },
+                ],
+            }),
+        );
+        state.compose(120, 36).unwrap();
+        let rows = targets(&mut state);
+        assert!(
+            matches!(&rows[0], ClientNavigatorTarget::Directory { shown_path, .. } if shown_path == shown)
+        );
+        assert_eq!(selected(&state), Some(rows[0].clone()));
+        // A snapshot refresh must not discard a directory's selection.
+        let mut refreshed = state.snapshot.as_deref().unwrap().clone();
+        refreshed.revision += 1;
+        state.set_snapshot(Box::new(refreshed));
+        assert_eq!(selected(&state), Some(rows[0].clone()));
+    }
 }
 
 #[test]
@@ -1155,7 +1298,17 @@ fn switcher_search_render_scale_profile() {
         state.set_pane_surface(presented);
         key(&mut state, KeyCode::Tab, KeyModifiers::ALT);
         key(&mut state, KeyCode::Char('s'), KeyModifiers::ALT);
-        state.handle_input_bytes(b"terminal 0");
+        let typed = state.handle_input_bytes(b"terminal 0");
+        state.handle_endpoint_result(
+            "boot-1",
+            &directory_query_id(&typed),
+            Ok(directory_candidates(&[
+                "/profile/terminal-0-a",
+                "/profile/terminal-0-b",
+                "/profile/terminal-0-c",
+                "/profile/terminal-0-d",
+            ])),
+        );
         for _ in 0..20 {
             std::hint::black_box(state.compose(106, 30).expect("switcher search frame"));
         }
@@ -1177,9 +1330,19 @@ fn switcher_search_render_scale_profile() {
         state
             .compose(45, 60)
             .expect("mobile layout before first text");
-        state.handle_raw_events(vec![RawInputEvent::Text(crate::input::TextCommit::new(
-            "terminal 0",
-        ))]);
+        let typed = state.handle_raw_events(vec![RawInputEvent::Text(
+            crate::input::TextCommit::new("terminal 0"),
+        )]);
+        state.handle_endpoint_result(
+            "boot-1",
+            &directory_query_id(&typed),
+            Ok(directory_candidates(&[
+                "/profile/terminal-0-a",
+                "/profile/terminal-0-b",
+                "/profile/terminal-0-c",
+                "/profile/terminal-0-d",
+            ])),
+        );
         assert!(
             matches!(
                 state.overlay,

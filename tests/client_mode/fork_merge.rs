@@ -4,6 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 #[path = "workspace_recency.rs"]
 mod workspace_recency;
 
+#[path = "switcher_directory_rank.rs"]
+mod switcher_directory_rank;
+
 #[test]
 fn fork_merge_mobile_panes_live_hold_focus_fold_and_reopen_recency() {
     let _lock = test_lock();

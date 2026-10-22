@@ -10,6 +10,7 @@ pub(super) struct NavigatorState {
     pub(super) scopes: HashMap<ClientEndpointId, (String, Option<u64>)>,
     pub(super) directory: NavigatorDirectory,
     pub(super) switcher_search: Option<SwitcherSearch>,
+    pub(super) search_selection_manual: bool,
 }
 
 /// Per-open Workspace Switcher search on the shared Navigator controller. Its
@@ -575,6 +576,16 @@ impl ClientShellState {
                 directory.candidates = candidates;
                 directory.loading = false;
                 directory.error = None;
+                if navigator
+                    .fork
+                    .switcher_search
+                    .as_ref()
+                    .is_some_and(|search| search.active)
+                    && !navigator.fork.search_selection_manual
+                {
+                    navigator.selected = None;
+                }
+                self.reconcile_active_search();
             }
             (
                 NavigatorRequestKind::Preview(path),

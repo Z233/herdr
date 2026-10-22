@@ -18,7 +18,8 @@ fn best_rank(query: &str, fields: &[&str]) -> Option<(u8, usize)> {
 
 /// Ranked Switcher search rows: machine groups (direct endpoint matches),
 /// workspace groups sorted by best rank, then client MRU, then endpoint and
-/// snapshot order. Directories stay a separate final group. `mru_targets` is
+/// snapshot order. Directory matches share the ranking, keeping provider order
+/// on ties and yielding to equally ranked open targets. `mru_targets` is
 /// the opening's frozen client workspace order (hold targets or the mobile
 /// switcher order).
 pub(super) fn switcher_search_rows(
@@ -283,13 +284,32 @@ pub(super) fn switcher_search_rows(
             });
         }
     }
+    let mut directory_rows = Vec::new();
+    super::navigator::append_directory_rows(&mut directory_rows, directory);
+    for (index, (candidate, mut row)) in directory.candidates.iter().zip(directory_rows).enumerate()
+    {
+        // Endpoint paths can use either separator, independently of this client OS.
+        let basename = candidate
+            .shown_path
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default();
+        let rank = match_rank(query, basename)
+            .or_else(|| best_rank(query, &[&candidate.shown_path, &candidate.canonical_path]));
+        row.match_rank = rank;
+        groups.push(SearchGroup {
+            key: (
+                rank.unwrap_or((u8::MAX, usize::MAX)),
+                usize::MAX,
+                usize::MAX,
+                index,
+            ),
+            rows: vec![row],
+        });
+    }
     groups.sort_by_key(|group| group.key);
-    let mut rows = groups
-        .into_iter()
-        .flat_map(|group| group.rows)
-        .collect::<Vec<_>>();
-    super::navigator::append_directory_rows(&mut rows, directory);
-    rows
+    groups.into_iter().flat_map(|group| group.rows).collect()
 }
 
 struct PaneRow<'a> {
@@ -302,7 +322,7 @@ struct PaneRow<'a> {
 }
 /// Search auto-selection: retain a selection that still qualifies as a direct
 /// match; otherwise choose the best-ranked matching target. Context-only
-/// ancestors never become automatic candidates; directories are the fallback.
+/// ancestors never become automatic candidates; unranked provider paths are the fallback.
 pub(super) fn reconcile_search_selection(
     rows: &[ClientNavigatorRow],
     selected: &mut Option<ClientNavigatorTarget>,

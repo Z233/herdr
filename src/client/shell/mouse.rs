@@ -1625,6 +1625,7 @@ impl ClientShellState {
                             self.overlay.as_mut()
                         {
                             navigator.selected = Some(target);
+                            navigator.fork.search_selection_manual = true;
                         }
                         outcome.repaint = true;
                     }
@@ -1662,6 +1663,7 @@ impl ClientShellState {
                             self.overlay.as_mut()
                         {
                             navigator.selected = Some(target);
+                            navigator.fork.search_selection_manual = true;
                         }
                         self.accept_navigator_selection(outcome);
                     } else if !super::contains(self.hits.navigator_popup, point) {

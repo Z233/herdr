@@ -265,6 +265,14 @@ impl ClientShellState {
         };
         let rows =
             render::client_navigator_rows(&self.endpoints, &self.active_endpoint_id, navigator);
+        if navigator.fork.search_selection_manual
+            && navigator
+                .selected
+                .as_ref()
+                .is_some_and(|target| rows.iter().any(|row| &row.target == target))
+        {
+            return;
+        }
         if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
             super::switcher_search::reconcile_search_selection(&rows, &mut navigator.selected);
         }
@@ -293,6 +301,7 @@ impl ClientShellState {
         let next =
             (selected as isize + delta).clamp(0, rows.len().saturating_sub(1) as isize) as usize;
         navigator.selected = Some(rows[next].target.clone());
+        navigator.fork.search_selection_manual = true;
     }
 
     pub(super) fn scroll_navigator_to(&mut self, scroll: usize, viewport_rows: usize) {
@@ -312,6 +321,7 @@ impl ClientShellState {
         // Keep the selection in the dragged viewport so rendering does not snap back to it.
         let selected = selected.clamp(navigator.scroll, navigator.scroll + viewport_rows - 1);
         navigator.selected = rows.get(selected).map(|row| row.target.clone());
+        navigator.fork.search_selection_manual = true;
     }
 
     fn move_navigator_workspace(&mut self, forward: bool) {
@@ -565,6 +575,7 @@ impl ClientShellState {
                 if inserted {
                     navigator.filter = None;
                     navigator.selected = None;
+                    navigator.fork.search_selection_manual = false;
                 }
                 reconcile = inserted && switcher;
                 true
@@ -821,6 +832,7 @@ impl ClientShellState {
                             {
                                 navigator.filter = None;
                                 navigator.selected = None;
+                                navigator.fork.search_selection_manual = false;
                                 if switcher {
                                     super::switcher_search::reconcile_search_selection(
                                         &rows,
