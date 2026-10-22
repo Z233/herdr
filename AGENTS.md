@@ -138,7 +138,14 @@ just test               # cargo nextest + maintenance script tests
 just check              # formatting check + cargo nextest + maintenance script tests
 ```
 
-Run `just check` before committing unless Can explicitly accepts narrower validation. Do not bypass failing checks; fix the failure or explain exactly why a narrower check is enough.
+For local macOS/Linux work in this fork, skip Windows cross-compilation unless
+the user explicitly requests it. Run `just ci` followed by
+`just docs-contract-test` instead of `just check`, which includes
+`just windows-lint`. Do not install or repair the Windows cross toolchain for
+routine local tasks. This exception does not change CI, native Windows
+validation, or release requirements.
+
+Outside this exception, run `just check` before committing unless Can explicitly accepts narrower validation. Do not bypass failing checks; fix the failure or explain exactly why a narrower check is enough.
 
 Windows MSVC cross-compilation from Unix requires SDK/CRT headers and libraries.
 Install `xwin` with `cargo install xwin --locked`, then run
